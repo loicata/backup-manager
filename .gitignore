@@ -42,3 +42,4 @@ build/pyinstaller_build/
 
 # App data (user profiles — never commit)
 %APPDATA%/BackupManager/
+.claude/ 

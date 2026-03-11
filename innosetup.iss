@@ -8,7 +8,7 @@
 ; ═══════════════════════════════════════════════════════════════
 
 #define MyAppName "Backup Manager"
-#define MyAppVersion "2.2.8"
+#define MyAppVersion "2.2.9"
 #define MyAppPublisher "Loic Ader"
 #define MyAppURL "mailto:loic@loicata.com"
 #define MyAppExeName "BackupManager.exe"

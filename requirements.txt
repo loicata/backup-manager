@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════
-# Backup Manager v2.2.8 — Dependencies
+# Backup Manager v2.2.9 — Dependencies
 # Python 3.13+ required
 # ═══════════════════════════════════════
 

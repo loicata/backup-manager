@@ -10,9 +10,9 @@ echo.
 
 cd /d "%~dp0"
 
-if not exist "gui.py" (
-    echo  [ERROR] gui.py not found in %CD%
-    echo  This script must be in the same folder as gui.py.
+if not exist "src\__main__.py" (
+    echo  [ERROR] src\__main__.py not found in %CD%
+    echo  This script must be in the project root folder.
     pause
     exit /b 1
 )

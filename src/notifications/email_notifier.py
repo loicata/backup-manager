@@ -33,7 +33,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
 
-from secure_memory import secure_clear
+from src.security.secure_memory import secure_clear
 
 logger = logging.getLogger(__name__)
 

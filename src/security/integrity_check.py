@@ -32,20 +32,34 @@ CHECKSUM_FILE = "app_checksums.json"
 # NOTE: build_pyinstaller.py and setup_msi.py are excluded
 # because they are build-only tools (not shipped in the .exe).
 APP_FILES = [
-    "gui.py", "backup_engine.py", "config.py", "encryption.py",
-    "verification.py", "storage.py", "scheduler.py", "wizard.py",
-    "installer.py", "tray.py", "email_notifier.py",
+    # core
+    "src/core/backup_engine.py", "src/core/config.py", "src/core/scheduler.py",
+    # security
+    "src/security/encryption.py", "src/security/verification.py",
+    "src/security/secure_memory.py", "src/security/integrity_check.py",
+    # storage
+    "src/storage/base.py", "src/storage/local.py", "src/storage/network.py",
+    "src/storage/s3.py", "src/storage/azure.py", "src/storage/gcs.py",
+    "src/storage/sftp.py", "src/storage/proton.py",
+    # ui
+    "src/ui/app.py", "src/ui/wizard.py", "src/ui/tray.py",
+    # notifications
+    "src/notifications/email_notifier.py",
+    # installer
+    "src/installer.py",
+    # entry point
+    "src/__main__.py",
 ]
 
 
 def _get_app_dir() -> Path:
-    """Get the application directory.
+    """Get the application directory (project root).
     In a PyInstaller .exe, files are extracted to a temp folder (sys._MEIPASS).
-    In development, uses the directory containing this script.
+    In development, uses the project root (2 levels up from this file).
     """
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         return Path(sys._MEIPASS)  # PyInstaller temp extraction folder
-    return Path(__file__).parent    # Development: same dir as this file
+    return Path(__file__).parent.parent.parent  # Development: project root
 
 
 def _get_checksum_path() -> Path:

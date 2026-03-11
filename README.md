@@ -1,4 +1,4 @@
-# 💾 Backup Manager v2.2.8
+# 💾 Backup Manager v2.2.9
 
 Complete backup application for **Windows 10/11** built with **Python 3.13**.
 
@@ -105,7 +105,7 @@ First launch: splash → auto-install deps → wizard → integrity check → ap
 
 ---
 
-## 🔄 What's New in v2.2.8
+## 🔄 What's New in v2.2.9
 
 - **3 encryption modes** — none / mirrors only / everything (in Encryption tab AND wizard)
 - **Bandwidth throttling** — per-profile KB/s with presets (100 Mbps, 1 Gbps, 10 Gbps)

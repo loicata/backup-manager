@@ -36,11 +36,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from config import BackupProfile, BackupType, ConfigManager, RetentionPolicy, StorageConfig
-from encryption import get_crypto_engine, ENCRYPTED_EXTENSION
-from storage import get_storage_backend
-from verification import VerificationEngine, IntegrityManifest, VerifyReport
-from secure_memory import secure_clear
+from src.core.config import BackupProfile, BackupType, ConfigManager, RetentionPolicy, StorageConfig
+from src.security.encryption import get_crypto_engine, ENCRYPTED_EXTENSION
+from src.storage import get_storage_backend
+from src.security.verification import VerificationEngine, IntegrityManifest, VerifyReport
+from src.security.secure_memory import secure_clear
 
 
 @dataclass
@@ -652,7 +652,7 @@ class BackupEngine:
                         zf.write(abs_path, rel_path)
                         stats.files_copied += 1
                         stats.total_size += file_size
-                        self._update_progress(i + 1, total)
+                        self._update_progress(i + 1, total, rel_path)
                         self._update_status(f"📦 Compressing [{i+1}/{total}]...")
                     except (OSError, PermissionError) as e:
                         stats.files_failed += 1
@@ -700,7 +700,7 @@ class BackupEngine:
                 shutil.copy2(abs_path, target)
                 stats.files_copied += 1
                 stats.total_size += abs_path.stat().st_size
-                self._update_progress(i + 1, total)
+                self._update_progress(i + 1, total, rel_path)
                 self._update_status(f"📂 Copying [{i+1}/{total}]...")
             except (OSError, PermissionError) as e:
                 stats.files_failed += 1

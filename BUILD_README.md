@@ -1,4 +1,4 @@
-# Backup Manager v2.2.8 — Build Instructions
+# Backup Manager v2.2.9 — Build Instructions
 
 ## Method 1: PyInstaller + Inno Setup (recommended)
 
@@ -24,7 +24,7 @@ The build script:
 1. Download Inno Setup from https://jrsoftware.org/isdl.php
 2. Open `innosetup.iss` in Inno Setup Compiler
 3. Click Build → Compile
-4. Output: `build/dist/BackupManager_Setup_2.2.8.exe`
+4. Output: `build/dist/BackupManager_Setup_2.2.9.exe`
 
 The installer includes:
 - BackupManager.exe + all dependencies
@@ -42,7 +42,7 @@ pip install cx_Freeze
 python setup_msi.py bdist_msi
 ```
 
-Output: `dist/BackupManager-2.2.8-win64.msi`
+Output: `dist/BackupManager-2.2.9-win64.msi`
 
 ---
 

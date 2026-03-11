@@ -30,16 +30,11 @@ PROJECT_DIR = Path(__file__).parent
 BUILD_DIR = PROJECT_DIR / "build"
 DIST_DIR = PROJECT_DIR / "dist"
 
-# All source files to include
-SRC_FILES = [
-    "gui.py", "wizard.py", "installer.py", "config.py",
-    "backup_engine.py", "verification.py", "encryption.py",
-    "storage.py", "scheduler.py", "tray.py",
-    "email_notifier.py", "integrity_check.py", "secure_memory.py",
-]
+# Entry point for the application
+ENTRY_POINT = PROJECT_DIR / "src" / "__main__.py"
 
 
-APP_VERSION = "2.2.8"
+APP_VERSION = "2.2.9"
 
 
 def build():
@@ -82,12 +77,10 @@ def build():
         print("  Installing PyInstaller...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller", "--quiet"])
 
-    # Collect data files
-    add_data = []
-    for f in SRC_FILES:
-        src = PROJECT_DIR / f
-        if src.exists() and f != "gui.py":  # gui.py is the entry point
-            add_data.append(f"--add-data={src};.")
+    # Collect data files — entire src package
+    add_data = [
+        f"--add-data={PROJECT_DIR / 'src'};src",
+    ]
 
     # Include docs
     docs_dir = PROJECT_DIR / "docs"
@@ -139,10 +132,9 @@ VSVersionInfo(
         f"--workpath={BUILD_DIR / 'pyinstaller_build'}",
         f"--specpath={BUILD_DIR}",
         f"--version-file={version_file}",
+        f"--paths={PROJECT_DIR}",  # So PyInstaller finds the src package
         # Hidden imports for optional dependencies
         "--hidden-import=tkinter",
-        # Hidden imports: packages that PyInstaller can't detect automatically
-        # because they're imported dynamically or conditionally.
         "--hidden-import=tkinter.ttk",
         "--hidden-import=json",
         "--hidden-import=hashlib",
@@ -155,10 +147,26 @@ VSVersionInfo(
         "--hidden-import=PIL.ImageDraw",
         "--hidden-import=PIL.ImageFont",
         "--hidden-import=plyer.platforms.win.notification",
-        
+        # Hidden imports for src subpackages
+        "--hidden-import=src",
+        "--hidden-import=src.core",
+        "--hidden-import=src.storage",
+        "--hidden-import=src.security",
+        "--hidden-import=src.ui",
+        "--hidden-import=src.ui.tabs",
+        "--hidden-import=src.notifications",
+        # Exclude unnecessary modules to reduce exe size
+        "--exclude-module=test",
+        "--exclude-module=unittest",
+        "--exclude-module=distutils",
+        "--exclude-module=setuptools",
+        "--exclude-module=pip",
+        "--exclude-module=ensurepip",
+        "--exclude-module=tkinter.test",
+        "--exclude-module=lib2to3",
         "--collect-all=tkinter",
         *add_data,
-        str(PROJECT_DIR / "gui.py"),
+        str(ENTRY_POINT),
     ]
 
     print(f"\n  Running PyInstaller...")

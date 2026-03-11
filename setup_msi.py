@@ -16,30 +16,26 @@ from cx_Freeze import setup, Executable
 # ── Project paths ──
 # Try parent directory first, then check if gui.py exists
 PROJECT_DIR = Path(__file__).parent.parent.resolve()
-if not (PROJECT_DIR / "gui.py").exists():
-    # Maybe we're running from inside the build folder itself
+if not (PROJECT_DIR / "src" / "__main__.py").exists():
     PROJECT_DIR = Path.cwd()
-    if not (PROJECT_DIR / "gui.py").exists():
+    if not (PROJECT_DIR / "src" / "__main__.py").exists():
         PROJECT_DIR = Path.cwd().parent
-    if not (PROJECT_DIR / "gui.py").exists():
-        print(f"ERROR: Cannot find gui.py. Run this script from the backup_app folder:")
-        print(f"  cd backup_app")
-        print(f"  python build/setup_msi.py bdist_msi")
+    if not (PROJECT_DIR / "src" / "__main__.py").exists():
+        print(f"ERROR: Cannot find src/__main__.py. Run this script from the project root:")
+        print(f"  cd <project_root>")
+        print(f"  python setup_msi.py bdist_msi")
         sys.exit(1)
 
 print(f"  Project directory: {PROJECT_DIR}")
 
 # Ensure source dir is in sys.path so cx_Freeze can find modules
 sys.path.insert(0, str(PROJECT_DIR))
-SRC_FILES = [
-    "gui.py", "wizard.py", "installer.py", "config.py",
-    "backup_engine.py", "verification.py", "encryption.py",
-    "storage.py", "scheduler.py",
-]
+# The entire src package is included as a directory
+SRC_PACKAGE = "src"
 
 # ── Version ──
 APP_NAME = "Backup Manager"
-APP_VERSION = "2.2.8"
+APP_VERSION = "2.2.9"
 APP_DESCRIPTION = "Complete backup application for Windows 10/11"
 APP_AUTHOR = "Backup Manager Project"
 APP_ICON = None  # Set to "icon.ico" if you have one
@@ -57,8 +53,8 @@ build_exe_options = {
         "numpy", "pandas", "matplotlib", "scipy",
     ],
     "include_files": [
-        # Include all source modules
-        *[(str(PROJECT_DIR / f), f) for f in SRC_FILES],
+        # Include entire src package
+        (str(PROJECT_DIR / SRC_PACKAGE), SRC_PACKAGE),
         # Include docs if present
         *([(str(PROJECT_DIR / "docs"), "docs")]
           if (PROJECT_DIR / "docs").exists() else []),
@@ -123,7 +119,7 @@ GUI_BASE = "gui" if _cxf_version >= (7, 0) else "Win32GUI"
 
 # ── Main executable ──
 gui_exe = Executable(
-    script=str(PROJECT_DIR / "gui.py"),
+    script=str(PROJECT_DIR / "src" / "__main__.py"),
     base=GUI_BASE,  # No console window
     target_name="BackupManager.exe",
     shortcut_name=APP_NAME,

@@ -93,9 +93,9 @@ except Exception:
 #  Constants
 # ──────────────────────────────────────────────
 APP_TITLE = "Backup Manager"
-APP_VERSION = "2.2.8"
-WINDOW_SIZE = "1120x920"
-MIN_SIZE = (1120, 920)
+APP_VERSION = "2.2.9"
+WINDOW_SIZE = "1030x830"
+MIN_SIZE = (1030, 830)
 
 COLORS = {
     "bg":        "#f5f6fa",
@@ -245,14 +245,14 @@ class BackupManagerApp:
         main_pane.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
         # ── Sidebar ──
-        sidebar = tk.Frame(main_pane, bg=COLORS["sidebar"], width=260)
+        sidebar = tk.Frame(main_pane, bg=COLORS["sidebar"], width=190)
         sidebar.pack_propagate(False)
         main_pane.add(sidebar, weight=0)
 
         # Sidebar header
         header_frame = tk.Frame(sidebar, bg=COLORS["sidebar"])
         header_frame.pack(fill=tk.X, padx=15, pady=(15, 5))
-        tk.Label(header_frame, text="💾 " + APP_TITLE, bg=COLORS["sidebar"],
+        tk.Label(header_frame, text=APP_TITLE, bg=COLORS["sidebar"],
                  fg=COLORS["sidebar_fg"], font=("Segoe UI", 14, "bold")).pack(anchor="w")
         tk.Label(header_frame, text=f"v{APP_VERSION}", bg=COLORS["sidebar"],
                  fg=COLORS["muted"], font=("Segoe UI", 9)).pack(anchor="w")
@@ -307,55 +307,102 @@ class BackupManagerApp:
         self.notebook = ttk.Notebook(self.content_frame)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
 
-        # Tab 1: Run / Status (first for quick access)
+        # Tab 1: Run / Status (no scroll — log expands to fill)
         self.tab_run = ttk.Frame(self.notebook)
+        self._run_inner = self.tab_run
         self.notebook.add(self.tab_run, text='  ▶ Run  ')
         self._build_run_tab()
 
         # Tab 2: General
         self.tab_general = ttk.Frame(self.notebook)
+        self._general_inner = self.tab_general
         self.notebook.add(self.tab_general, text='  ⚙ General  ')
         self._build_general_tab()
 
-        # Tab 3: Storage
-        self.tab_storage = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_storage, text='  💿 Storage  ')
+        # Tab 3: Storage (scrollable)
+        self.tab_storage, self._storage_inner = self._make_scrollable_tab('  💿 Storage  ')
         self._build_storage_tab()
 
         # Tab 4: Mirror Destinations
         self.tab_mirror = ttk.Frame(self.notebook)
+        self._mirror_inner = self.tab_mirror
         self.notebook.add(self.tab_mirror, text='  🔄 Mirror  ')
         self._build_mirror_tab()
 
-        # Tab 4: Encryption
+        # Tab 5: Encryption
         self.tab_encryption = ttk.Frame(self.notebook)
+        self._encryption_inner = self.tab_encryption
         self.notebook.add(self.tab_encryption, text='  🔐 Encryption  ')
         self._build_encryption_tab()
 
-        # Tab 5: Retention Policy
+        # Tab 6: Retention Policy
         self.tab_retention = ttk.Frame(self.notebook)
+        self._retention_inner = self.tab_retention
         self.notebook.add(self.tab_retention, text="  ♻ Retention  ")
         self._build_retention_tab()
 
-        # Tab 6: Schedule
-        self.tab_schedule = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_schedule, text='  🕐 Schedule  ')
+        # Tab 7: Schedule (scrollable)
+        self.tab_schedule, self._schedule_inner = self._make_scrollable_tab('  🕐 Schedule  ')
         self._build_schedule_tab()
 
-        # Tab 7: Email Notifications
+        # Tab 8: Email Notifications
         self.tab_email = ttk.Frame(self.notebook)
+        self._email_inner = self.tab_email
         self.notebook.add(self.tab_email, text='  📧 Email  ')
         self._build_email_tab()
 
-        # Tab 8: History
+        # Tab 9: History
         self.tab_history = ttk.Frame(self.notebook)
+        self._history_inner = self.tab_history
         self.notebook.add(self.tab_history, text='  📋 History  ')
         self._build_history_tab()
 
-        # Tab 9: Recovery
+        # Tab 10: Recovery
         self.tab_recovery = ttk.Frame(self.notebook)
+        self._recovery_inner = self.tab_recovery
         self.notebook.add(self.tab_recovery, text="  🔄 Recovery  ")
         self._build_recovery_tab()
+
+    # ──────────────────────────────────────────
+    #  Scrollable Tab Helper
+    # ──────────────────────────────────────────
+    def _make_scrollable_tab(self, title):
+        """Create a notebook tab with a vertical scrollbar.
+        Returns (outer_frame, inner_frame) — build widgets into inner_frame."""
+        outer = ttk.Frame(self.notebook)
+        self.notebook.add(outer, text=title)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+
+        inner.bind("<Configure>",
+                    lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Mousewheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_mousewheel)
+        canvas.bind("<Leave>", _unbind_mousewheel)
+
+        # Make inner frame stretch to canvas width
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas.find_all()[0], width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        return outer, inner
 
     # ──────────────────────────────────────────
     #  Feature Availability
@@ -421,7 +468,7 @@ class BackupManagerApp:
     #  TAB: General
     # ──────────────────────────────────────────
     def _build_general_tab(self):
-        container = ttk.Frame(self.tab_general)
+        container = ttk.Frame(self._general_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         # Profilee name
@@ -519,7 +566,7 @@ class BackupManagerApp:
     #  TAB: Retention Policy
     # ──────────────────────────────────────────
     def _build_retention_tab(self):
-        container = ttk.Frame(self.tab_retention)
+        container = ttk.Frame(self._retention_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text="Retention policy",
@@ -626,7 +673,7 @@ class BackupManagerApp:
     #  TAB: Storage
     # ──────────────────────────────────────────
     def _build_storage_tab(self):
-        container = ttk.Frame(self.tab_storage)
+        container = ttk.Frame(self._storage_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text='Storage destination',
@@ -956,7 +1003,7 @@ class BackupManagerApp:
     #  TAB: Mirror Destinations (3-2-1 Rule)
     # ──────────────────────────────────────────
     def _build_mirror_tab(self):
-        container = ttk.Frame(self.tab_mirror)
+        container = ttk.Frame(self._mirror_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text="Mirror Destinations — 3-2-1 Rule",
@@ -1203,7 +1250,7 @@ class BackupManagerApp:
     #  TAB: Encryption
     # ──────────────────────────────────────────
     def _build_encryption_tab(self):
-        container = ttk.Frame(self.tab_encryption)
+        container = ttk.Frame(self._encryption_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text='Backup encryption',
@@ -1327,7 +1374,7 @@ class BackupManagerApp:
     #  TAB: Schedule
     # ──────────────────────────────────────────
     def _build_schedule_tab(self):
-        container = ttk.Frame(self.tab_schedule)
+        container = ttk.Frame(self._schedule_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text='Automatic scheduling',
@@ -1479,7 +1526,7 @@ class BackupManagerApp:
     #  TAB: Email Notifications
     # ──────────────────────────────────────────
     def _build_email_tab(self):
-        container = ttk.Frame(self.tab_email)
+        container = ttk.Frame(self._email_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text='Email notifications',
@@ -1644,7 +1691,7 @@ class BackupManagerApp:
     #  TAB: Run / Execution
     # ──────────────────────────────────────────
     def _build_run_tab(self):
-        container = ttk.Frame(self.tab_run)
+        container = ttk.Frame(self._run_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text='Run backup',
@@ -1678,7 +1725,7 @@ class BackupManagerApp:
         log_frame = ttk.LabelFrame(container, text="Log", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        self.log_text = tk.Text(log_frame, font=("Consolas", 9), height=10,
+        self.log_text = tk.Text(log_frame, font=("Consolas", 9), height=1,
                                  state=tk.DISABLED, bg="#2d2d2d", fg="#00ff00",
                                  relief=tk.FLAT, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True)
@@ -1703,7 +1750,7 @@ class BackupManagerApp:
     #  TAB: History
     # ──────────────────────────────────────────
     def _build_history_tab(self):
-        container = ttk.Frame(self.tab_history)
+        container = ttk.Frame(self._history_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text='Backup history',
@@ -1733,7 +1780,7 @@ class BackupManagerApp:
     #  TAB: Recovery
     # ──────────────────────────────────────────
     def _build_recovery_tab(self):
-        container = ttk.Frame(self.tab_recovery)
+        container = ttk.Frame(self._recovery_inner)
         container.pack(fill=tk.BOTH, expand=True, padx=20, pady=15)
 
         ttk.Label(container, text="Restore a backup",
@@ -1859,13 +1906,10 @@ class BackupManagerApp:
         log_frame.pack(fill=tk.X, pady=(5, 0))
 
         self.restore_log = tk.Text(
-            log_frame, font=("Consolas", 9), height=15,
+            log_frame, font=("Consolas", 9), height=13,
             bg="#1e1e1e", fg="#00ff00", insertbackground="#00ff00",
             relief=tk.FLAT, state=tk.DISABLED)
-        restore_scroll = ttk.Scrollbar(log_frame, command=self.restore_log.yview)
-        self.restore_log.configure(yscrollcommand=restore_scroll.set)
-        self.restore_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        restore_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.restore_log.pack(fill=tk.BOTH, expand=True)
 
     # ── Recovery: toggle between browse / available ──
     def _toggle_restore_method(self):
@@ -3472,7 +3516,7 @@ class BackupManagerApp:
     # ──────────────────────────────────────────
     #  Log & History
     # ──────────────────────────────────────────
-    def _on_progress(self, current: int, total: int):
+    def _on_progress(self, current: int, total: int, filename: str = ""):
         pct = min((current / total * 100) if total else 0, 100)
         self.root.after(0, lambda: self.progress_var.set(pct))
         self.root.after(0, lambda: self.lbl_progress_pct.configure(text=f"{pct:.0f}%"))
@@ -3794,43 +3838,9 @@ if __name__ == "__main__":
                 pass
 
     try:
-        # 1. Create root window — keep visible throughout startup
+        # 1. Create root window — hidden until main app is ready
         _root = tk.Tk()
-        _root.title("Backup Manager — Starting...")
-        _root.geometry("400x100")
-        _root.resizable(False, False)
-
-        # Set shield icon immediately (before the window appears in taskbar)
-        try:
-            from PIL import Image, ImageDraw, ImageFont, ImageTk
-            _sz = 64
-            _ico = Image.new("RGBA", (_sz, _sz), (0, 0, 0, 0))
-            _drw = ImageDraw.Draw(_ico)
-            _cx, _cy = _sz // 2, _sz // 2
-            _drw.polygon([(_cx, 2), (_sz-4, _cy-12), (_sz-6, _cy+12),
-                          (_cx, _sz-2), (6, _cy+12), (4, _cy-12)],
-                         fill="#3498db", outline="white")
-            try:
-                _fnt = ImageFont.truetype("arial.ttf", _sz // 3)
-            except (OSError, IOError):
-                _fnt = ImageFont.load_default()
-            _bb = _drw.textbbox((0, 0), "B", font=_fnt)
-            _drw.text((_cx - (_bb[2]-_bb[0])//2, _cy - (_bb[3]-_bb[1])//2 - 1),
-                      "B", fill="white", font=_fnt)
-            _root._startup_icon = ImageTk.PhotoImage(_ico)
-            _root.iconphoto(True, _root._startup_icon)
-        except Exception:
-            pass
-
-        # Center on screen
-        _root.update_idletasks()
-        x = (_root.winfo_screenwidth() - 400) // 2
-        y = (_root.winfo_screenheight() - 100) // 2
-        _root.geometry(f"400x100+{x}+{y}")
-        _startup_label = tk.Label(_root, text="⏳ Starting Backup Manager...",
-                                   font=("Segoe UI", 11))
-        _startup_label.pack(expand=True)
-        _root.update()
+        _root.withdraw()
 
         # 2. Install all missing dependencies automatically
         from installer import auto_install_all
@@ -3854,8 +3864,8 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-        # 5. Launch main application — clear startup splash first
-        _startup_label.destroy()
+        # 5. Launch main application
+        _root.deiconify()
         app = BackupManagerApp(root=_root)
         if auto_run_backup:
             app.root.after(500, app._auto_start_first_backup)

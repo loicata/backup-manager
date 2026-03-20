@@ -49,35 +49,27 @@ class RecoveryTab(ScrollableTab):
 
     def _build_select_backup(self) -> None:
         """Build the 'Select backup' section."""
-        frame = ttk.LabelFrame(
-            self.inner, text="Select backup", padding=Spacing.PAD
-        )
+        frame = ttk.LabelFrame(self.inner, text="Select backup", padding=Spacing.PAD)
         frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
         row = ttk.Frame(frame)
         row.pack(fill="x")
         self.backup_path_var = tk.StringVar()
         self.backup_path_var.trace_add("write", self._on_backup_path_changed)
-        ttk.Entry(row, textvariable=self.backup_path_var).pack(
-            side="left", fill="x", expand=True
-        )
+        ttk.Entry(row, textvariable=self.backup_path_var).pack(side="left", fill="x", expand=True)
         ttk.Button(row, text="Browse...", command=self._browse_backup).pack(
             side="right", padx=(Spacing.SMALL, 0)
         )
 
     def _build_restore_destination(self) -> None:
         """Build the 'Restore destination' section."""
-        frame = ttk.LabelFrame(
-            self.inner, text="Restore destination", padding=Spacing.PAD
-        )
+        frame = ttk.LabelFrame(self.inner, text="Restore destination", padding=Spacing.PAD)
         frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
         row = ttk.Frame(frame)
         row.pack(fill="x")
         self.dest_path_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.dest_path_var).pack(
-            side="left", fill="x", expand=True
-        )
+        ttk.Entry(row, textvariable=self.dest_path_var).pack(side="left", fill="x", expand=True)
         ttk.Button(row, text="Browse...", command=self._browse_dest).pack(
             side="right", padx=(Spacing.SMALL, 0)
         )
@@ -91,17 +83,12 @@ class RecoveryTab(ScrollableTab):
 
         self.password_var = tk.StringVar()
         self.password_var.trace_add("write", self._on_password_changed)
-        self._pw_entry = ttk.Entry(
-            pw_frame, textvariable=self.password_var, show="●"
-        )
+        self._pw_entry = ttk.Entry(pw_frame, textvariable=self.password_var, show="●")
         self._pw_entry.pack(fill="x")
 
         ttk.Label(
             pw_frame,
-            text=(
-                "We recommend always typing your password manually "
-                "to verify it is correct."
-            ),
+            text=("We recommend always typing your password manually " "to verify it is correct."),
             foreground=Colors.WARNING,
             font=Fonts.small(),
             wraplength=1200,
@@ -112,7 +99,8 @@ class RecoveryTab(ScrollableTab):
         """Build the Restore button and status label."""
         btn_frame = ttk.Frame(self.inner)
         btn_frame.pack(
-            fill="x", padx=Spacing.LARGE,
+            fill="x",
+            padx=Spacing.LARGE,
             pady=(Spacing.MEDIUM, Spacing.LARGE),
         )
 
@@ -124,18 +112,15 @@ class RecoveryTab(ScrollableTab):
         )
         self.restore_btn.pack(side="left")
 
-        self.status_label = ttk.Label(
-            btn_frame, text="", foreground=Colors.TEXT_SECONDARY
-        )
+        self.status_label = ttk.Label(btn_frame, text="", foreground=Colors.TEXT_SECONDARY)
         self.status_label.pack(side="left", padx=Spacing.LARGE)
 
     def _build_retrieve_section(self) -> None:
         """Build the 'Retrieve backup' section at the bottom."""
-        retrieve_frame = ttk.LabelFrame(
-            self.inner, text="Retrieve backup", padding=Spacing.PAD
-        )
+        retrieve_frame = ttk.LabelFrame(self.inner, text="Retrieve backup", padding=Spacing.PAD)
         retrieve_frame.pack(
-            fill="x", padx=Spacing.LARGE,
+            fill="x",
+            padx=Spacing.LARGE,
             pady=(Spacing.MEDIUM, Spacing.LARGE),
         )
 
@@ -155,9 +140,7 @@ class RecoveryTab(ScrollableTab):
         self._source_combo.bind("<<ComboboxSelected>>", self._on_source_changed)
 
         # --- Storage type (radio buttons) ---
-        self._type_frame = ttk.LabelFrame(
-            retrieve_frame, text="Storage type", padding=Spacing.PAD
-        )
+        self._type_frame = ttk.LabelFrame(retrieve_frame, text="Storage type", padding=Spacing.PAD)
         self._type_frame.pack(fill="x", pady=(Spacing.MEDIUM, 0))
 
         self.retrieve_type_var = tk.StringVar(value=StorageType.SFTP.value)
@@ -201,9 +184,9 @@ class RecoveryTab(ScrollableTab):
         ttk.Entry(dest_row, textvariable=self.retrieve_dest_var).pack(
             side="left", fill="x", expand=True
         )
-        ttk.Button(
-            dest_row, text="Browse...", command=self._browse_retrieve_dest
-        ).pack(side="right", padx=(Spacing.SMALL, 0))
+        ttk.Button(dest_row, text="Browse...", command=self._browse_retrieve_dest).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
 
         # --- Retrieve button ---
         dl_row = ttk.Frame(retrieve_frame)
@@ -217,9 +200,7 @@ class RecoveryTab(ScrollableTab):
         )
         self.retrieve_btn.pack(side="left")
 
-        self.retrieve_label = ttk.Label(
-            dl_row, text="", foreground=Colors.TEXT_SECONDARY
-        )
+        self.retrieve_label = ttk.Label(dl_row, text="", foreground=Colors.TEXT_SECONDARY)
         self.retrieve_label.pack(side="left", padx=Spacing.LARGE)
 
         # Show initial config
@@ -241,7 +222,8 @@ class RecoveryTab(ScrollableTab):
             side="left", fill="x", expand=True
         )
         ttk.Button(
-            path_row, text="Browse...",
+            path_row,
+            text="Browse...",
             command=lambda: self._browse_to_var(self._ret_local_path_var),
         ).pack(side="right", padx=(Spacing.SMALL, 0))
 
@@ -277,28 +259,23 @@ class RecoveryTab(ScrollableTab):
 
         self._ret_sftp_vars: dict[str, tk.StringVar] = {}
         for label, key, default in fields:
-            ttk.Label(
-                frame, text=f"{label}:"
-            ).pack(anchor="w", pady=(Spacing.SMALL, 0))
+            ttk.Label(frame, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
             var = tk.StringVar(value=default)
             self._ret_sftp_vars[key] = var
 
             if key == "sftp_key_path":
                 f = ttk.Frame(frame)
                 f.pack(fill="x")
-                ttk.Entry(f, textvariable=var).pack(
-                    side="left", fill="x", expand=True
-                )
+                ttk.Entry(f, textvariable=var).pack(side="left", fill="x", expand=True)
                 ttk.Button(
-                    f, text="Browse...",
+                    f,
+                    text="Browse...",
                     command=lambda v=var: self._browse_key_to_var(v),
                 ).pack(side="right", padx=(Spacing.SMALL, 0))
             elif "password" in key or "passphrase" in key:
                 ttk.Entry(frame, textvariable=var, show="●").pack(fill="x")
             elif key == "sftp_port":
-                ttk.Spinbox(
-                    frame, textvariable=var, from_=1, to=65535, width=8
-                ).pack(anchor="w")
+                ttk.Spinbox(frame, textvariable=var, from_=1, to=65535, width=8).pack(anchor="w")
             else:
                 ttk.Entry(frame, textvariable=var).pack(fill="x")
 
@@ -310,12 +287,21 @@ class RecoveryTab(ScrollableTab):
         ttk.Label(frame, text="Provider:").pack(anchor="w")
         self._ret_s3_provider_var = tk.StringVar(value="aws")
         providers = [
-            "aws", "minio", "wasabi", "ovh", "scaleway",
-            "digitalocean", "cloudflare", "backblaze_s3", "other",
+            "aws",
+            "minio",
+            "wasabi",
+            "ovh",
+            "scaleway",
+            "digitalocean",
+            "cloudflare",
+            "backblaze_s3",
+            "other",
         ]
         ttk.Combobox(
-            frame, textvariable=self._ret_s3_provider_var,
-            values=providers, state="readonly",
+            frame,
+            textvariable=self._ret_s3_provider_var,
+            values=providers,
+            state="readonly",
         ).pack(fill="x")
 
         fields = [
@@ -329,9 +315,7 @@ class RecoveryTab(ScrollableTab):
 
         self._ret_s3_vars: dict[str, tk.StringVar] = {}
         for label, key, default in fields:
-            ttk.Label(
-                frame, text=f"{label}:"
-            ).pack(anchor="w", pady=(Spacing.SMALL, 0))
+            ttk.Label(frame, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
             var = tk.StringVar(value=default)
             self._ret_s3_vars[key] = var
             if "secret" in key:
@@ -354,9 +338,7 @@ class RecoveryTab(ScrollableTab):
 
         self._ret_proton_vars: dict[str, tk.StringVar] = {}
         for label, key, default in fields:
-            ttk.Label(
-                frame, text=f"{label}:"
-            ).pack(anchor="w", pady=(Spacing.SMALL, 0))
+            ttk.Label(frame, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
             var = tk.StringVar(value=default)
             self._ret_proton_vars[key] = var
             if "password" in key or "2fa" in key:
@@ -469,9 +451,7 @@ class RecoveryTab(ScrollableTab):
         """Download everything from the configured remote source."""
         retrieve_dest = self.retrieve_dest_var.get().strip()
         if not retrieve_dest:
-            messagebox.showwarning(
-                "Retrieve", "Please select a retrieve destination."
-            )
+            messagebox.showwarning("Retrieve", "Please select a retrieve destination.")
             return
 
         config = self._build_retrieve_storage_config()
@@ -490,9 +470,7 @@ class RecoveryTab(ScrollableTab):
                 engine = BackupEngine.__new__(BackupEngine)
                 backend = engine._get_backend(config)
                 local_path = backend.download_all(dest)
-                self.after(
-                    0, lambda: self._on_retrieve_done(str(local_path))
-                )
+                self.after(0, lambda: self._on_retrieve_done(str(local_path)))
             except AttributeError:
                 # Fallback: download each backup individually
                 try:
@@ -500,30 +478,22 @@ class RecoveryTab(ScrollableTab):
                     if not backups:
                         self.after(
                             0,
-                            lambda: self._on_retrieve_error(
-                                "No files found on remote."
-                            ),
+                            lambda: self._on_retrieve_error("No files found on remote."),
                         )
                         return
                     last_path = None
                     for b in backups:
-                        last_path = backend.download_backup(
-                            b["name"], dest
-                        )
+                        last_path = backend.download_backup(b["name"], dest)
                     self.after(
                         0,
                         lambda: self._on_retrieve_done(str(dest)),
                     )
                 except Exception as e2:
                     logger.error("Failed to retrieve backups: %s", e2)
-                    self.after(
-                        0, lambda: self._on_retrieve_error(str(e2))
-                    )
+                    self.after(0, lambda: self._on_retrieve_error(str(e2)))
             except Exception as e:
                 logger.error("Failed to retrieve: %s", e)
-                self.after(
-                    0, lambda: self._on_retrieve_error(str(e))
-                )
+                self.after(0, lambda: self._on_retrieve_error(str(e)))
 
         threading.Thread(target=_do_retrieve, daemon=True).start()
 
@@ -534,9 +504,7 @@ class RecoveryTab(ScrollableTab):
             local_path: Path to the downloaded backup folder.
         """
         self.retrieve_btn.state(["!disabled"])
-        self.retrieve_label.config(
-            text="Retrieve complete", foreground=Colors.SUCCESS
-        )
+        self.retrieve_label.config(text="Retrieve complete", foreground=Colors.SUCCESS)
         self.backup_path_var.set(local_path)
 
     def _on_retrieve_error(self, error: str) -> None:
@@ -546,9 +514,7 @@ class RecoveryTab(ScrollableTab):
             error: Error message.
         """
         self.retrieve_btn.state(["!disabled"])
-        self.retrieve_label.config(
-            text=f"Error: {error}", foreground=Colors.DANGER
-        )
+        self.retrieve_label.config(text=f"Error: {error}", foreground=Colors.DANGER)
 
     # ------------------------------------------------------------------
     # Browse helpers
@@ -653,14 +619,10 @@ class RecoveryTab(ScrollableTab):
             return
         src = Path(backup_path)
         if not src.is_dir():
-            messagebox.showwarning(
-                "Restore", f"Backup folder does not exist:\n{backup_path}"
-            )
+            messagebox.showwarning("Restore", f"Backup folder does not exist:\n{backup_path}")
             return
         if not dest_path:
-            messagebox.showwarning(
-                "Restore", "Please select a restore destination."
-            )
+            messagebox.showwarning("Restore", "Please select a restore destination.")
             return
 
         password = self._get_effective_password()
@@ -704,9 +666,7 @@ class RecoveryTab(ScrollableTab):
             if not files:
                 self.after(
                     0,
-                    lambda: self._restore_done(
-                        False, "No files found in backup folder"
-                    ),
+                    lambda: self._restore_done(False, "No files found in backup folder"),
                 )
                 return
 
@@ -716,9 +676,7 @@ class RecoveryTab(ScrollableTab):
                 if f.suffix == ".wbenc":
                     if not password:
                         skipped += 1
-                        logger.warning(
-                            "Skipped encrypted file (no password): %s", rel
-                        )
+                        logger.warning("Skipped encrypted file (no password): %s", rel)
                         continue
                     target = dst / rel.with_suffix("")
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -744,10 +702,7 @@ class RecoveryTab(ScrollableTab):
 
             success = (copied + decrypted) > 0 and skipped == 0
             if copied + decrypted == 0:
-                msg = (
-                    f"Restore failed — {skipped} files skipped "
-                    "(wrong password?)"
-                )
+                msg = f"Restore failed — {skipped} files skipped " "(wrong password?)"
             elif skipped > 0:
                 msg = f"Restore partial — {', '.join(parts)}"
             else:

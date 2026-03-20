@@ -36,9 +36,7 @@ class RetentionTab(ScrollableTab):
             ttk.Label(row, text=label).pack(side="left")
             var = tk.IntVar(value=default)
             self._gfs_vars[key] = var
-            spinbox = ttk.Spinbox(
-                row, textvariable=var, from_=0, to=998, width=8
-            )
+            spinbox = ttk.Spinbox(row, textvariable=var, from_=0, to=998, width=8)
             spinbox.pack(side="right")
             var.trace_add("write", lambda *_: self._update_summary())
 
@@ -84,9 +82,7 @@ class RetentionTab(ScrollableTab):
         elif user_weekly == 1:
             lines.append("  • 1 week of history (1 weekly backup)")
         else:
-            lines.append(
-                f"  • {user_weekly} weeks of history ({user_weekly} weekly backups)"
-            )
+            lines.append(f"  • {user_weekly} weeks of history ({user_weekly} weekly backups)")
 
         # Monthly line
         if user_monthly == 0:
@@ -94,9 +90,7 @@ class RetentionTab(ScrollableTab):
         elif user_monthly == 1:
             lines.append("  • 1 month of history (1 monthly backup)")
         else:
-            lines.append(
-                f"  • {user_monthly} months of history ({user_monthly} monthly backups)"
-            )
+            lines.append(f"  • {user_monthly} months of history ({user_monthly} monthly backups)")
 
         # Total calculation
         total = real_daily + max(real_weekly - 1, 0) + max(real_monthly - 1, 0)

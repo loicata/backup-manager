@@ -229,7 +229,7 @@ class S3Storage(StorageBackend):
         for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
-                rel = key[len(prefix):]
+                rel = key[len(prefix) :]
                 if not rel:
                     continue
                 local_file = dst / rel

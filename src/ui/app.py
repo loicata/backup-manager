@@ -280,7 +280,12 @@ class BackupManagerApp:
         idx = 0
         # Active header
         self.profile_listbox.insert("end", "ACTIVE PROFILES")
-        self.profile_listbox.itemconfig(idx, fg=Colors.TEXT_DISABLED, selectbackground=Colors.SIDEBAR_BG, selectforeground=Colors.TEXT_DISABLED)
+        self.profile_listbox.itemconfig(
+            idx,
+            fg=Colors.TEXT_DISABLED,
+            selectbackground=Colors.SIDEBAR_BG,
+            selectforeground=Colors.TEXT_DISABLED,
+        )
         self._header_indices.add(idx)
         self._listbox_profile_map.append((idx, None))
         idx += 1
@@ -292,13 +297,20 @@ class BackupManagerApp:
 
         # Spacer + Inactive header
         self.profile_listbox.insert("end", "")
-        self.profile_listbox.itemconfig(idx, selectbackground=Colors.SIDEBAR_BG, selectforeground=Colors.SIDEBAR_BG)
+        self.profile_listbox.itemconfig(
+            idx, selectbackground=Colors.SIDEBAR_BG, selectforeground=Colors.SIDEBAR_BG
+        )
         self._header_indices.add(idx)
         self._listbox_profile_map.append((idx, None))
         idx += 1
 
         self.profile_listbox.insert("end", "INACTIVE PROFILES")
-        self.profile_listbox.itemconfig(idx, fg=Colors.TEXT_DISABLED, selectbackground=Colors.SIDEBAR_BG, selectforeground=Colors.TEXT_DISABLED)
+        self.profile_listbox.itemconfig(
+            idx,
+            fg=Colors.TEXT_DISABLED,
+            selectbackground=Colors.SIDEBAR_BG,
+            selectforeground=Colors.TEXT_DISABLED,
+        )
         self._header_indices.add(idx)
         self._listbox_profile_map.append((idx, None))
         idx += 1

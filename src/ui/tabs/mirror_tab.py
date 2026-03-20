@@ -130,9 +130,9 @@ class MirrorTab(ScrollableTab):
                 row = ttk.Frame(f)
                 row.pack(fill="x")
                 ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
-                ttk.Button(
-                    row, text="Browse...", command=self._browse_ssh_key
-                ).pack(side="right", padx=(Spacing.SMALL, 0))
+                ttk.Button(row, text="Browse...", command=self._browse_ssh_key).pack(
+                    side="right", padx=(Spacing.SMALL, 0)
+                )
             elif "password" in key or "passphrase" in key:
                 ttk.Entry(f, textvariable=var, show="●").pack(fill="x")
             elif key == "sftp_port":
@@ -183,6 +183,7 @@ class MirrorTab(ScrollableTab):
                 ttk.Entry(f, textvariable=var).pack(fill="x")
 
         from src.ui.tabs.storage_tab import StorageTab
+
         StorageTab._add_proton_guide(f)
 
         self._on_type_changed()

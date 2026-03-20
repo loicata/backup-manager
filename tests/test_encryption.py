@@ -138,14 +138,11 @@ class TestEvaluatePassword:
     def test_short_password(self):
         assert "too short" in evaluate_password("abc")
 
-    def test_digits_only(self):
-        assert "only digits" in evaluate_password("12345678")
+    def test_below_sixteen(self):
+        assert "too short" in evaluate_password("Pass1234!")
 
-    def test_letters_only(self):
-        assert "only letters" in evaluate_password("abcdefgh")
-
-    def test_medium_password(self):
-        assert "stronger" in evaluate_password("Pass1234!")
+    def test_exactly_sixteen(self):
+        assert evaluate_password("1234567890123456") == ""
 
     def test_strong_password(self):
         assert evaluate_password("MyStr0ng!Pass#2026") == ""

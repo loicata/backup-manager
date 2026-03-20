@@ -184,7 +184,7 @@ def _build_html(
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
                            border-top: 1px solid #eee; text-align: center;">
-                    Backup Manager v3.0.1
+                    Backup Manager v3.1.1
                 </td>
             </tr>
         </table>

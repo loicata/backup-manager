@@ -37,7 +37,7 @@ class ScheduleTab(ScrollableTab):
         row1.pack(fill="x")
 
         ttk.Label(row1, text="Frequency:").pack(side="left")
-        self.freq_var = tk.StringVar(value=ScheduleFrequency.WEEKLY.value)
+        self.freq_var = tk.StringVar(value=ScheduleFrequency.DAILY.value)
         ttk.Combobox(
             row1,
             textvariable=self.freq_var,

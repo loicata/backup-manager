@@ -114,20 +114,27 @@ class MirrorTab(ScrollableTab):
         f = ttk.Frame(self._config_container)
         self._config_frames["sftp"] = f
         self._sftp_vars = {}
-        for label, key, default, show in [
-            ("Host", "sftp_host", "", ""),
-            ("Port", "sftp_port", "22", ""),
-            ("Username", "sftp_username", "", ""),
-            ("Password", "sftp_password", "", "●"),
-            ("SSH key path", "sftp_key_path", "", ""),
-            ("Key passphrase", "sftp_key_passphrase", "", "●"),
-            ("Remote path", "sftp_remote_path", "/home/username/backups", ""),
+        for label, key, default in [
+            ("Host SFTP", "sftp_host", ""),
+            ("Port", "sftp_port", "22"),
+            ("Username", "sftp_username", ""),
+            ("Password (leave empty if using SSH key)", "sftp_password", ""),
+            ("SSH private key (optional — replaces password)", "sftp_key_path", ""),
+            ("Key passphrase (if key is protected)", "sftp_key_passphrase", ""),
+            ("Remote path", "sftp_remote_path", "/home/username/backups"),
         ]:
-            ttk.Label(f, text=f"{label}:").pack(anchor="w")
+            ttk.Label(f, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
             var = tk.StringVar(value=default)
             self._sftp_vars[key] = var
-            if show:
-                ttk.Entry(f, textvariable=var, show=show).pack(fill="x")
+            if key == "sftp_key_path":
+                row = ttk.Frame(f)
+                row.pack(fill="x")
+                ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
+                ttk.Button(
+                    row, text="Browse...", command=self._browse_ssh_key
+                ).pack(side="right", padx=(Spacing.SMALL, 0))
+            elif "password" in key or "passphrase" in key:
+                ttk.Entry(f, textvariable=var, show="●").pack(fill="x")
             elif key == "sftp_port":
                 ttk.Spinbox(f, textvariable=var, from_=1, to=65535, width=8).pack(anchor="w")
             else:
@@ -161,16 +168,36 @@ class MirrorTab(ScrollableTab):
         self._config_frames["proton"] = f
         self._proton_vars = {}
         for label, key, default in [
-            ("Username", "proton_username", ""),
-            ("Password", "proton_password", ""),
+            ("Proton username", "proton_username", ""),
+            ("Proton password", "proton_password", ""),
+            ("2FA seed (optional)", "proton_2fa", ""),
             ("Remote path", "proton_remote_path", "/Backups"),
+            ("rclone path (optional)", "proton_rclone_path", ""),
         ]:
-            ttk.Label(f, text=f"{label}:").pack(anchor="w")
+            ttk.Label(f, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
             var = tk.StringVar(value=default)
             self._proton_vars[key] = var
-            ttk.Entry(f, textvariable=var).pack(fill="x")
+            if "password" in key or "2fa" in key:
+                ttk.Entry(f, textvariable=var, show="●").pack(fill="x")
+            else:
+                ttk.Entry(f, textvariable=var).pack(fill="x")
+
+        from src.ui.tabs.storage_tab import StorageTab
+        StorageTab._add_proton_guide(f)
 
         self._on_type_changed()
+
+    def _browse_ssh_key(self):
+        """Browse for SSH private key file."""
+        path = filedialog.askopenfilename(
+            title="Select SSH private key",
+            filetypes=[
+                ("SSH keys", "*.pem *.key *.ppk id_*"),
+                ("All files", "*.*"),
+            ],
+        )
+        if path:
+            self._sftp_vars["sftp_key_path"].set(path)
 
     def _on_type_changed(self, *args):
         """Show config fields for selected storage type."""
@@ -187,6 +214,8 @@ class MirrorTab(ScrollableTab):
             self._set_state_recursive(child, state)
 
     def _set_state_recursive(self, widget, state):
+        if widget is self.test_label:
+            return
         try:
             widget.configure(state=state)
         except tk.TclError:

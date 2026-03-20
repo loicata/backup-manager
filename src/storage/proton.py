@@ -238,6 +238,19 @@ class ProtonDriveStorage(StorageBackend):
         """Get free space (not available for Proton Drive)."""
         return None
 
+    def download_backup(self, remote_name: str, local_dir: Path) -> Path:
+        """Download a backup from Proton Drive via rclone."""
+        local_dir.mkdir(parents=True, exist_ok=True)
+        dst = local_dir / remote_name
+        dst.mkdir(parents=True, exist_ok=True)
+        result = self._run_rclone(
+            ["copy", self._remote_spec(remote_name), str(dst)],
+            timeout=600,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"rclone download failed: {result.stderr.strip()}")
+        return dst
+
     def get_file_size(self, remote_name: str) -> Optional[int]:
         """Get file size via rclone size."""
         result = self._run_rclone(["size", self._remote_spec(remote_name), "--json"], timeout=30)

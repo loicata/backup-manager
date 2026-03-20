@@ -155,6 +155,17 @@ class LocalStorage(StorageBackend):
             return sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
         return target.stat().st_size
 
+    def download_backup(self, remote_name: str, local_dir: Path) -> Path:
+        """Download (copy) a local backup to another local directory."""
+        src = self._dest / remote_name
+        dst = local_dir / remote_name
+        if src.is_dir():
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        return dst
+
     def _throttled_copy(self, src: Path, dst: Path) -> None:
         """Copy file with bandwidth throttling."""
         with open(src, "rb") as f_in:

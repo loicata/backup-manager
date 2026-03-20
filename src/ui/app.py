@@ -124,16 +124,7 @@ class BackupManagerApp:
             fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE
         )
 
-        # Profile label
-        tk.Label(
-            sidebar,
-            text="BACKUP PROFILES",
-            bg=Colors.SIDEBAR_BG,
-            fg=Colors.TEXT_DISABLED,
-            font=Fonts.small(),
-        ).pack(anchor="w", padx=Spacing.LARGE)
-
-        # Profile listbox
+        # Profile listbox with section headers
         self.profile_listbox = tk.Listbox(
             sidebar,
             bg=Colors.SIDEBAR_BG,
@@ -152,6 +143,9 @@ class BackupManagerApp:
             pady=Spacing.MEDIUM,
         )
         self.profile_listbox.bind("<<ListboxSelect>>", self._on_profile_selected)
+        # Track which listbox indices are headers (non-selectable)
+        self._header_indices: set[int] = set()
+        self._listbox_profile_map: list[tuple[int, BackupProfile | None]] = []
 
         # Buttons
         btn_frame = tk.Frame(sidebar, bg=Colors.SIDEBAR_BG)
@@ -159,7 +153,7 @@ class BackupManagerApp:
 
         tk.Button(
             btn_frame,
-            text="+ New profile",
+            text="New profile",
             bg=Colors.ACCENT,
             fg="white",
             activebackground=Colors.ACCENT_HOVER,
@@ -169,9 +163,35 @@ class BackupManagerApp:
             command=self._new_profile,
         ).pack(fill="x", pady=2)
 
+        # Move buttons row
+        move_frame = tk.Frame(btn_frame, bg=Colors.SIDEBAR_BG)
+        move_frame.pack(fill="x", pady=2)
+
+        tk.Button(
+            move_frame,
+            text="▲ Up",
+            bg=Colors.SIDEBAR_HOVER,
+            fg=Colors.SIDEBAR_TEXT,
+            activebackground=Colors.SIDEBAR_BG,
+            relief="flat",
+            font=Fonts.small(),
+            command=self._move_profile_up,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 1))
+
+        tk.Button(
+            move_frame,
+            text="▼ Down",
+            bg=Colors.SIDEBAR_HOVER,
+            fg=Colors.SIDEBAR_TEXT,
+            activebackground=Colors.SIDEBAR_BG,
+            relief="flat",
+            font=Fonts.small(),
+            command=self._move_profile_down,
+        ).pack(side="left", expand=True, fill="x", padx=(1, 0))
+
         tk.Button(
             btn_frame,
-            text="🗑 Delete",
+            text="Delete profile",
             bg=Colors.DANGER,
             fg="white",
             activebackground="#c0392b",
@@ -187,7 +207,7 @@ class BackupManagerApp:
 
         tk.Button(
             bottom,
-            text="ℹ About",
+            text="About",
             bg=Colors.SIDEBAR_HOVER,
             fg=Colors.SIDEBAR_TEXT,
             activebackground=Colors.SIDEBAR_BG,
@@ -216,17 +236,17 @@ class BackupManagerApp:
 
         # Add tabs to notebook
         tabs = [
-            (self.tab_run, "▶ Run"),
-            (self.tab_general, "⚙ General"),
-            (self.tab_storage, "💾 Storage"),
-            (self.tab_mirror1, "🔄 Mirror 1"),
-            (self.tab_mirror2, "🔄 Mirror 2"),
-            (self.tab_retention, "📊 Retention"),
-            (self.tab_encryption, "🔒 Encryption"),
-            (self.tab_schedule, "⏰ Schedule"),
-            (self.tab_email, "📧 Email"),
-            (self.tab_recovery, "🔧 Recovery"),
-            (self.tab_history, "📜 History"),
+            (self.tab_run, "Run"),
+            (self.tab_general, "General"),
+            (self.tab_storage, "Storage"),
+            (self.tab_mirror1, "Mirror 1"),
+            (self.tab_mirror2, "Mirror 2"),
+            (self.tab_encryption, "Encryption"),
+            (self.tab_schedule, "Schedule"),
+            (self.tab_retention, "Retention"),
+            (self.tab_email, "Email"),
+            (self.tab_recovery, "Recovery"),
+            (self.tab_history, "History"),
         ]
         for tab, label in tabs:
             self.notebook.add(tab, text=f" {label} ")
@@ -240,7 +260,7 @@ class BackupManagerApp:
         save_frame.pack(fill="x", side="bottom")
         ttk.Button(
             save_frame,
-            text="💾 Save",
+            text="Save",
             style="Accent.TButton",
             command=self._save_profile,
         ).pack(side="right", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
@@ -248,20 +268,67 @@ class BackupManagerApp:
     # --- Profile management ---
 
     def _load_profiles(self):
-        """Load all profiles into the sidebar list."""
+        """Load all profiles into the sidebar list with active/inactive sections."""
         self.profile_listbox.delete(0, "end")
         self._profiles = self.config_manager.get_all_profiles()
-        for p in self._profiles:
-            self.profile_listbox.insert("end", f"  {p.name}")
+        self._header_indices = set()
+        self._listbox_profile_map = []
 
-        if self._profiles:
-            self.profile_listbox.select_set(0)
-            self._load_profile(self._profiles[0])
+        active = [p for p in self._profiles if p.active]
+        inactive = [p for p in self._profiles if not p.active]
+
+        idx = 0
+        # Active header
+        self.profile_listbox.insert("end", "ACTIVE PROFILES")
+        self.profile_listbox.itemconfig(idx, fg=Colors.TEXT_DISABLED, selectbackground=Colors.SIDEBAR_BG, selectforeground=Colors.TEXT_DISABLED)
+        self._header_indices.add(idx)
+        self._listbox_profile_map.append((idx, None))
+        idx += 1
+
+        for p in active:
+            self.profile_listbox.insert("end", f"  {p.name}")
+            self._listbox_profile_map.append((idx, p))
+            idx += 1
+
+        # Spacer + Inactive header
+        self.profile_listbox.insert("end", "")
+        self.profile_listbox.itemconfig(idx, selectbackground=Colors.SIDEBAR_BG, selectforeground=Colors.SIDEBAR_BG)
+        self._header_indices.add(idx)
+        self._listbox_profile_map.append((idx, None))
+        idx += 1
+
+        self.profile_listbox.insert("end", "INACTIVE PROFILES")
+        self.profile_listbox.itemconfig(idx, fg=Colors.TEXT_DISABLED, selectbackground=Colors.SIDEBAR_BG, selectforeground=Colors.TEXT_DISABLED)
+        self._header_indices.add(idx)
+        self._listbox_profile_map.append((idx, None))
+        idx += 1
+
+        for p in inactive:
+            self.profile_listbox.insert("end", f"  {p.name}")
+            self.profile_listbox.itemconfig(idx, fg="#888888")
+            self._listbox_profile_map.append((idx, p))
+            idx += 1
+
+        # Select first active profile
+        if active:
+            first_active_idx = 1  # index 0 is header
+            self.profile_listbox.select_set(first_active_idx)
+            self._load_profile(active[0])
 
     def _on_profile_selected(self, event=None):
         sel = self.profile_listbox.curselection()
-        if sel and sel[0] < len(self._profiles):
-            self._load_profile(self._profiles[sel[0]])
+        if not sel:
+            return
+        idx = sel[0]
+        # Skip headers
+        if idx in self._header_indices:
+            self.profile_listbox.selection_clear(idx)
+            return
+        # Find the profile for this index
+        for map_idx, profile in self._listbox_profile_map:
+            if map_idx == idx and profile is not None:
+                self._load_profile(profile)
+                return
 
     def _load_profile(self, profile: BackupProfile):
         """Load a profile into all tabs."""
@@ -275,6 +342,7 @@ class BackupManagerApp:
         self.tab_encryption.load_profile(profile)
         self.tab_schedule.load_profile(profile)
         self.tab_email.load_profile(profile)
+        self.tab_recovery.load_profile(profile)
 
         self.tab_run.update_profile_info(
             profile.name,
@@ -340,10 +408,11 @@ class BackupManagerApp:
         profile = BackupProfile()
         self.config_manager.save_profile(profile)
         self._load_profiles()
-        # Select the new profile
-        for i, p in enumerate(self._profiles):
-            if p.id == profile.id:
-                self.profile_listbox.select_set(i)
+        # Select only the new profile
+        self.profile_listbox.selection_clear(0, "end")
+        for map_idx, p in self._listbox_profile_map:
+            if p is not None and p.id == profile.id:
+                self.profile_listbox.select_set(map_idx)
                 self._load_profile(p)
                 break
 
@@ -355,6 +424,106 @@ class BackupManagerApp:
             self.config_manager.delete_profile(self._current_profile.id)
             self._current_profile = None
             self._load_profiles()
+
+    def _get_selected_profile(self):
+        """Get the currently selected profile and its listbox index."""
+        sel = self.profile_listbox.curselection()
+        if not sel:
+            return None, None
+        idx = sel[0]
+        if idx in self._header_indices:
+            return None, None
+        for map_idx, profile in self._listbox_profile_map:
+            if map_idx == idx and profile is not None:
+                return profile, idx
+        return None, None
+
+    def _move_profile_up(self):
+        """Move selected profile up, or from inactive to active."""
+        profile, idx = self._get_selected_profile()
+        if profile is None:
+            return
+
+        active_profiles = [p for p in self._profiles if p.active]
+        inactive_profiles = [p for p in self._profiles if not p.active]
+
+        if profile.active:
+            # Already active — move up within active list
+            pos = active_profiles.index(profile)
+            if pos == 0:
+                return  # Already at top
+            # Swap sort_order with the profile above
+            other = active_profiles[pos - 1]
+            profile.sort_order, other.sort_order = other.sort_order, profile.sort_order
+            self.config_manager.save_profile(profile)
+            self.config_manager.save_profile(other)
+        else:
+            # Inactive — first position: move to active
+            pos = inactive_profiles.index(profile)
+            if pos == 0:
+                # Move to active (bottom of active list)
+                profile.active = True
+                if active_profiles:
+                    profile.sort_order = max(p.sort_order for p in active_profiles) + 1
+                else:
+                    profile.sort_order = 0
+                self.config_manager.save_profile(profile)
+            else:
+                # Move up within inactive list
+                other = inactive_profiles[pos - 1]
+                profile.sort_order, other.sort_order = other.sort_order, profile.sort_order
+                self.config_manager.save_profile(profile)
+                self.config_manager.save_profile(other)
+
+        self._load_profiles()
+        self._reselect_profile(profile)
+
+    def _move_profile_down(self):
+        """Move selected profile down, or from active to inactive."""
+        profile, idx = self._get_selected_profile()
+        if profile is None:
+            return
+
+        active_profiles = [p for p in self._profiles if p.active]
+        inactive_profiles = [p for p in self._profiles if not p.active]
+
+        if profile.active:
+            pos = active_profiles.index(profile)
+            if pos >= len(active_profiles) - 1:
+                # Last active — move to inactive
+                profile.active = False
+                if inactive_profiles:
+                    profile.sort_order = min(p.sort_order for p in inactive_profiles) - 1
+                else:
+                    profile.sort_order = 0
+                self.config_manager.save_profile(profile)
+            else:
+                # Move down within active list
+                other = active_profiles[pos + 1]
+                profile.sort_order, other.sort_order = other.sort_order, profile.sort_order
+                self.config_manager.save_profile(profile)
+                self.config_manager.save_profile(other)
+        else:
+            # Inactive — move down within inactive list
+            pos = inactive_profiles.index(profile)
+            if pos >= len(inactive_profiles) - 1:
+                return  # Already at bottom
+            other = inactive_profiles[pos + 1]
+            profile.sort_order, other.sort_order = other.sort_order, profile.sort_order
+            self.config_manager.save_profile(profile)
+            self.config_manager.save_profile(other)
+
+        self._load_profiles()
+        self._reselect_profile(profile)
+
+    def _reselect_profile(self, profile: BackupProfile):
+        """Re-select a profile in the listbox after reload."""
+        self.profile_listbox.selection_clear(0, "end")
+        for map_idx, p in self._listbox_profile_map:
+            if p is not None and p.id == profile.id:
+                self.profile_listbox.select_set(map_idx)
+                self._load_profile(p)
+                return
 
     # --- Backup execution ---
 

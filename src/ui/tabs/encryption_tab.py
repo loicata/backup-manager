@@ -26,7 +26,7 @@ class EncryptionTab(ScrollableTab):
 
     def _build_ui(self):
         # Encryption mode
-        mode_frame = ttk.LabelFrame(self.inner, text="Encryption mode (beta)", padding=Spacing.PAD)
+        mode_frame = ttk.LabelFrame(self.inner, text="Encryption mode", padding=Spacing.PAD)
         mode_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
         # No encryption checkbox
@@ -71,6 +71,22 @@ class EncryptionTab(ScrollableTab):
             command=self._on_encrypt_toggled,
         )
         self._mirror2_cb.pack(anchor="w", pady=2)
+
+        # Warning text
+        warning_text = (
+            "Encryption may be necessary but introduces risk. "
+            "If you enable encryption, always perform a manual test "
+            "using the Recovery tab to verify that you can restore "
+            "your encrypted backups."
+        )
+        tk.Label(
+            mode_frame,
+            text=warning_text,
+            fg="#cc7700",
+            wraplength=1200,
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", pady=(8, 0))
 
         # Password frame (shown/hidden based on encryption selection)
         self._pw_frame = ttk.LabelFrame(self.inner, text="Encryption password", padding=Spacing.PAD)
@@ -191,6 +207,9 @@ class EncryptionTab(ScrollableTab):
         if profile.encryption.stored_password:
             self.password_var.set(profile.encryption.stored_password)
             self.confirm_var.set(profile.encryption.stored_password)
+        else:
+            self.password_var.set("")
+            self.confirm_var.set("")
 
         self._update_ui_state()
         self._updating = False

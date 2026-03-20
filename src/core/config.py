@@ -146,7 +146,7 @@ class StorageConfig:
 
 @dataclass
 class ScheduleConfig:
-    frequency: ScheduleFrequency = ScheduleFrequency.WEEKLY
+    frequency: ScheduleFrequency = ScheduleFrequency.DAILY
     time: str = "02:00"
     day_of_week: int = 0
     day_of_month: int = 1
@@ -158,9 +158,9 @@ class ScheduleConfig:
 @dataclass
 class RetentionConfig:
     policy: RetentionPolicy = RetentionPolicy.GFS
-    gfs_daily: int = 7
-    gfs_weekly: int = 4
-    gfs_monthly: int = 12
+    gfs_daily: int = 2
+    gfs_weekly: int = 2
+    gfs_monthly: int = 2
 
 
 @dataclass
@@ -218,6 +218,8 @@ class BackupProfile:
     encrypt_mirror1: bool = False
     encrypt_mirror2: bool = False
     bandwidth_limit_kbps: int = 0
+    sort_order: int = 0
+    active: bool = True
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_backup: Optional[str] = None
     last_full_backup: Optional[str] = None
@@ -292,6 +294,7 @@ class ConfigManager:
                     except Exception:
                         logger.exception("Failed to recover from %s", bak)
 
+        profiles.sort(key=lambda p: (p.sort_order, p.name.lower()))
         return profiles
 
     def save_profile(self, profile: BackupProfile) -> None:

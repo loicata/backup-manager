@@ -214,6 +214,29 @@ class S3Storage(StorageBackend):
         except Exception:
             return None
 
+    def download_backup(self, remote_name: str, local_dir: Path) -> Path:
+        """Download a backup from S3 to a local directory."""
+        local_dir.mkdir(parents=True, exist_ok=True)
+        dst = local_dir / remote_name
+        dst.mkdir(parents=True, exist_ok=True)
+
+        client = self._get_client()
+        prefix = self._s3_key(remote_name)
+        if not prefix.endswith("/"):
+            prefix += "/"
+
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                rel = key[len(prefix):]
+                if not rel:
+                    continue
+                local_file = dst / rel
+                local_file.parent.mkdir(parents=True, exist_ok=True)
+                client.download_file(self._bucket, key, str(local_file))
+        return dst
+
     def _make_progress_cb(self, total: int):
         """Create a progress callback for boto3."""
         sent = [0]

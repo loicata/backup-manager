@@ -232,6 +232,8 @@ class InAppScheduler:
         self._last_check_time = time.monotonic()
 
         for profile in self._get_profiles():
+            if not profile.active:
+                continue
             if not profile.schedule.enabled:
                 continue
             if profile.schedule.frequency == ScheduleFrequency.MANUAL:
@@ -400,6 +402,8 @@ class InAppScheduler:
 
     def _check_missed_backups(self, now: datetime) -> None:
         for profile in self._get_profiles():
+            if not profile.active:
+                continue
             if not profile.schedule.enabled:
                 continue
             if self._is_due(profile, now):

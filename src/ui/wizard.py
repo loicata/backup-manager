@@ -66,7 +66,7 @@ class SetupWizard:
             "encrypt_mirror2": False,
             "encryption_password": "",
             "schedule_enabled": True,
-            "schedule_freq": ScheduleFrequency.WEEKLY,
+            "schedule_freq": ScheduleFrequency.DAILY,
             "schedule_time": "02:00",
             "email_enabled": False,
             "email_config": {},
@@ -239,9 +239,9 @@ class SetupWizard:
             5: self._step_mirror1,
             6: self._step_mirror2,
             7: self._step_backup_type,
-            8: self._step_retention,
-            9: self._step_encryption,
-            10: self._step_schedule,
+            8: self._step_encryption,
+            9: self._step_schedule,
+            10: self._step_retention,
             11: self._step_email,
             12: self._step_summary,
         }
@@ -988,9 +988,9 @@ class SetupWizard:
 
         self._ret_gfs_vars: dict[str, tk.IntVar] = {}
         for label, key, default in [
-            ("Daily backups to keep (days):", "gfs_daily", 7),
-            ("Weekly backups to keep (weeks):", "gfs_weekly", 4),
-            ("Monthly backups to keep (months):", "gfs_monthly", 12),
+            ("Days of history:", "gfs_daily", 1),
+            ("Weeks of history:", "gfs_weekly", 1),
+            ("Months of history:", "gfs_monthly", 1),
         ]:
             row = ttk.Frame(gfs_frame)
             row.pack(fill="x", pady=2)
@@ -1000,16 +1000,76 @@ class SetupWizard:
             ttk.Spinbox(
                 row,
                 textvariable=var,
-                from_=1,
-                to=999,
+                from_=0,
+                to=998,
                 width=8,
             ).pack(side="right")
+
+        # Summary label
+        self._ret_summary_label = tk.Label(
+            gfs_frame,
+            text="",
+            justify="left",
+            anchor="w",
+            fg="#444444",
+        )
+        self._ret_summary_label.pack(fill="x", pady=(10, 0))
 
         for key, var in self._ret_gfs_vars.items():
             var.trace_add(
                 "write",
-                lambda *a, k=key, v=var: self._data.update({k: v.get()}),
+                lambda *a, k=key, v=var: (
+                    self._data.update({k: v.get()}),
+                    self._update_ret_summary(),
+                ),
             )
+
+        self._update_ret_summary()
+
+    def _update_ret_summary(self) -> None:
+        """Update the retention summary text in the wizard."""
+        try:
+            user_daily = self._ret_gfs_vars["gfs_daily"].get()
+            user_weekly = self._ret_gfs_vars["gfs_weekly"].get()
+            user_monthly = self._ret_gfs_vars["gfs_monthly"].get()
+        except (tk.TclError, ValueError):
+            return
+
+        real_daily = user_daily + 1
+        real_weekly = user_weekly + 1
+        real_monthly = user_monthly + 1
+
+        lines = ["Retention summary:"]
+
+        if user_daily == 0:
+            lines.append("  • Today only (no history)")
+        elif user_daily == 1:
+            lines.append("  • Today + yesterday")
+        else:
+            lines.append(f"  • Today + {user_daily} days of history")
+
+        if user_weekly == 0:
+            lines.append("  • No weekly history")
+        elif user_weekly == 1:
+            lines.append("  • 1 week of history (1 weekly backup)")
+        else:
+            lines.append(
+                f"  • {user_weekly} weeks of history ({user_weekly} weekly backups)"
+            )
+
+        if user_monthly == 0:
+            lines.append("  • No monthly history")
+        elif user_monthly == 1:
+            lines.append("  • 1 month of history (1 monthly backup)")
+        else:
+            lines.append(
+                f"  • {user_monthly} months of history ({user_monthly} monthly backups)"
+            )
+
+        total = real_daily + max(real_weekly - 1, 0) + max(real_monthly - 1, 0)
+        lines.append(f"Backups kept: {total}")
+
+        self._ret_summary_label.config(text="\n".join(lines))
 
     # ------------------------------------------------------------------
     # Step 9: Encryption
@@ -1017,7 +1077,7 @@ class SetupWizard:
 
     def _step_encryption(self) -> None:
         """Display the encryption configuration step."""
-        self._set_header("Encryption mode (beta)")
+        self._set_header("Encryption mode")
         self._enc_updating = False
 
         # No encryption checkbox
@@ -1411,9 +1471,9 @@ class SetupWizard:
             f"Sources: {len(d['sources'])} items\n"
             f"Destination: {storage_type}\n"
             f"Backup type: {d['backup_type'].value}\n"
-            f"Retention: GFS (daily {d.get('gfs_daily', 7)}, "
-            f"weekly {d.get('gfs_weekly', 4)}, "
-            f"monthly {d.get('gfs_monthly', 12)})\n"
+            f"Retention: GFS (daily {d.get('gfs_daily', 1) + 1}, "
+            f"weekly {d.get('gfs_weekly', 1) + 1}, "
+            f"monthly {d.get('gfs_monthly', 1) + 1})\n"
             f"Encryption: {enc_text}\n"
             f"Schedule: {'Enabled' if d['schedule_enabled'] else 'Manual'}\n"
             f"Email: {d['email_config'].get('trigger', 'disabled').capitalize()}\n"
@@ -1457,9 +1517,9 @@ class SetupWizard:
             mirror_destinations=mirrors,
             retention=RetentionConfig(
                 policy=RetentionPolicy.GFS,
-                gfs_daily=d.get("gfs_daily", 7),
-                gfs_weekly=d.get("gfs_weekly", 4),
-                gfs_monthly=d.get("gfs_monthly", 12),
+                gfs_daily=d.get("gfs_daily", 1) + 1,
+                gfs_weekly=d.get("gfs_weekly", 1) + 1,
+                gfs_monthly=d.get("gfs_monthly", 1) + 1,
             ),
             encrypt_primary=d["encrypt_primary"],
             encrypt_mirror1=d["encrypt_mirror1"],

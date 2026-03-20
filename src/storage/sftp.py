@@ -628,6 +628,43 @@ class SFTPStorage(StorageBackend):
         except Exception:
             return None
 
+    def download_backup(self, remote_name: str, local_dir: Path) -> Path:
+        """Download a backup from SFTP to a local directory."""
+        local_dir.mkdir(parents=True, exist_ok=True)
+        dst = local_dir / remote_name
+        dst.mkdir(parents=True, exist_ok=True)
+
+        transport = self._get_transport()
+        try:
+            sftp = self._get_sftp(transport)
+            try:
+                remote_base = self._join_remote(remote_name)
+                self._sftp_download_dir(sftp, remote_base, dst)
+            finally:
+                sftp.close()
+        finally:
+            transport.close()
+        return dst
+
+    def _sftp_download_dir(self, sftp, remote_dir: str, local_dir: Path):
+        """Recursively download a remote directory via SFTP.
+
+        Args:
+            sftp: Open SFTP client.
+            remote_dir: Remote directory path.
+            local_dir: Local destination directory.
+        """
+        import stat as stat_module
+
+        for entry in sftp.listdir_attr(remote_dir):
+            remote_path = f"{remote_dir}/{entry.filename}"
+            local_path = local_dir / entry.filename
+            if stat_module.S_ISDIR(entry.st_mode):
+                local_path.mkdir(parents=True, exist_ok=True)
+                self._sftp_download_dir(sftp, remote_path, local_path)
+            else:
+                sftp.get(remote_path, str(local_path))
+
     def _join_remote(self, name: str) -> str:
         """Join remote base path with a name."""
         return f"{self._remote_path.rstrip('/')}/{name}"

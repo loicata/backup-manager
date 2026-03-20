@@ -23,10 +23,11 @@ class RetentionTab(ScrollableTab):
         )
         frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
+        # User-facing fields (display value = internal value - 1)
         gfs_fields = [
-            ("Daily backups to keep (days):", "gfs_daily", 7),
-            ("Weekly backups to keep (weeks):", "gfs_weekly", 4),
-            ("Monthly backups to keep (months):", "gfs_monthly", 12),
+            ("Days of history:", "gfs_daily", 1),
+            ("Weeks of history:", "gfs_weekly", 1),
+            ("Months of history:", "gfs_monthly", 1),
         ]
         self._gfs_vars = {}
         for label, key, default in gfs_fields:
@@ -35,19 +36,97 @@ class RetentionTab(ScrollableTab):
             ttk.Label(row, text=label).pack(side="left")
             var = tk.IntVar(value=default)
             self._gfs_vars[key] = var
-            ttk.Spinbox(row, textvariable=var, from_=1, to=999, width=8).pack(side="right")
+            spinbox = ttk.Spinbox(
+                row, textvariable=var, from_=0, to=998, width=8
+            )
+            spinbox.pack(side="right")
+            var.trace_add("write", lambda *_: self._update_summary())
+
+        # Summary label
+        self._summary_label = tk.Label(
+            frame,
+            text="",
+            justify="left",
+            anchor="w",
+            fg="#444444",
+        )
+        self._summary_label.pack(fill="x", pady=(10, 0))
+
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        """Update the retention summary text based on current values."""
+        try:
+            user_daily = self._gfs_vars["gfs_daily"].get()
+            user_weekly = self._gfs_vars["gfs_weekly"].get()
+            user_monthly = self._gfs_vars["gfs_monthly"].get()
+        except (tk.TclError, ValueError):
+            return
+
+        # Internal values = user values + 1 (today is always kept)
+        real_daily = user_daily + 1
+        real_weekly = user_weekly + 1
+        real_monthly = user_monthly + 1
+
+        lines = ["Retention summary:"]
+
+        # Daily line
+        if user_daily == 0:
+            lines.append("  • Today only (no history)")
+        elif user_daily == 1:
+            lines.append("  • Today + yesterday")
+        else:
+            lines.append(f"  • Today + {user_daily} days of history")
+
+        # Weekly line
+        if user_weekly == 0:
+            lines.append("  • No weekly history")
+        elif user_weekly == 1:
+            lines.append("  • 1 week of history (1 weekly backup)")
+        else:
+            lines.append(
+                f"  • {user_weekly} weeks of history ({user_weekly} weekly backups)"
+            )
+
+        # Monthly line
+        if user_monthly == 0:
+            lines.append("  • No monthly history")
+        elif user_monthly == 1:
+            lines.append("  • 1 month of history (1 monthly backup)")
+        else:
+            lines.append(
+                f"  • {user_monthly} months of history ({user_monthly} monthly backups)"
+            )
+
+        # Total calculation
+        total = real_daily + max(real_weekly - 1, 0) + max(real_monthly - 1, 0)
+        lines.append(f"Backups kept: {total}")
+
+        self._summary_label.config(text="\n".join(lines))
 
     def load_profile(self, profile: BackupProfile):
-        """Load retention config from profile."""
+        """Load retention config from profile.
+
+        Internal values are stored with +1 offset.
+        Display value = internal - 1.
+        """
         r = profile.retention
         for key, var in self._gfs_vars.items():
-            var.set(getattr(r, key, var.get()))
+            internal_val = getattr(r, key, var.get() + 1)
+            var.set(max(internal_val - 1, 0))
 
     def collect_config(self) -> dict:
-        """Collect retention configuration."""
+        """Collect retention configuration.
+
+        User values are +1 to get internal values.
+        """
+        internal_values = {}
+        for key, var in self._gfs_vars.items():
+            internal_values[key] = var.get() + 1
+
         return {
             "retention": RetentionConfig(
                 policy=RetentionPolicy.GFS,
-                **{k: v.get() for k, v in self._gfs_vars.items()},
+                **internal_values,
             ),
         }

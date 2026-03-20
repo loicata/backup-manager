@@ -182,3 +182,18 @@ class StorageBackend(ABC):
     @abstractmethod
     def get_file_size(self, remote_name: str) -> Optional[int]:
         """Get size of a remote file in bytes, or None if unknown."""
+
+    @abstractmethod
+    def download_backup(self, remote_name: str, local_dir: Path) -> Path:
+        """Download a backup from the remote to a local directory.
+
+        Args:
+            remote_name: Backup name on the remote.
+            local_dir: Local directory to download into.
+
+        Returns:
+            Path to the downloaded backup folder.
+
+        Raises:
+            Exception on failure.
+        """

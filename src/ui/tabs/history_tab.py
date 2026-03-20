@@ -66,25 +66,41 @@ class HistoryTab(ScrollableTab):
             reverse=True,
         )
 
+        from datetime import datetime
+
         for log_file in log_files[:100]:
-            name = log_file.stem
-            # Extract profile from filename: backup_PROFILEID_YYYYMMDD_HHMMSS
-            parts = name.split("_", 2)
-            profile = parts[1] if len(parts) > 1 else "Unknown"
-            date_str = parts[2] if len(parts) > 2 else ""
+            profile = self._extract_profile_name(log_file)
 
             size = log_file.stat().st_size
             size_str = f"{size / 1024:.1f} KB" if size > 1024 else f"{size} B"
-
-            from datetime import datetime
 
             try:
                 mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
                 date_display = mtime.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
-                date_display = date_str
+                date_display = ""
 
             self.log_tree.insert("", "end", values=(date_display, profile, size_str))
+
+    @staticmethod
+    def _extract_profile_name(log_file: Path) -> str:
+        """Extract profile name from first line of log file.
+
+        Args:
+            log_file: Path to the log file.
+
+        Returns:
+            Profile name, or 'Unknown' if not found.
+        """
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                first_line = f.readline()
+            # Format: "... Starting backup 'ProfileName'..."
+            if "'" in first_line:
+                return first_line.split("'")[1]
+        except Exception:
+            pass
+        return "Unknown"
 
     def _open_folder(self):
         if self._log_dir.exists():

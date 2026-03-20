@@ -242,14 +242,8 @@ def evaluate_password(password: str) -> str:
     Returns:
         Warning message if weak, empty string if acceptable.
     """
-    if len(password) < 8:
-        return "Password is too short (minimum 8 characters)"
-    if password.isdigit():
-        return "Password contains only digits"
-    if password.isalpha():
-        return "Password contains only letters"
-    if len(password) < 12:
-        return "Password could be stronger (12+ characters recommended)"
+    if len(password) < 16:
+        return "Password is too short (minimum 16 characters)"
     return ""
 
 

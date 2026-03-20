@@ -37,7 +37,9 @@ class StorageTab(ScrollableTab):
 
         for stype, label, available in options:
             rb = ttk.Radiobutton(
-                type_frame, text=label, value=stype.value,
+                type_frame,
+                text=label,
+                value=stype.value,
                 variable=self.type_var,
                 state="normal" if available else "disabled",
             )
@@ -48,8 +50,10 @@ class StorageTab(ScrollableTab):
             self.inner, text="Configuration", padding=Spacing.PAD
         )
         self._config_container.pack(
-            fill="both", expand=True,
-            padx=Spacing.LARGE, pady=Spacing.MEDIUM,
+            fill="both",
+            expand=True,
+            padx=Spacing.LARGE,
+            pady=Spacing.MEDIUM,
         )
 
         self._build_local_config()
@@ -63,7 +67,8 @@ class StorageTab(ScrollableTab):
         btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         self.test_btn = ttk.Button(
-            btn_frame, text="🔌 Test connection",
+            btn_frame,
+            text="🔌 Test connection",
             command=self._test_connection,
         )
         self.test_btn.pack(side="left")
@@ -86,8 +91,9 @@ class StorageTab(ScrollableTab):
         ttk.Entry(path_frame, textvariable=self.local_path_var).pack(
             side="left", fill="x", expand=True
         )
-        ttk.Button(path_frame, text="Browse...",
-                    command=self._browse_local).pack(side="right", padx=(Spacing.SMALL, 0))
+        ttk.Button(path_frame, text="Browse...", command=self._browse_local).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
 
     def _build_network_config(self):
         frame = ttk.Frame(self._config_container)
@@ -96,8 +102,12 @@ class StorageTab(ScrollableTab):
         ttk.Label(frame, text="Network path (UNC):").pack(anchor="w")
         self.network_path_var = tk.StringVar()
         ttk.Entry(frame, textvariable=self.network_path_var).pack(fill="x")
-        ttk.Label(frame, text=r"e.g. \\server\share\backups",
-                   foreground=Colors.TEXT_SECONDARY, font=Fonts.small()).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text=r"e.g. \\server\share\backups",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w")
 
     def _build_sftp_config(self):
         frame = ttk.Frame(self._config_container)
@@ -123,8 +133,9 @@ class StorageTab(ScrollableTab):
                 f = ttk.Frame(frame)
                 f.pack(fill="x")
                 ttk.Entry(f, textvariable=var).pack(side="left", fill="x", expand=True)
-                ttk.Button(f, text="Browse...",
-                            command=self._browse_key).pack(side="right", padx=(Spacing.SMALL, 0))
+                ttk.Button(f, text="Browse...", command=self._browse_key).pack(
+                    side="right", padx=(Spacing.SMALL, 0)
+                )
             elif "password" in key or "passphrase" in key:
                 ttk.Entry(frame, textvariable=var, show="●").pack(fill="x")
             elif key == "sftp_port":
@@ -132,10 +143,18 @@ class StorageTab(ScrollableTab):
             else:
                 ttk.Entry(frame, textvariable=var).pack(fill="x")
 
-        ttk.Label(frame, text="Supports RSA, Ed25519, ECDSA keys (.pem, .key, .ppk, id_rsa).",
-                   foreground=Colors.TEXT_SECONDARY, font=Fonts.small()).pack(anchor="w")
-        ttk.Label(frame, text="Absolute path on the remote server, e.g. /home/username/backups",
-                   foreground=Colors.TEXT_SECONDARY, font=Fonts.small()).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text="Supports RSA, Ed25519, ECDSA keys (.pem, .key, .ppk, id_rsa).",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text="Absolute path on the remote server, e.g. /home/username/backups",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w")
 
     def _build_s3_config(self):
         frame = ttk.Frame(self._config_container)
@@ -144,10 +163,20 @@ class StorageTab(ScrollableTab):
         # Provider selector
         ttk.Label(frame, text="Provider:").pack(anchor="w")
         self.s3_provider_var = tk.StringVar(value="aws")
-        providers = ["aws", "minio", "wasabi", "ovh", "scaleway",
-                      "digitalocean", "cloudflare", "backblaze_s3", "other"]
-        ttk.Combobox(frame, textvariable=self.s3_provider_var,
-                      values=providers, state="readonly").pack(fill="x")
+        providers = [
+            "aws",
+            "minio",
+            "wasabi",
+            "ovh",
+            "scaleway",
+            "digitalocean",
+            "cloudflare",
+            "backblaze_s3",
+            "other",
+        ]
+        ttk.Combobox(
+            frame, textvariable=self.s3_provider_var, values=providers, state="readonly"
+        ).pack(fill="x")
 
         fields = [
             ("Bucket", "s3_bucket", ""),
@@ -199,26 +228,41 @@ class StorageTab(ScrollableTab):
         guide_frame.pack(fill="x", pady=(8, 4))
 
         steps = [
-            ("1.", "Install rclone",
-             "Download from https://rclone.org/downloads/\n"
-             "Extract the .zip and place rclone.exe in\n"
-             "C:\\Program Files\\rclone\\ or add it to your PATH."),
-            ("2.", "Find your Proton credentials",
-             "Use your Proton Mail / Proton account email\n"
-             "as username, and your account password."),
-            ("3.", "2FA seed (optional)",
-             "If you have 2FA enabled on your Proton account:\n"
-             "Open your authenticator app settings, find the\n"
-             "secret key (base32 string) and paste it here.\n"
-             "Backup Manager will generate TOTP codes\n"
-             "automatically."),
-            ("4.", "Remote path",
-             "The folder on Proton Drive where backups will\n"
-             "be stored. Default: /Backups\n"
-             "The folder is created automatically if needed."),
-            ("5.", "Test your connection",
-             "Click 'Test connection' above to verify that\n"
-             "rclone can reach your Proton Drive account."),
+            (
+                "1.",
+                "Install rclone",
+                "Download from https://rclone.org/downloads/\n"
+                "Extract the .zip and place rclone.exe in\n"
+                "C:\\Program Files\\rclone\\ or add it to your PATH.",
+            ),
+            (
+                "2.",
+                "Find your Proton credentials",
+                "Use your Proton Mail / Proton account email\n"
+                "as username, and your account password.",
+            ),
+            (
+                "3.",
+                "2FA seed (optional)",
+                "If you have 2FA enabled on your Proton account:\n"
+                "Open your authenticator app settings, find the\n"
+                "secret key (base32 string) and paste it here.\n"
+                "Backup Manager will generate TOTP codes\n"
+                "automatically.",
+            ),
+            (
+                "4.",
+                "Remote path",
+                "The folder on Proton Drive where backups will\n"
+                "be stored. Default: /Backups\n"
+                "The folder is created automatically if needed.",
+            ),
+            (
+                "5.",
+                "Test your connection",
+                "Click 'Test connection' above to verify that\n"
+                "rclone can reach your Proton Drive account.",
+            ),
         ]
 
         for num, title, detail in steps:
@@ -228,17 +272,20 @@ class StorageTab(ScrollableTab):
             header = ttk.Frame(step_frame)
             header.pack(fill="x")
             ttk.Label(
-                header, text=num,
+                header,
+                text=num,
                 foreground=Colors.ACCENT,
                 font=("Segoe UI", 9, "bold"),
             ).pack(side="left")
             ttk.Label(
-                header, text=title,
+                header,
+                text=title,
                 font=("Segoe UI", 9, "bold"),
             ).pack(side="left", padx=(4, 0))
 
             ttk.Label(
-                step_frame, text=detail,
+                step_frame,
+                text=detail,
                 foreground=Colors.TEXT_SECONDARY,
                 font=("Segoe UI", 8),
                 justify="left",
@@ -273,6 +320,7 @@ class StorageTab(ScrollableTab):
     def _test_connection(self):
         """Test storage connection in background."""
         import threading
+
         self.test_label.config(text="Testing...", foreground=Colors.WARNING)
         self.test_btn.state(["disabled"])
 
@@ -280,6 +328,7 @@ class StorageTab(ScrollableTab):
             try:
                 config = self._build_storage_config()
                 from src.core.backup_engine import BackupEngine
+
                 engine = BackupEngine.__new__(BackupEngine)
                 backend = engine._get_backend(config)
                 ok, msg = backend.test_connection()

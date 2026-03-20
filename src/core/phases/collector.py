@@ -41,11 +41,12 @@ class FileInfo:
         ValueError: If source_path is None, relative_path is empty,
                     or size is negative.
     """
-    source_path: Path       # Absolute path on disk
-    relative_path: str      # Path relative to source root
-    size: int               # File size in bytes
-    mtime: float            # Modification time (timestamp)
-    source_root: str        # Which source path this came from
+
+    source_path: Path  # Absolute path on disk
+    relative_path: str  # Path relative to source root
+    size: int  # File size in bytes
+    mtime: float  # Modification time (timestamp)
+    source_root: str  # Which source path this came from
 
     def __post_init__(self) -> None:
         """Validate field invariants after construction."""
@@ -151,13 +152,15 @@ def _add_file(
     try:
         st = filepath.stat()
         rel = filepath.relative_to(source_root).as_posix()
-        files.append(FileInfo(
-            source_path=filepath,
-            relative_path=rel,
-            size=st.st_size,
-            mtime=st.st_mtime,
-            source_root=source_root_str,
-        ))
+        files.append(
+            FileInfo(
+                source_path=filepath,
+                relative_path=rel,
+                size=st.st_size,
+                mtime=st.st_mtime,
+                source_root=source_root_str,
+            )
+        )
     except OSError:
         pass
 

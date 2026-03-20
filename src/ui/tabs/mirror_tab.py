@@ -24,7 +24,8 @@ class MirrorTab(ScrollableTab):
         # Enable checkbox
         self.enabled_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            self.inner, text=f"Enable Mirror {self._mirror_index + 1}",
+            self.inner,
+            text=f"Enable Mirror {self._mirror_index + 1}",
             variable=self.enabled_var,
             command=self._toggle_enabled,
         ).pack(anchor="w", padx=Spacing.LARGE, pady=Spacing.LARGE)
@@ -50,7 +51,9 @@ class MirrorTab(ScrollableTab):
 
         for stype, label, available in options:
             ttk.Radiobutton(
-                type_frame, text=label, value=stype.value,
+                type_frame,
+                text=label,
+                value=stype.value,
                 variable=self.type_var,
                 state="normal" if available else "disabled",
             ).pack(anchor="w", pady=2)
@@ -59,8 +62,9 @@ class MirrorTab(ScrollableTab):
         self._config_container = ttk.LabelFrame(
             self._content, text="Configuration", padding=Spacing.PAD
         )
-        self._config_container.pack(fill="both", expand=True,
-                                      padx=Spacing.LARGE, pady=Spacing.MEDIUM)
+        self._config_container.pack(
+            fill="both", expand=True, padx=Spacing.LARGE, pady=Spacing.MEDIUM
+        )
 
         # Build config forms for each storage type
         self._build_configs()
@@ -70,7 +74,8 @@ class MirrorTab(ScrollableTab):
         btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         self.test_btn = ttk.Button(
-            btn_frame, text="Test connection",
+            btn_frame,
+            text="Test connection",
             command=self._test_connection,
         )
         self.test_btn.pack(side="left")
@@ -90,10 +95,13 @@ class MirrorTab(ScrollableTab):
         row = ttk.Frame(f)
         row.pack(fill="x")
         ttk.Entry(row, textvariable=self.local_path_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Browse...",
-                    command=lambda: self.local_path_var.set(
-                        filedialog.askdirectory() or self.local_path_var.get()
-                    )).pack(side="right")
+        ttk.Button(
+            row,
+            text="Browse...",
+            command=lambda: self.local_path_var.set(
+                filedialog.askdirectory() or self.local_path_var.get()
+            ),
+        ).pack(side="right")
 
         # Network
         f = ttk.Frame(self._config_container)
@@ -131,12 +139,17 @@ class MirrorTab(ScrollableTab):
         self._s3_vars = {}
         self.s3_provider_var = tk.StringVar(value="aws")
         ttk.Label(f, text="Provider:").pack(anchor="w")
-        ttk.Combobox(f, textvariable=self.s3_provider_var,
-                      values=["aws", "minio", "wasabi", "ovh", "other"],
-                      state="readonly").pack(fill="x")
+        ttk.Combobox(
+            f,
+            textvariable=self.s3_provider_var,
+            values=["aws", "minio", "wasabi", "ovh", "other"],
+            state="readonly",
+        ).pack(fill="x")
         for label, key, default in [
-            ("Bucket", "s3_bucket", ""), ("Region", "s3_region", "eu-west-1"),
-            ("Access Key", "s3_access_key", ""), ("Secret Key", "s3_secret_key", ""),
+            ("Bucket", "s3_bucket", ""),
+            ("Region", "s3_region", "eu-west-1"),
+            ("Access Key", "s3_access_key", ""),
+            ("Secret Key", "s3_secret_key", ""),
         ]:
             ttk.Label(f, text=f"{label}:").pack(anchor="w")
             var = tk.StringVar(value=default)
@@ -190,6 +203,7 @@ class MirrorTab(ScrollableTab):
             try:
                 config = self._build_storage_config()
                 from src.core.backup_engine import BackupEngine
+
                 engine = BackupEngine.__new__(BackupEngine)
                 backend = engine._get_backend(config)
                 ok, msg = backend.test_connection()

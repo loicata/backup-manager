@@ -59,14 +59,19 @@ class ProtonDriveStorage(StorageBackend):
         try:
             result = subprocess.run(
                 [self._rclone_path, "version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             match = re.search(r"v(\d+)\.(\d+)\.(\d+)", result.stdout)
             if match:
                 version = tuple(int(x) for x in match.groups())
                 if version >= _MIN_RCLONE_VERSION:
                     return True, f"rclone {'.'.join(str(v) for v in version)}"
-                return False, f"rclone {'.'.join(str(v) for v in version)} too old (need {'.'.join(str(v) for v in _MIN_RCLONE_VERSION)}+)"
+                return (
+                    False,
+                    f"rclone {'.'.join(str(v) for v in version)} too old (need {'.'.join(str(v) for v in _MIN_RCLONE_VERSION)}+)",
+                )
             return False, "Could not determine rclone version"
         except FileNotFoundError:
             return False, "rclone not found"
@@ -88,6 +93,7 @@ class ProtonDriveStorage(StorageBackend):
         if self._twofa_seed:
             try:
                 import pyotp
+
                 totp = pyotp.TOTP(self._twofa_seed)
                 env[f"{prefix}_2FA"] = totp.now()
             except ImportError:
@@ -105,7 +111,9 @@ class ProtonDriveStorage(StorageBackend):
             result = subprocess.run(
                 [self._rclone_path, "obscure", "-"],
                 input=password,
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -124,8 +132,11 @@ class ProtonDriveStorage(StorageBackend):
         cmd = [self._rclone_path] + args
         env = self._build_env()
         return subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=timeout, env=env,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
         )
 
     def upload(self, local_path: Path, remote_name: str) -> None:
@@ -192,24 +203,22 @@ class ProtonDriveStorage(StorageBackend):
 
         backups = []
         for entry in entries:
-            backups.append({
-                "name": entry.get("Name", ""),
-                "size": entry.get("Size", 0),
-                "modified": 0,
-                "is_dir": entry.get("IsDir", False),
-            })
+            backups.append(
+                {
+                    "name": entry.get("Name", ""),
+                    "size": entry.get("Size", 0),
+                    "modified": 0,
+                    "is_dir": entry.get("IsDir", False),
+                }
+            )
         return backups
 
     def delete_backup(self, remote_name: str) -> None:
         """Delete via rclone purge (dir) or deletefile."""
         # Try deletefile first, then purge for directories
-        result = self._run_rclone(
-            ["deletefile", self._remote_spec(remote_name)], timeout=60
-        )
+        result = self._run_rclone(["deletefile", self._remote_spec(remote_name)], timeout=60)
         if result.returncode != 0:
-            result = self._run_rclone(
-                ["purge", self._remote_spec(remote_name)], timeout=120
-            )
+            result = self._run_rclone(["purge", self._remote_spec(remote_name)], timeout=120)
             if result.returncode != 0:
                 raise RuntimeError(f"Delete failed: {result.stderr.strip()}")
         logger.info("Deleted from Proton Drive: %s", remote_name)
@@ -220,9 +229,7 @@ class ProtonDriveStorage(StorageBackend):
         if not ok:
             return False, msg
 
-        result = self._run_rclone(
-            ["lsd", self._remote_spec()], timeout=30
-        )
+        result = self._run_rclone(["lsd", self._remote_spec()], timeout=30)
         if result.returncode == 0:
             return True, f"Connected to Proton Drive ({self._username})"
         return False, f"Proton Drive error: {result.stderr.strip()}"
@@ -233,9 +240,7 @@ class ProtonDriveStorage(StorageBackend):
 
     def get_file_size(self, remote_name: str) -> Optional[int]:
         """Get file size via rclone size."""
-        result = self._run_rclone(
-            ["size", self._remote_spec(remote_name), "--json"], timeout=30
-        )
+        result = self._run_rclone(["size", self._remote_spec(remote_name), "--json"], timeout=30)
         if result.returncode == 0:
             try:
                 data = json.loads(result.stdout)

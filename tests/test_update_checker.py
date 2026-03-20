@@ -17,7 +17,6 @@ from src.core.update_checker import (
     CHECK_TIMEOUT,
 )
 
-
 # ---------------------------------------------------------------------------
 # Version comparison
 # ---------------------------------------------------------------------------
@@ -111,10 +110,12 @@ class TestCheckForUpdate:
 
     @patch("src.core.update_checker.urllib.request.urlopen")
     def test_newer_version_triggers_callback(self, mock_urlopen):
-        mock_urlopen.return_value = self._make_response({
-            "latest": "4.0",
-            "url": "https://example.com/update.exe",
-        })
+        mock_urlopen.return_value = self._make_response(
+            {
+                "latest": "4.0",
+                "url": "https://example.com/update.exe",
+            }
+        )
         callback = MagicMock()
         thread = check_for_update("3.0", callback)
         thread.join(timeout=5)
@@ -122,10 +123,12 @@ class TestCheckForUpdate:
 
     @patch("src.core.update_checker.urllib.request.urlopen")
     def test_same_version_no_callback(self, mock_urlopen):
-        mock_urlopen.return_value = self._make_response({
-            "latest": "3.0",
-            "url": "https://example.com/update.exe",
-        })
+        mock_urlopen.return_value = self._make_response(
+            {
+                "latest": "3.0",
+                "url": "https://example.com/update.exe",
+            }
+        )
         callback = MagicMock()
         thread = check_for_update("3.0", callback)
         thread.join(timeout=5)
@@ -133,10 +136,12 @@ class TestCheckForUpdate:
 
     @patch("src.core.update_checker.urllib.request.urlopen")
     def test_older_version_no_callback(self, mock_urlopen):
-        mock_urlopen.return_value = self._make_response({
-            "latest": "2.0",
-            "url": "https://example.com/update.exe",
-        })
+        mock_urlopen.return_value = self._make_response(
+            {
+                "latest": "2.0",
+                "url": "https://example.com/update.exe",
+            }
+        )
         callback = MagicMock()
         thread = check_for_update("3.0", callback)
         thread.join(timeout=5)
@@ -166,19 +171,19 @@ class TestCheckForUpdate:
     def test_non_https_url_rejected(self):
         """HTTP URLs for the check endpoint should be rejected."""
         callback = MagicMock()
-        thread = check_for_update(
-            "3.0", callback, url="http://insecure.example.com/version.json"
-        )
+        thread = check_for_update("3.0", callback, url="http://insecure.example.com/version.json")
         thread.join(timeout=5)
         callback.assert_not_called()
 
     @patch("src.core.update_checker.urllib.request.urlopen")
     def test_non_https_download_url_rejected(self, mock_urlopen):
         """HTTP download URLs in the response should be rejected."""
-        mock_urlopen.return_value = self._make_response({
-            "latest": "4.0",
-            "url": "http://insecure.example.com/update.exe",
-        })
+        mock_urlopen.return_value = self._make_response(
+            {
+                "latest": "4.0",
+                "url": "http://insecure.example.com/update.exe",
+            }
+        )
         callback = MagicMock()
         thread = check_for_update("3.0", callback)
         thread.join(timeout=5)
@@ -186,9 +191,11 @@ class TestCheckForUpdate:
 
     @patch("src.core.update_checker.urllib.request.urlopen")
     def test_missing_latest_field(self, mock_urlopen):
-        mock_urlopen.return_value = self._make_response({
-            "url": "https://example.com/update.exe",
-        })
+        mock_urlopen.return_value = self._make_response(
+            {
+                "url": "https://example.com/update.exe",
+            }
+        )
         callback = MagicMock()
         thread = check_for_update("3.0", callback)
         thread.join(timeout=5)
@@ -196,9 +203,11 @@ class TestCheckForUpdate:
 
     @patch("src.core.update_checker.urllib.request.urlopen")
     def test_missing_url_field(self, mock_urlopen):
-        mock_urlopen.return_value = self._make_response({
-            "latest": "4.0",
-        })
+        mock_urlopen.return_value = self._make_response(
+            {
+                "latest": "4.0",
+            }
+        )
         callback = MagicMock()
         thread = check_for_update("3.0", callback)
         thread.join(timeout=5)

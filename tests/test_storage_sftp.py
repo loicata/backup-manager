@@ -80,6 +80,7 @@ class TestSFTPStorageWithMock:
 
     def _make_storage(self):
         from src.storage.sftp import SFTPStorage
+
         storage = SFTPStorage(
             host="192.168.1.100",
             port=22,
@@ -97,9 +98,7 @@ class TestSFTPStorageWithMock:
             storage = self._make_storage()
             transport = storage._get_transport()
             mp.Transport.assert_called_once_with(("192.168.1.100", 22))
-            transport.connect.assert_called_once_with(
-                username="testuser", password="testpass"
-            )
+            transport.connect.assert_called_once_with(username="testuser", password="testpass")
         finally:
             self._cleanup_paramiko()
 
@@ -107,8 +106,10 @@ class TestSFTPStorageWithMock:
         mp = self._setup_mock_paramiko()
         try:
             from src.storage.sftp import SFTPStorage
+
             storage = SFTPStorage(
-                host="host", username="user",
+                host="host",
+                username="user",
                 key_path="/path/to/key",
             )
             storage._verify_host_key = lambda transport: None

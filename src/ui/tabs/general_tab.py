@@ -39,9 +39,9 @@ class GeneralTab(ScrollableTab):
             label = bt.value.capitalize()
             if bt in beta_types:
                 label += " (beta)"
-            ttk.Radiobutton(
-                type_frame, text=label, value=bt.value, variable=self.type_var
-            ).pack(anchor="w", pady=2)
+            ttk.Radiobutton(type_frame, text=label, value=bt.value, variable=self.type_var).pack(
+                anchor="w", pady=2
+            )
 
         # Source paths
         src_frame = ttk.LabelFrame(self.inner, text="Source paths", padding=Spacing.PAD)
@@ -52,15 +52,17 @@ class GeneralTab(ScrollableTab):
         tree_frame.pack(fill="both", expand=True)
 
         self.sources_tree = ttk.Treeview(
-            tree_frame, columns=("path", "type"), show="headings", height=8,
+            tree_frame,
+            columns=("path", "type"),
+            show="headings",
+            height=8,
         )
         self.sources_tree.heading("path", text="Path")
         self.sources_tree.heading("type", text="Type")
         self.sources_tree.column("path", width=500)
         self.sources_tree.column("type", width=80)
 
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical",
-                                   command=self.sources_tree.yview)
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.sources_tree.yview)
         self.sources_tree.configure(yscrollcommand=scrollbar.set)
         self.sources_tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -69,14 +71,16 @@ class GeneralTab(ScrollableTab):
         btn_frame = ttk.Frame(src_frame)
         btn_frame.pack(fill="x", pady=(Spacing.MEDIUM, 0))
 
-        ttk.Button(btn_frame, text="Add",
-                    command=self._add).pack(side="left", padx=2)
-        ttk.Button(btn_frame, text="Remove",
-                    command=self._remove_selected).pack(side="left", padx=2)
-        ttk.Button(btn_frame, text="Move Up",
-                    command=lambda: self._move(-1)).pack(side="left", padx=2)
-        ttk.Button(btn_frame, text="Move Down",
-                    command=lambda: self._move(1)).pack(side="left", padx=2)
+        ttk.Button(btn_frame, text="Add", command=self._add).pack(side="left", padx=2)
+        ttk.Button(btn_frame, text="Remove", command=self._remove_selected).pack(
+            side="left", padx=2
+        )
+        ttk.Button(btn_frame, text="Move Up", command=lambda: self._move(-1)).pack(
+            side="left", padx=2
+        )
+        ttk.Button(btn_frame, text="Move Down", command=lambda: self._move(1)).pack(
+            side="left", padx=2
+        )
 
         # Exclusion patterns
         excl_frame = ttk.LabelFrame(self.inner, text="Exclusion patterns", padding=Spacing.PAD)
@@ -86,9 +90,12 @@ class GeneralTab(ScrollableTab):
             value="*.tmp, *.log, ~$*, Thumbs.db, desktop.ini, __pycache__, .git, node_modules"
         )
         ttk.Entry(excl_frame, textvariable=self.exclude_var).pack(fill="x")
-        ttk.Label(excl_frame, text="Comma-separated glob patterns",
-                   foreground=Colors.TEXT_SECONDARY,
-                   font=Fonts.small()).pack(anchor="w")
+        ttk.Label(
+            excl_frame,
+            text="Comma-separated glob patterns",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w")
 
         # Bandwidth limit
         bw_frame = ttk.LabelFrame(self.inner, text="Bandwidth limit", padding=Spacing.PAD)
@@ -106,31 +113,38 @@ class GeneralTab(ScrollableTab):
 
         self.autostart_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            start_frame, text="Start Backup Manager at Windows login",
+            start_frame,
+            text="Start Backup Manager at Windows login",
             variable=self.autostart_var,
         ).pack(anchor="w")
 
         self.minimized_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            start_frame, text="Start minimized to tray",
+            start_frame,
+            text="Start minimized to tray",
             variable=self.minimized_var,
         ).pack(anchor="w")
 
         # Retry on failure
         retry_frame = ttk.LabelFrame(
-            self.inner, text="Retry on failure", padding=Spacing.PAD,
+            self.inner,
+            text="Retry on failure",
+            padding=Spacing.PAD,
         )
         retry_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         self.retry_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            retry_frame, text="Enable retry",
+            retry_frame,
+            text="Enable retry",
             variable=self.retry_var,
         ).pack(anchor="w")
 
         ttk.Label(
-            retry_frame, text="Retry delays: 2, 10, 30, 90, 240 minutes",
-            foreground=Colors.TEXT_SECONDARY, font=Fonts.small(),
+            retry_frame,
+            text="Retry delays: 2, 10, 30, 90, 240 minutes",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
         ).pack(anchor="w", pady=(Spacing.SMALL, 0))
 
     def _add(self):
@@ -143,8 +157,9 @@ class GeneralTab(ScrollableTab):
 
     def _add_path(self, path: str, path_type: str):
         # Avoid duplicates
-        existing = [self.sources_tree.item(iid)["values"][0]
-                     for iid in self.sources_tree.get_children()]
+        existing = [
+            self.sources_tree.item(iid)["values"][0] for iid in self.sources_tree.get_children()
+        ]
         if path not in existing:
             self.sources_tree.insert("", "end", values=(path, path_type))
 
@@ -187,12 +202,9 @@ class GeneralTab(ScrollableTab):
             Dict with profile fields and retry/autostart settings.
         """
         sources = [
-            self.sources_tree.item(iid)["values"][0]
-            for iid in self.sources_tree.get_children()
+            self.sources_tree.item(iid)["values"][0] for iid in self.sources_tree.get_children()
         ]
-        excludes = [
-            p.strip() for p in self.exclude_var.get().split(",") if p.strip()
-        ]
+        excludes = [p.strip() for p in self.exclude_var.get().split(",") if p.strip()]
 
         return {
             "name": self.name_var.get().strip() or "Unnamed",

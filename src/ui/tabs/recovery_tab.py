@@ -27,12 +27,16 @@ class RecoveryTab(ScrollableTab):
 
         self.method_var = tk.StringVar(value="list")
         ttk.Radiobutton(
-            method_frame, text="Select from available backups",
-            value="list", variable=self.method_var,
+            method_frame,
+            text="Select from available backups",
+            value="list",
+            variable=self.method_var,
         ).pack(anchor="w")
         ttk.Radiobutton(
-            method_frame, text="Browse for a backup file/folder",
-            value="browse", variable=self.method_var,
+            method_frame,
+            text="Browse for a backup file/folder",
+            value="browse",
+            variable=self.method_var,
         ).pack(anchor="w")
 
         # Backup list
@@ -40,8 +44,10 @@ class RecoveryTab(ScrollableTab):
         list_frame.pack(fill="both", expand=True, padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
         self.backup_tree = ttk.Treeview(
-            list_frame, columns=("name", "size", "date"),
-            show="headings", height=8,
+            list_frame,
+            columns=("name", "size", "date"),
+            show="headings",
+            height=8,
         )
         self.backup_tree.heading("name", text="Backup")
         self.backup_tree.heading("size", text="Size")
@@ -54,7 +60,9 @@ class RecoveryTab(ScrollableTab):
         btn_row = ttk.Frame(list_frame)
         btn_row.pack(fill="x", pady=(Spacing.SMALL, 0))
         ttk.Button(btn_row, text="Refresh", command=self._refresh_list).pack(side="left")
-        ttk.Button(btn_row, text="Browse...", command=self._browse_backup).pack(side="left", padx=Spacing.SMALL)
+        ttk.Button(btn_row, text="Browse...", command=self._browse_backup).pack(
+            side="left", padx=Spacing.SMALL
+        )
 
         # Destination
         dest_frame = ttk.LabelFrame(self.inner, text="Restore destination", padding=Spacing.PAD)
@@ -64,15 +72,18 @@ class RecoveryTab(ScrollableTab):
         dest_row.pack(fill="x")
         self.dest_var = tk.StringVar()
         ttk.Entry(dest_row, textvariable=self.dest_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(dest_row, text="Browse...",
-                    command=self._browse_dest).pack(side="right", padx=(Spacing.SMALL, 0))
+        ttk.Button(dest_row, text="Browse...", command=self._browse_dest).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
 
         # Restore button
         btn_frame = ttk.Frame(self.inner)
         btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         self.restore_btn = ttk.Button(
-            btn_frame, text="Restore", style="Accent.TButton",
+            btn_frame,
+            text="Restore",
+            style="Accent.TButton",
             command=self._restore,
         )
         self.restore_btn.pack(side="left")
@@ -95,14 +106,16 @@ class RecoveryTab(ScrollableTab):
                 backups = self._backend.list_backups()
                 self.after(0, lambda: self._populate_list(backups))
             except Exception as e:
-                self.after(0, lambda: self.status_label.config(
-                    text=f"Error: {e}", foreground=Colors.DANGER
-                ))
+                self.after(
+                    0,
+                    lambda: self.status_label.config(text=f"Error: {e}", foreground=Colors.DANGER),
+                )
 
         threading.Thread(target=_load, daemon=True).start()
 
     def _populate_list(self, backups):
         from datetime import datetime
+
         for b in backups:
             size = self._format_size(b.get("size", 0))
             mtime = b.get("modified", 0)
@@ -147,9 +160,12 @@ class RecoveryTab(ScrollableTab):
                             target.parent.mkdir(parents=True, exist_ok=True)
                             if f.suffix == ".wbenc":
                                 # Encrypted file — prompt for password
-                                self.after(0, lambda: self.status_label.config(
-                                    text="Encrypted file — enter password in dialog"
-                                ))
+                                self.after(
+                                    0,
+                                    lambda: self.status_label.config(
+                                        text="Encrypted file — enter password in dialog"
+                                    ),
+                                )
                             else:
                                 shutil.copy2(f, target)
 

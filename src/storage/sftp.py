@@ -24,11 +24,11 @@ from src.storage.base import StorageBackend, with_retry
 
 logger = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT = 15          # Seconds for SSH/SFTP connection
-_EXEC_PROBE_TIMEOUT = 10       # Seconds for exec channel probe
-_KEEPALIVE_INTERVAL = 30       # Seconds between SSH keepalive packets
+_CONNECT_TIMEOUT = 15  # Seconds for SSH/SFTP connection
+_EXEC_PROBE_TIMEOUT = 10  # Seconds for exec channel probe
+_KEEPALIVE_INTERVAL = 30  # Seconds between SSH keepalive packets
 _FAST_CHUNK_SIZE = 1024 * 1024  # 1 MB
-_SFTP_WINDOW_SIZE = 2 ** 25     # 32 MB (default is 2 MB)
+_SFTP_WINDOW_SIZE = 2**25  # 32 MB (default is 2 MB)
 
 
 def _validate_remote_name(name: str) -> str:
@@ -55,12 +55,10 @@ def _validate_remote_name(name: str) -> str:
 
     # Reject shell metacharacters that could allow command injection
     # even through single-quote escaping (e.g. backticks, $())
-    _DANGEROUS_CHARS = set('`$;&|><!')
+    _DANGEROUS_CHARS = set("`$;&|><!")
     for char in _DANGEROUS_CHARS:
         if char in name:
-            raise ValueError(
-                f"Remote name contains dangerous character: {char!r}"
-            )
+            raise ValueError(f"Remote name contains dangerous character: {char!r}")
 
     # Strip leading slashes for relative paths
     return name.lstrip("/")
@@ -192,7 +190,8 @@ class SFTPStorage(StorageBackend):
             host_keys.save(str(known_hosts))
             logger.info(
                 "New host key saved for %s (%s)",
-                self._host, remote_key.get_name(),
+                self._host,
+                remote_key.get_name(),
             )
         else:
             # Verify the key matches
@@ -251,10 +250,12 @@ class SFTPStorage(StorageBackend):
                 data = channel.recv(1024)
                 output = data.decode("utf-8", errors="replace").strip()
                 exit_status = channel.recv_exit_status()
-                self._exec_available = (exit_status == 0 and output == "ok")
+                self._exec_available = exit_status == 0 and output == "ok"
                 logger.info(
                     "Exec channel probe: output=%r, exit=%d, available=%s",
-                    output, exit_status, self._exec_available,
+                    output,
+                    exit_status,
+                    self._exec_available,
                 )
             finally:
                 channel.close()
@@ -331,7 +332,11 @@ class SFTPStorage(StorageBackend):
                 transport.close()
 
     def _fast_upload_fileobj(
-        self, transport, fileobj: BinaryIO, remote_path: str, size: int,
+        self,
+        transport,
+        fileobj: BinaryIO,
+        remote_path: str,
+        size: int,
     ) -> None:
         """Upload a file-like object via exec channel (cat > file)."""
         escaped = _shell_escape(remote_path)
@@ -353,9 +358,7 @@ class SFTPStorage(StorageBackend):
             channel.shutdown_write()
             exit_status = channel.recv_exit_status()
             if exit_status != 0:
-                raise OSError(
-                    f"Remote cat failed (exit {exit_status}) for {remote_path}"
-                )
+                raise OSError(f"Remote cat failed (exit {exit_status}) for {remote_path}")
         finally:
             channel.close()
 
@@ -499,12 +502,14 @@ class SFTPStorage(StorageBackend):
                 for entry in entries:
                     if entry.filename.startswith("."):
                         continue
-                    backups.append({
-                        "name": entry.filename,
-                        "size": entry.st_size or 0,
-                        "modified": entry.st_mtime or 0,
-                        "is_dir": stat.S_ISDIR(entry.st_mode) if entry.st_mode else False,
-                    })
+                    backups.append(
+                        {
+                            "name": entry.filename,
+                            "size": entry.st_size or 0,
+                            "modified": entry.st_mtime or 0,
+                            "is_dir": stat.S_ISDIR(entry.st_mode) if entry.st_mode else False,
+                        }
+                    )
                 return sorted(backups, key=lambda b: b["modified"], reverse=True)
             finally:
                 sftp.close()
@@ -578,7 +583,7 @@ class SFTPStorage(StorageBackend):
                 try:
                     vfs = sftp2.statvfs(self._remote_path)
                     free = vfs.f_bavail * vfs.f_frsize
-                    free_gb = free / (1024 ** 3)
+                    free_gb = free / (1024**3)
                     info += f"\n{free_gb:.1f} GB free"
                 finally:
                     sftp2.close()

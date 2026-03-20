@@ -47,17 +47,19 @@ def build_integrity_manifest(
             logger.warning("Could not hash %s: %s", file_info.relative_path, e)
 
         phase_log.progress(
-            current=i + 1, total=total,
-            filename=file_info.relative_path, phase="hashing",
+            current=i + 1,
+            total=total,
+            filename=file_info.relative_path,
+            phase="hashing",
         )
 
     # Total checksum: hash of sorted file hashes
     all_hashes = sorted(file_hashes.get(k, {}).get("hash", "") for k in file_hashes)
-    total_checksum = hashlib.sha256(
-        "\n".join(all_hashes).encode("utf-8")
-    ).hexdigest()
+    total_checksum = hashlib.sha256("\n".join(all_hashes).encode("utf-8")).hexdigest()
 
-    phase_log.info(f"Manifest created: {len(file_hashes)} files, checksum: {total_checksum[:16]}...")
+    phase_log.info(
+        f"Manifest created: {len(file_hashes)} files, checksum: {total_checksum[:16]}..."
+    )
 
     return {
         "version": 1,

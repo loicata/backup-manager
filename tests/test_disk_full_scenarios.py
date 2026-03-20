@@ -32,6 +32,7 @@ def _make_file_info(tmp_path: Path, name: str = "file.txt") -> FileInfo:
 # 1-2  local_writer: write_flat
 # ---------------------------------------------------------------------------
 
+
 class TestLocalWriterDiskFull:
     """Disk-full errors during flat copy."""
 
@@ -65,6 +66,7 @@ class TestLocalWriterDiskFull:
 # 3  encryptor: encrypt_backup
 # ---------------------------------------------------------------------------
 
+
 class TestEncryptorDiskFull:
     """Disk full during encryption output write."""
 
@@ -76,9 +78,7 @@ class TestEncryptorDiskFull:
         backup_dir.mkdir()
         (backup_dir / "data.txt").write_text("secret", encoding="utf-8")
 
-        with patch(
-            "src.core.phases.encryptor.encrypt_file", return_value=False
-        ) as mock_enc:
+        with patch("src.core.phases.encryptor.encrypt_file", return_value=False) as mock_enc:
             result = encrypt_backup(backup_dir, "password123")
 
         # Original file must NOT be deleted when encryption fails
@@ -90,6 +90,7 @@ class TestEncryptorDiskFull:
 # ---------------------------------------------------------------------------
 # 4  manifest: save_integrity_manifest
 # ---------------------------------------------------------------------------
+
 
 class TestManifestDiskFull:
     """Disk full when writing .wbverify file."""
@@ -110,6 +111,7 @@ class TestManifestDiskFull:
 # ---------------------------------------------------------------------------
 # 5  config: ConfigManager._atomic_write / save_profile
 # ---------------------------------------------------------------------------
+
 
 class TestConfigSaveDiskFull:
     """Disk full when saving profile JSON."""
@@ -141,6 +143,7 @@ class TestConfigSaveDiskFull:
 # 6  LocalStorage: upload (copytree) disk full
 # ---------------------------------------------------------------------------
 
+
 class TestLocalStorageDiskFull:
     """copytree / copy2 fails with ENOSPC during upload."""
 
@@ -163,6 +166,7 @@ class TestLocalStorageDiskFull:
 # ---------------------------------------------------------------------------
 # 7  LocalStorage: get_free_space
 # ---------------------------------------------------------------------------
+
 
 class TestLocalStorageFreeSpace:
     """get_free_space returns correct value or None on error."""

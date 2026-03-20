@@ -65,6 +65,7 @@ class VerifyReport:
 @dataclass
 class IntegrityManifest:
     """Stores file hashes for a backup."""
+
     version: int = MANIFEST_VERSION
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     algorithm: str = HASH_ALGORITHM
@@ -158,9 +159,7 @@ def build_manifest(
     # Total checksum: hash of all sorted file hashes
     if all_hashes:
         combined = "\n".join(sorted(all_hashes))
-        manifest.total_checksum = hashlib.sha256(
-            combined.encode("utf-8")
-        ).hexdigest()
+        manifest.total_checksum = hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
     return manifest
 
@@ -197,39 +196,47 @@ def verify_backup(
         # Check if file exists in backup
         if str(backup_file) not in backup_files and not backup_file.exists():
             report.missing += 1
-            report.file_results.append(FileVerifyResult(
-                relative_path=filepath,
-                status=FileStatus.MISSING_IN_BACKUP,
-                expected_hash=expected_hash,
-            ))
+            report.file_results.append(
+                FileVerifyResult(
+                    relative_path=filepath,
+                    status=FileStatus.MISSING_IN_BACKUP,
+                    expected_hash=expected_hash,
+                )
+            )
             continue
 
         try:
             actual_hash = compute_file_hash(backup_file)
             if actual_hash == expected_hash:
                 report.verified_ok += 1
-                report.file_results.append(FileVerifyResult(
-                    relative_path=filepath,
-                    status=FileStatus.OK,
-                    expected_hash=expected_hash,
-                    actual_hash=actual_hash,
-                ))
+                report.file_results.append(
+                    FileVerifyResult(
+                        relative_path=filepath,
+                        status=FileStatus.OK,
+                        expected_hash=expected_hash,
+                        actual_hash=actual_hash,
+                    )
+                )
             else:
                 report.mismatches += 1
-                report.file_results.append(FileVerifyResult(
-                    relative_path=filepath,
-                    status=FileStatus.MISMATCH,
-                    expected_hash=expected_hash,
-                    actual_hash=actual_hash,
-                ))
+                report.file_results.append(
+                    FileVerifyResult(
+                        relative_path=filepath,
+                        status=FileStatus.MISMATCH,
+                        expected_hash=expected_hash,
+                        actual_hash=actual_hash,
+                    )
+                )
         except Exception as e:
             report.errors += 1
-            report.file_results.append(FileVerifyResult(
-                relative_path=filepath,
-                status=FileStatus.READ_ERROR,
-                expected_hash=expected_hash,
-                detail=str(e),
-            ))
+            report.file_results.append(
+                FileVerifyResult(
+                    relative_path=filepath,
+                    status=FileStatus.READ_ERROR,
+                    expected_hash=expected_hash,
+                    detail=str(e),
+                )
+            )
 
     report.end_time = datetime.now()
     return report
@@ -240,6 +247,7 @@ def _is_excluded(filepath: Path, patterns: list[str] | None) -> bool:
     if not patterns:
         return False
     import fnmatch
+
     name = filepath.name
     rel = str(filepath)
     for pattern in patterns:

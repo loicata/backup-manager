@@ -56,8 +56,9 @@ def pipeline_env(tmp_path):
     }
 
 
-def _make_profile(env, encrypt_primary=False, encrypt_mirror1=False,
-                  encrypt_mirror2=False, mirrors=None):
+def _make_profile(
+    env, encrypt_primary=False, encrypt_mirror1=False, encrypt_mirror2=False, mirrors=None
+):
     """Build a BackupProfile with optional encryption and mirror configs."""
     encryption = EncryptionConfig(
         enabled=encrypt_primary or encrypt_mirror1 or encrypt_mirror2,
@@ -76,7 +77,9 @@ def _make_profile(env, encrypt_primary=False, encrypt_mirror1=False,
         verification=VerificationConfig(auto_verify=True, alert_on_failure=True),
         retention=RetentionConfig(
             policy=RetentionPolicy.GFS,
-            gfs_daily=99, gfs_weekly=99, gfs_monthly=99,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
         ),
         encryption=encryption,
         encrypt_primary=encrypt_primary,
@@ -100,8 +103,9 @@ class TestEncryptPrimaryPipeline:
         assert backup_path.exists()
 
         all_files = list(backup_path.rglob("*"))
-        data_files = [f for f in all_files if f.is_file()
-                      and f.name != f"{backup_path.name}.wbverify"]
+        data_files = [
+            f for f in all_files if f.is_file() and f.name != f"{backup_path.name}.wbverify"
+        ]
         # Every data file should end in .wbenc
         for f in data_files:
             assert f.suffix == ".wbenc", f"Expected .wbenc extension: {f.name}"
@@ -150,7 +154,9 @@ class TestMirrorEncryption:
             destination_path=str(mirror_dest),
         )
         profile = _make_profile(
-            pipeline_env, encrypt_mirror1=True, mirrors=[mirror_config],
+            pipeline_env,
+            encrypt_mirror1=True,
+            mirrors=[mirror_config],
         )
         engine = BackupEngine(pipeline_env["config_manager"])
         stats = engine.run_backup(profile)
@@ -168,14 +174,17 @@ class TestMirrorEncryption:
         m2_dir.mkdir()
 
         m1_cfg = StorageConfig(
-            storage_type=StorageType.LOCAL, destination_path=str(m1_dir),
+            storage_type=StorageType.LOCAL,
+            destination_path=str(m1_dir),
         )
         m2_cfg = StorageConfig(
-            storage_type=StorageType.LOCAL, destination_path=str(m2_dir),
+            storage_type=StorageType.LOCAL,
+            destination_path=str(m2_dir),
         )
         profile = _make_profile(
             pipeline_env,
-            encrypt_mirror1=True, encrypt_mirror2=False,
+            encrypt_mirror1=True,
+            encrypt_mirror2=False,
             mirrors=[m1_cfg, m2_cfg],
         )
         engine = BackupEngine(pipeline_env["config_manager"])
@@ -195,11 +204,13 @@ class TestEncryptPrimaryAndMirror:
         mirror_dir.mkdir()
 
         mirror_cfg = StorageConfig(
-            storage_type=StorageType.LOCAL, destination_path=str(mirror_dir),
+            storage_type=StorageType.LOCAL,
+            destination_path=str(mirror_dir),
         )
         profile = _make_profile(
             pipeline_env,
-            encrypt_primary=True, encrypt_mirror1=True,
+            encrypt_primary=True,
+            encrypt_mirror1=True,
             mirrors=[mirror_cfg],
         )
         engine = BackupEngine(pipeline_env["config_manager"])
@@ -207,8 +218,9 @@ class TestEncryptPrimaryAndMirror:
 
         # Primary: .wbenc files
         backup_path = Path(stats.backup_path)
-        data_files = [f for f in backup_path.rglob("*") if f.is_file()
-                      and not f.name.endswith(".wbverify")]
+        data_files = [
+            f for f in backup_path.rglob("*") if f.is_file() and not f.name.endswith(".wbverify")
+        ]
         assert all(f.suffix == ".wbenc" for f in data_files)
 
         # Mirror: succeeded

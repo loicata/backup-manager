@@ -14,7 +14,13 @@ from src.core.events import EventBus, STATUS
 from src.core.backup_engine import BackupEngine, CancelledError
 from src.core.scheduler import InAppScheduler, AutoStart
 from src.ui.theme import (
-    Colors, Fonts, Spacing, APP_TITLE, WINDOW_SIZE, MIN_SIZE, setup_theme,
+    Colors,
+    Fonts,
+    Spacing,
+    APP_TITLE,
+    WINDOW_SIZE,
+    MIN_SIZE,
+    setup_theme,
 )
 from src.ui.tabs.general_tab import GeneralTab
 from src.ui.tabs.storage_tab import StorageTab
@@ -99,14 +105,18 @@ class BackupManagerApp:
 
         # App title
         tk.Label(
-            sidebar, text="Backup\nManager",
-            bg=Colors.SIDEBAR_BG, fg=Colors.SIDEBAR_TEXT,
+            sidebar,
+            text="Backup\nManager",
+            bg=Colors.SIDEBAR_BG,
+            fg=Colors.SIDEBAR_TEXT,
             font=Fonts.title(),
         ).pack(pady=(Spacing.XLARGE, Spacing.SMALL))
 
         tk.Label(
-            sidebar, text=f"v{__version__}",
-            bg=Colors.SIDEBAR_BG, fg=Colors.TEXT_DISABLED,
+            sidebar,
+            text=f"v{__version__}",
+            bg=Colors.SIDEBAR_BG,
+            fg=Colors.TEXT_DISABLED,
             font=Fonts.small(),
         ).pack()
 
@@ -116,8 +126,10 @@ class BackupManagerApp:
 
         # Profile label
         tk.Label(
-            sidebar, text="BACKUP PROFILES",
-            bg=Colors.SIDEBAR_BG, fg=Colors.TEXT_DISABLED,
+            sidebar,
+            text="BACKUP PROFILES",
+            bg=Colors.SIDEBAR_BG,
+            fg=Colors.TEXT_DISABLED,
             font=Fonts.small(),
         ).pack(anchor="w", padx=Spacing.LARGE)
 
@@ -134,8 +146,10 @@ class BackupManagerApp:
             activestyle="none",
         )
         self.profile_listbox.pack(
-            fill="both", expand=True,
-            padx=Spacing.MEDIUM, pady=Spacing.MEDIUM,
+            fill="both",
+            expand=True,
+            padx=Spacing.MEDIUM,
+            pady=Spacing.MEDIUM,
         )
         self.profile_listbox.bind("<<ListboxSelect>>", self._on_profile_selected)
 
@@ -144,20 +158,26 @@ class BackupManagerApp:
         btn_frame.pack(fill="x", padx=Spacing.MEDIUM, pady=Spacing.MEDIUM)
 
         tk.Button(
-            btn_frame, text="+ New profile",
-            bg=Colors.ACCENT, fg="white",
+            btn_frame,
+            text="+ New profile",
+            bg=Colors.ACCENT,
+            fg="white",
             activebackground=Colors.ACCENT_HOVER,
             activeforeground="white",
-            relief="flat", font=Fonts.normal(),
+            relief="flat",
+            font=Fonts.normal(),
             command=self._new_profile,
         ).pack(fill="x", pady=2)
 
         tk.Button(
-            btn_frame, text="🗑 Delete",
-            bg=Colors.DANGER, fg="white",
+            btn_frame,
+            text="🗑 Delete",
+            bg=Colors.DANGER,
+            fg="white",
             activebackground="#c0392b",
             activeforeground="white",
-            relief="flat", font=Fonts.normal(),
+            relief="flat",
+            font=Fonts.normal(),
             command=self._delete_profile,
         ).pack(fill="x", pady=2)
 
@@ -166,10 +186,13 @@ class BackupManagerApp:
         bottom.pack(fill="x", padx=Spacing.MEDIUM, pady=Spacing.MEDIUM)
 
         tk.Button(
-            bottom, text="ℹ About",
-            bg=Colors.SIDEBAR_HOVER, fg=Colors.SIDEBAR_TEXT,
+            bottom,
+            text="ℹ About",
+            bg=Colors.SIDEBAR_HOVER,
+            fg=Colors.SIDEBAR_TEXT,
             activebackground=Colors.SIDEBAR_BG,
-            relief="flat", font=Fonts.small(),
+            relief="flat",
+            font=Fonts.small(),
             command=self._show_about,
         ).pack(fill="x", pady=2)
 
@@ -216,7 +239,9 @@ class BackupManagerApp:
         save_frame = ttk.Frame(parent)
         save_frame.pack(fill="x", side="bottom")
         ttk.Button(
-            save_frame, text="💾 Save", style="Accent.TButton",
+            save_frame,
+            text="💾 Save",
+            style="Accent.TButton",
             command=self._save_profile,
         ).pack(side="right", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
@@ -348,19 +373,25 @@ class BackupManagerApp:
                 self.tray.set_state(TrayState.BACKUP_RUNNING)
                 stats = self.engine.run_backup(profile)
                 self.tray.set_state(TrayState.BACKUP_SUCCESS)
-                self.tray.notify("Backup complete",
-                                  f"{stats.files_processed} files in {stats.duration_seconds:.0f}s")
+                self.tray.notify(
+                    "Backup complete",
+                    f"{stats.files_processed} files in {stats.duration_seconds:.0f}s",
+                )
 
                 # Update last_backup
                 from datetime import datetime
+
                 profile.last_backup = datetime.now().isoformat()
                 self.config_manager.save_profile(profile)
 
                 # Send email notification
                 if profile.email.enabled:
                     from src.notifications.email_notifier import send_backup_report
+
                     send_backup_report(
-                        profile.email, profile.name, True,
+                        profile.email,
+                        profile.name,
+                        True,
                         f"{stats.files_processed} files backed up",
                     )
 
@@ -371,8 +402,12 @@ class BackupManagerApp:
                 self.tray.notify("Backup failed", str(e))
                 if profile.email.enabled:
                     from src.notifications.email_notifier import send_backup_report
+
                     send_backup_report(
-                        profile.email, profile.name, False, str(e),
+                        profile.email,
+                        profile.name,
+                        False,
+                        str(e),
                     )
 
         threading.Thread(target=_backup_thread, daemon=True, name="Backup").start()
@@ -395,9 +430,7 @@ class BackupManagerApp:
             )
         except Exception as e:
             self.tray.set_state(TrayState.BACKUP_ERROR)
-            self.scheduler.journal.update_last(
-                status="failed", detail=str(e)
-            )
+            self.scheduler.journal.update_last(status="failed", detail=str(e))
 
     # --- Status ---
 
@@ -450,10 +483,13 @@ class BackupManagerApp:
 
     def _show_modules(self):
         from src.installer import check_all
+
         results = check_all()
         msg = "Feature status:\n\n"
         for feat, info in results.items():
-            status = "✅ Available" if info["available"] else f"❌ Missing: {', '.join(info['missing'])}"
+            status = (
+                "✅ Available" if info["available"] else f"❌ Missing: {', '.join(info['missing'])}"
+            )
             msg += f"  {feat}: {status}\n"
         messagebox.showinfo("Modules", msg)
 

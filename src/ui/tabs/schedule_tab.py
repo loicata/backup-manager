@@ -20,7 +20,8 @@ class ScheduleTab(ScrollableTab):
         # Enable scheduling
         self.enabled_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            self.inner, text="Enable automatic scheduling",
+            self.inner,
+            text="Enable automatic scheduling",
             variable=self.enabled_var,
             command=self._toggle_enabled,
         ).pack(anchor="w", padx=Spacing.LARGE, pady=Spacing.LARGE)
@@ -38,8 +39,14 @@ class ScheduleTab(ScrollableTab):
         ttk.Label(row1, text="Frequency:").pack(side="left")
         self.freq_var = tk.StringVar(value=ScheduleFrequency.WEEKLY.value)
         ttk.Combobox(
-            row1, textvariable=self.freq_var, state="readonly",
-            values=[f.value.capitalize() for f in ScheduleFrequency if f not in (ScheduleFrequency.MANUAL, ScheduleFrequency.HOURLY)],
+            row1,
+            textvariable=self.freq_var,
+            state="readonly",
+            values=[
+                f.value.capitalize()
+                for f in ScheduleFrequency
+                if f not in (ScheduleFrequency.MANUAL, ScheduleFrequency.HOURLY)
+            ],
             width=15,
         ).pack(side="left", padx=Spacing.MEDIUM)
 
@@ -53,7 +60,9 @@ class ScheduleTab(ScrollableTab):
         ttk.Label(row2, text="Day of week:").pack(side="left")
         self.dow_var = tk.StringVar(value="Monday")
         ttk.Combobox(
-            row2, textvariable=self.dow_var, state="readonly",
+            row2,
+            textvariable=self.dow_var,
+            state="readonly",
             values=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
             width=15,
         ).pack(side="left", padx=Spacing.MEDIUM)
@@ -66,12 +75,15 @@ class ScheduleTab(ScrollableTab):
 
         # Schedule journal
         journal_frame = ttk.LabelFrame(self._content, text="Schedule journal", padding=Spacing.PAD)
-        journal_frame.pack(fill="both", expand=True, padx=Spacing.LARGE,
-                            pady=(Spacing.MEDIUM, Spacing.LARGE))
+        journal_frame.pack(
+            fill="both", expand=True, padx=Spacing.LARGE, pady=(Spacing.MEDIUM, Spacing.LARGE)
+        )
 
         self.journal_tree = ttk.Treeview(
-            journal_frame, columns=("time", "profile", "status", "detail"),
-            show="headings", height=6,
+            journal_frame,
+            columns=("time", "profile", "status", "detail"),
+            show="headings",
+            height=6,
         )
         self.journal_tree.heading("time", text="Time")
         self.journal_tree.heading("profile", text="Profile")
@@ -83,8 +95,9 @@ class ScheduleTab(ScrollableTab):
         self.journal_tree.column("detail", width=300)
         self.journal_tree.pack(fill="both", expand=True)
 
-        ttk.Button(journal_frame, text="Refresh",
-                    command=self._refresh_journal).pack(anchor="e", pady=(Spacing.SMALL, 0))
+        ttk.Button(journal_frame, text="Refresh", command=self._refresh_journal).pack(
+            anchor="e", pady=(Spacing.SMALL, 0)
+        )
 
         self._toggle_enabled()
 
@@ -107,12 +120,16 @@ class ScheduleTab(ScrollableTab):
         if self._scheduler:
             entries = self._scheduler.journal.get_entries(limit=50)
             for entry in reversed(entries):
-                self.journal_tree.insert("", "end", values=(
-                    entry.get("timestamp", "")[:19],
-                    entry.get("profile_name", ""),
-                    entry.get("status", ""),
-                    entry.get("detail", ""),
-                ))
+                self.journal_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        entry.get("timestamp", "")[:19],
+                        entry.get("profile_name", ""),
+                        entry.get("status", ""),
+                        entry.get("detail", ""),
+                    ),
+                )
 
     def _day_name_to_int(self, name: str) -> int:
         days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]

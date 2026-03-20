@@ -21,18 +21,19 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Encryption constants
-SALT_SIZE = 16          # 128-bit salt
-NONCE_SIZE = 12         # 96-bit nonce (GCM standard)
-TAG_SIZE = 16           # 128-bit authentication tag
-KEY_SIZE = 32           # 256-bit key
+SALT_SIZE = 16  # 128-bit salt
+NONCE_SIZE = 12  # 96-bit nonce (GCM standard)
+TAG_SIZE = 16  # 128-bit authentication tag
+KEY_SIZE = 32  # 256-bit key
 PBKDF2_ITERATIONS = 600_000  # OWASP 2024 recommendation
-CHUNK_SIZE = 1024 * 1024      # 1 MB read chunks for file encryption
+CHUNK_SIZE = 1024 * 1024  # 1 MB read chunks for file encryption
 
 
 def _has_cryptography() -> bool:
     """Check if the cryptography library is available."""
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
         return True
     except ImportError:
         return False
@@ -44,6 +45,7 @@ def _has_dpapi() -> bool:
         return False
     try:
         import ctypes
+
         ctypes.windll.crypt32.CryptProtectData
         return True
     except (AttributeError, OSError):
@@ -114,8 +116,8 @@ def decrypt_bytes(encrypted: bytes, password: str) -> bytes:
         raise ValueError("Encrypted data too short")
 
     salt = encrypted[:SALT_SIZE]
-    nonce = encrypted[SALT_SIZE:SALT_SIZE + NONCE_SIZE]
-    ciphertext = encrypted[SALT_SIZE + NONCE_SIZE:]
+    nonce = encrypted[SALT_SIZE : SALT_SIZE + NONCE_SIZE]
+    ciphertext = encrypted[SALT_SIZE + NONCE_SIZE :]
 
     key = bytearray(derive_key(password, salt))
     try:
@@ -193,6 +195,7 @@ def decrypt_file(input_path: Path, output_path: Path, password: str) -> bool:
 
 # --- Password storage (DPAPI / AES fallback) ---
 
+
 def store_password(password: str) -> str:
     """Encrypt a password for persistent storage.
 
@@ -252,6 +255,7 @@ def evaluate_password(password: str) -> str:
 
 # --- DPAPI helpers ---
 
+
 def _dpapi_store(password: str) -> str:
     """Store password using Windows DPAPI."""
     import ctypes
@@ -271,7 +275,10 @@ def _dpapi_store(password: str) -> str:
     try:
         if ctypes.windll.crypt32.CryptProtectData(
             ctypes.byref(input_blob),
-            None, None, None, None,
+            None,
+            None,
+            None,
+            None,
             0,
             ctypes.byref(output_blob),
         ):
@@ -297,14 +304,15 @@ def _dpapi_retrieve(stored: str) -> str:
         ]
 
     encrypted = base64.b64decode(stored[6:])  # Skip "dpapi:"
-    input_blob = DATA_BLOB(
-        len(encrypted), ctypes.create_string_buffer(encrypted)
-    )
+    input_blob = DATA_BLOB(len(encrypted), ctypes.create_string_buffer(encrypted))
     output_blob = DATA_BLOB()
 
     if ctypes.windll.crypt32.CryptUnprotectData(
         ctypes.byref(input_blob),
-        None, None, None, None,
+        None,
+        None,
+        None,
+        None,
         0,
         ctypes.byref(output_blob),
     ):
@@ -387,7 +395,11 @@ def _protect_machine_key(key_data: bytes) -> bytes:
 
     if ctypes.windll.crypt32.CryptProtectData(
         ctypes.byref(input_blob),
-        None, None, None, None, 0,
+        None,
+        None,
+        None,
+        None,
+        0,
         ctypes.byref(output_blob),
     ):
         encrypted = ctypes.string_at(output_blob.pbData, output_blob.cbData)
@@ -425,13 +437,18 @@ def _unprotect_machine_key(raw: bytes) -> Optional[bytes]:
 
         encrypted = raw[6:]  # Skip b"DPAPI:"
         input_blob = DATA_BLOB(
-            len(encrypted), ctypes.create_string_buffer(encrypted),
+            len(encrypted),
+            ctypes.create_string_buffer(encrypted),
         )
         output_blob = DATA_BLOB()
 
         if ctypes.windll.crypt32.CryptUnprotectData(
             ctypes.byref(input_blob),
-            None, None, None, None, 0,
+            None,
+            None,
+            None,
+            None,
+            0,
             ctypes.byref(output_blob),
         ):
             try:
@@ -458,7 +475,11 @@ def _aes_store(password: str) -> str:
     machine_key = _get_or_create_machine_key()
     salt = secrets.token_bytes(SALT_SIZE)
     key = hashlib.pbkdf2_hmac(
-        "sha256", machine_key, salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE,
+        "sha256",
+        machine_key,
+        salt,
+        PBKDF2_ITERATIONS,
+        dklen=KEY_SIZE,
     )
 
     nonce = secrets.token_bytes(NONCE_SIZE)
@@ -487,7 +508,11 @@ def _aes_retrieve(stored: str) -> str:
 
     machine_key = _get_or_create_machine_key()
     key = hashlib.pbkdf2_hmac(
-        "sha256", machine_key, salt, PBKDF2_ITERATIONS, dklen=KEY_SIZE,
+        "sha256",
+        machine_key,
+        salt,
+        PBKDF2_ITERATIONS,
+        dklen=KEY_SIZE,
     )
 
     aesgcm = AESGCM(key)

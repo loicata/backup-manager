@@ -25,8 +25,10 @@ class HistoryTab(ScrollableTab):
         list_frame.pack(fill="both", expand=True, padx=Spacing.LARGE, pady=Spacing.LARGE)
 
         self.log_tree = ttk.Treeview(
-            list_frame, columns=("date", "profile", "size"),
-            show="headings", height=12,
+            list_frame,
+            columns=("date", "profile", "size"),
+            show="headings",
+            height=12,
         )
         self.log_tree.heading("date", text="Date")
         self.log_tree.heading("profile", text="Profile")
@@ -35,8 +37,7 @@ class HistoryTab(ScrollableTab):
         self.log_tree.column("profile", width=200)
         self.log_tree.column("size", width=100)
 
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical",
-                                    command=self.log_tree.yview)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.log_tree.yview)
         self.log_tree.configure(yscrollcommand=scrollbar.set)
         self.log_tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -46,8 +47,9 @@ class HistoryTab(ScrollableTab):
         btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         ttk.Button(btn_frame, text="Refresh", command=self.refresh).pack(side="left")
-        ttk.Button(btn_frame, text="Open logs folder",
-                    command=self._open_folder).pack(side="left", padx=Spacing.MEDIUM)
+        ttk.Button(btn_frame, text="Open logs folder", command=self._open_folder).pack(
+            side="left", padx=Spacing.MEDIUM
+        )
 
         self.refresh()
 
@@ -75,6 +77,7 @@ class HistoryTab(ScrollableTab):
             size_str = f"{size / 1024:.1f} KB" if size > 1024 else f"{size} B"
 
             from datetime import datetime
+
             try:
                 mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
                 date_display = mtime.strftime("%Y-%m-%d %H:%M:%S")

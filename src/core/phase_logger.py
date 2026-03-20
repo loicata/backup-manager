@@ -39,7 +39,10 @@ class PhaseLogger:
         self._logger.info(message)
         if self._events:
             self._events.emit(
-                LOG, message=message, level="info", phase=self._phase_name,
+                LOG,
+                message=message,
+                level="info",
+                phase=self._phase_name,
             )
 
     def warning(self, message: str) -> None:
@@ -51,7 +54,10 @@ class PhaseLogger:
         self._logger.warning(message)
         if self._events:
             self._events.emit(
-                LOG, message=message, level="warning", phase=self._phase_name,
+                LOG,
+                message=message,
+                level="warning",
+                phase=self._phase_name,
             )
 
     def error(self, message: str) -> None:
@@ -63,7 +69,10 @@ class PhaseLogger:
         self._logger.error(message)
         if self._events:
             self._events.emit(
-                LOG, message=message, level="error", phase=self._phase_name,
+                LOG,
+                message=message,
+                level="error",
+                phase=self._phase_name,
             )
 
     def progress(
@@ -84,6 +93,8 @@ class PhaseLogger:
         if self._events:
             self._events.emit(
                 PROGRESS,
-                current=current, total=total,
-                filename=filename, phase=phase,
+                current=current,
+                total=total,
+                filename=filename,
+                phase=phase,
             )

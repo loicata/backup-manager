@@ -26,10 +26,10 @@ from src.core.config import (
 from src.core.events import EventBus
 from src.core.exceptions import CancelledError
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def env(tmp_path):
@@ -69,7 +69,9 @@ def profile(env):
         verification=VerificationConfig(auto_verify=True, alert_on_failure=True),
         retention=RetentionConfig(
             policy=RetentionPolicy.GFS,
-            gfs_daily=99, gfs_weekly=99, gfs_monthly=99,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
         ),
     )
 
@@ -82,6 +84,7 @@ def _engine(env):
 # ---------------------------------------------------------------------------
 # 1. Collection phase failures
 # ---------------------------------------------------------------------------
+
 
 class TestCollectionFailures:
 
@@ -105,6 +108,7 @@ class TestCollectionFailures:
 # 2. Write phase failures
 # ---------------------------------------------------------------------------
 
+
 class TestWriteFailures:
 
     def test_disk_full_during_copy(self, env, profile):
@@ -119,6 +123,7 @@ class TestWriteFailures:
 # ---------------------------------------------------------------------------
 # 3. Manifest phase failures
 # ---------------------------------------------------------------------------
+
 
 class TestManifestFailures:
 
@@ -137,6 +142,7 @@ class TestManifestFailures:
 # 4. Verify phase failures
 # ---------------------------------------------------------------------------
 
+
 class TestVerifyFailures:
 
     def test_verification_mismatch_does_not_crash(self, env, profile):
@@ -154,6 +160,7 @@ class TestVerifyFailures:
 # ---------------------------------------------------------------------------
 # 5. Encrypt phase failures
 # ---------------------------------------------------------------------------
+
 
 class TestEncryptFailures:
 
@@ -174,6 +181,7 @@ class TestEncryptFailures:
 # ---------------------------------------------------------------------------
 # 6. Mirror phase failures — isolation between mirrors
 # ---------------------------------------------------------------------------
+
 
 class TestMirrorFailures:
 
@@ -211,12 +219,13 @@ class TestMirrorFailures:
 
         assert len(result.mirror_results) == 2
         assert result.mirror_results[0][1] is False  # mirror 1 failed
-        assert result.mirror_results[1][1] is True   # mirror 2 succeeded
+        assert result.mirror_results[1][1] is True  # mirror 2 succeeded
 
 
 # ---------------------------------------------------------------------------
 # 7. Rotate phase failures
 # ---------------------------------------------------------------------------
+
 
 class TestRotateFailures:
 
@@ -230,7 +239,9 @@ class TestRotateFailures:
 
         engine = _engine(env)
         with patch.object(
-            BackupEngine, "_get_backend", return_value=mock_backend,
+            BackupEngine,
+            "_get_backend",
+            return_value=mock_backend,
         ):
             result = engine.run_backup(profile)
             # Pipeline completes; rotation simply could not delete
@@ -241,24 +252,27 @@ class TestRotateFailures:
 # 8. Cancellation at each phase
 # ---------------------------------------------------------------------------
 
+
 class TestCancellation:
 
-    @pytest.mark.parametrize("phase_method", [
-        "_phase_collect",
-        "_phase_write",
-        "_phase_verify",
-        "_phase_encrypt",
-        "_phase_mirror",
-        "_phase_rotate",
-    ])
+    @pytest.mark.parametrize(
+        "phase_method",
+        [
+            "_phase_collect",
+            "_phase_write",
+            "_phase_verify",
+            "_phase_encrypt",
+            "_phase_mirror",
+            "_phase_rotate",
+        ],
+    )
     def test_cancel_at_phase(self, env, profile, phase_method):
         """Cancelling at any phase should raise CancelledError."""
         # Enable encryption so _phase_encrypt is reached
         profile.encrypt_primary = True
         profile.encryption = EncryptionConfig(enabled=True, stored_password="pw")
         profile.mirror_destinations = [
-            StorageConfig(storage_type=StorageType.LOCAL,
-                          destination_path=str(env["dest"] / "m")),
+            StorageConfig(storage_type=StorageType.LOCAL, destination_path=str(env["dest"] / "m")),
         ]
 
         engine = _engine(env)
@@ -276,6 +290,7 @@ class TestCancellation:
 # ---------------------------------------------------------------------------
 # 9. Empty backup — all files filtered out
 # ---------------------------------------------------------------------------
+
 
 class TestEmptyBackup:
 
@@ -302,25 +317,32 @@ class TestEmptyBackup:
 # 10. Pipeline continues after non-fatal verify warning
 # ---------------------------------------------------------------------------
 
+
 class TestNonFatalContinuation:
 
     def test_verify_warning_does_not_stop_pipeline(self, env, profile):
         """A verify warning should not prevent mirror and rotate from
         running."""
         profile.mirror_destinations = [
-            StorageConfig(storage_type=StorageType.LOCAL,
-                          destination_path=str(env["dest"] / "mirror")),
+            StorageConfig(
+                storage_type=StorageType.LOCAL, destination_path=str(env["dest"] / "mirror")
+            ),
         ]
         mock_backend = MagicMock()
         mock_backend.list_backups.return_value = []
         mock_backend.upload.return_value = None
 
         engine = _engine(env)
-        with patch(
-            "src.core.backup_engine.verify_backup",
-            return_value=(False, "Mismatch: a.txt"),
-        ), patch.object(
-            BackupEngine, "_get_backend", return_value=mock_backend,
+        with (
+            patch(
+                "src.core.backup_engine.verify_backup",
+                return_value=(False, "Mismatch: a.txt"),
+            ),
+            patch.object(
+                BackupEngine,
+                "_get_backend",
+                return_value=mock_backend,
+            ),
         ):
             result = engine.run_backup(profile)
 

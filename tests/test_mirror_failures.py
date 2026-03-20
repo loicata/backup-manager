@@ -19,8 +19,11 @@ def _make_file_info(tmp_path: Path, name: str = "file.txt") -> FileInfo:
     p = tmp_path / name
     p.write_text("data")
     return FileInfo(
-        source_path=p, relative_path=name,
-        size=4, mtime=1.0, source_root=str(tmp_path),
+        source_path=p,
+        relative_path=name,
+        size=4,
+        mtime=1.0,
+        source_root=str(tmp_path),
     )
 
 
@@ -33,6 +36,7 @@ def _local_config(dest: str = "C:/backups") -> StorageConfig:
 
 
 # -- Tests --
+
 
 def test_mirror1_fails_mirror2_succeeds(tmp_path):
     """Mirror 1 raises ConnectionError at backend creation, Mirror 2 succeeds."""
@@ -48,14 +52,16 @@ def test_mirror1_fails_mirror2_succeeds(tmp_path):
         return backend_ok
 
     results = mirror_backup(
-        backup_path=tmp_path, files=files,
+        backup_path=tmp_path,
+        files=files,
         mirror_configs=[_remote_config(), _remote_config()],
-        backup_name="bk", get_backend=factory,
+        backup_name="bk",
+        get_backend=factory,
     )
 
     assert len(results) == 2
     assert results[0][1] is False  # Mirror 1 failed
-    assert results[1][1] is True   # Mirror 2 succeeded
+    assert results[1][1] is True  # Mirror 2 succeeded
 
 
 def test_both_mirrors_fail_no_crash(tmp_path):
@@ -66,9 +72,11 @@ def test_both_mirrors_fail_no_crash(tmp_path):
         raise ConnectionError("down")
 
     results = mirror_backup(
-        backup_path=tmp_path, files=files,
+        backup_path=tmp_path,
+        files=files,
         mirror_configs=[_remote_config(), _remote_config()],
-        backup_name="bk", get_backend=factory,
+        backup_name="bk",
+        get_backend=factory,
     )
 
     assert len(results) == 2
@@ -81,9 +89,11 @@ def test_local_mirror_uses_upload(tmp_path):
     backend = MagicMock()
 
     results = mirror_backup(
-        backup_path=tmp_path, files=[],
+        backup_path=tmp_path,
+        files=[],
         mirror_configs=[_local_config()],
-        backup_name="bk", get_backend=lambda _: backend,
+        backup_name="bk",
+        get_backend=lambda _: backend,
     )
 
     backend.upload.assert_called_once_with(tmp_path, "bk")
@@ -95,9 +105,11 @@ def test_empty_file_list_no_error(tmp_path):
     backend = MagicMock()
 
     results = mirror_backup(
-        backup_path=tmp_path, files=[],
+        backup_path=tmp_path,
+        files=[],
         mirror_configs=[_remote_config()],
-        backup_name="bk", get_backend=lambda _: backend,
+        backup_name="bk",
+        get_backend=lambda _: backend,
     )
 
     assert results[0][1] is True
@@ -110,30 +122,40 @@ def test_encrypt_flags_per_mirror(mock_wr, tmp_path):
     backend = MagicMock()
 
     mirror_backup(
-        backup_path=tmp_path, files=files,
+        backup_path=tmp_path,
+        files=files,
         mirror_configs=[_remote_config(), _remote_config()],
-        backup_name="bk", get_backend=lambda _: backend,
-        encrypt_password="secret", encrypt_flags=[True, False],
+        backup_name="bk",
+        get_backend=lambda _: backend,
+        encrypt_password="secret",
+        encrypt_flags=[True, False],
     )
 
     # Mirror 1: password forwarded
-    assert mock_wr.call_args_list[0].kwargs.get("encrypt_password") == "secret" or \
-           mock_wr.call_args_list[0][1].get("encrypt_password") == "secret"
+    assert (
+        mock_wr.call_args_list[0].kwargs.get("encrypt_password") == "secret"
+        or mock_wr.call_args_list[0][1].get("encrypt_password") == "secret"
+    )
     # Mirror 2: empty password
     call2_pw = mock_wr.call_args_list[1]
-    assert call2_pw.kwargs.get("encrypt_password", "") == "" or \
-           call2_pw[1].get("encrypt_password", "") == ""
+    assert (
+        call2_pw.kwargs.get("encrypt_password", "") == ""
+        or call2_pw[1].get("encrypt_password", "") == ""
+    )
 
 
 def test_invalid_backend_config_logged_gracefully(tmp_path):
     """get_backend raises ValueError -- error logged, no crash."""
+
     def factory(cfg):
         raise ValueError("bad config")
 
     results = mirror_backup(
-        backup_path=tmp_path, files=[],
+        backup_path=tmp_path,
+        files=[],
         mirror_configs=[_remote_config()],
-        backup_name="bk", get_backend=factory,
+        backup_name="bk",
+        get_backend=factory,
     )
 
     assert len(results) == 1
@@ -146,9 +168,11 @@ def test_single_mirror_only(tmp_path):
     backend = MagicMock()
 
     results = mirror_backup(
-        backup_path=tmp_path, files=[_make_file_info(tmp_path)],
+        backup_path=tmp_path,
+        files=[_make_file_info(tmp_path)],
         mirror_configs=[_remote_config()],
-        backup_name="bk", get_backend=lambda _: backend,
+        backup_name="bk",
+        get_backend=lambda _: backend,
     )
 
     assert len(results) == 1

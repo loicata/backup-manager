@@ -48,8 +48,10 @@ def write_flat(
             phase_log.error(f"Error copying {file_info.relative_path}: {e}")
 
         phase_log.progress(
-            current=i + 1, total=total,
-            filename=file_info.relative_path, phase="backup",
+            current=i + 1,
+            total=total,
+            filename=file_info.relative_path,
+            phase="backup",
         )
 
     phase_log.info(f"Backup written: {total} files to {backup_dir}")

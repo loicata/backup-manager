@@ -19,14 +19,20 @@ def _make_files(tmp_path: Path, count: int = 3) -> list[FileInfo]:
     for i in range(count):
         p = tmp_path / f"file_{i}.txt"
         p.write_text(f"content_{i}")
-        files.append(FileInfo(
-            source_path=p, relative_path=f"dir/file_{i}.txt",
-            size=p.stat().st_size, mtime=1.0, source_root=str(tmp_path),
-        ))
+        files.append(
+            FileInfo(
+                source_path=p,
+                relative_path=f"dir/file_{i}.txt",
+                size=p.stat().st_size,
+                mtime=1.0,
+                source_root=str(tmp_path),
+            )
+        )
     return files
 
 
 # -- Plain upload tests --
+
 
 def test_upload_plain_all_succeed(tmp_path):
     """All files uploaded successfully via backend.upload_file."""
@@ -52,6 +58,7 @@ def test_upload_plain_one_fails_others_continue(tmp_path):
 
 
 # -- Encrypted upload tests --
+
 
 @patch("src.security.encryption.encrypt_file", return_value=True)
 def test_upload_encrypted_success(mock_enc, tmp_path):
@@ -96,6 +103,7 @@ def test_upload_encrypted_upload_fails_temp_cleaned(mock_enc, tmp_path):
 
 # -- Progress and edge cases --
 
+
 def test_progress_callback_values(tmp_path):
     """Progress events emitted with correct current/total values."""
     files = _make_files(tmp_path, count=3)
@@ -106,8 +114,7 @@ def test_progress_callback_values(tmp_path):
 
     # PhaseLogger.progress is called via events.emit with PROGRESS event
     progress_calls = [
-        c for c in events.emit.call_args_list
-        if len(c.args) > 0 and "current" in c.kwargs
+        c for c in events.emit.call_args_list if len(c.args) > 0 and "current" in c.kwargs
     ]
     assert len(progress_calls) == 3
     for i, pc in enumerate(progress_calls):

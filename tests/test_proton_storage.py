@@ -22,6 +22,7 @@ def storage():
 
 # --- rclone version checks ---
 
+
 class TestRcloneVersion:
     def test_rclone_not_found(self, storage):
         with patch("subprocess.run", side_effect=FileNotFoundError):
@@ -65,6 +66,7 @@ class TestRcloneVersion:
 
 # --- Password obscuration ---
 
+
 class TestObscurePassword:
     def test_obscure_success(self, storage):
         result = MagicMock(stdout="obscured_pwd\n", returncode=0)
@@ -86,6 +88,7 @@ class TestObscurePassword:
 
 # --- Environment variables ---
 
+
 class TestBuildEnv:
     def test_env_vars_set(self, storage):
         with patch.object(storage, "_obscure_password", return_value="obs_pw"):
@@ -103,7 +106,8 @@ class TestBuildEnv:
 
     def test_2fa_totp_generation(self):
         s = ProtonDriveStorage(
-            username="u", password="p",
+            username="u",
+            password="p",
             twofa_seed="JBSWY3DPEHPK3PXP",
             rclone_path="/usr/bin/rclone",
         )
@@ -112,26 +116,32 @@ class TestBuildEnv:
         mock_module = MagicMock()
         mock_module.TOTP.return_value = mock_totp
 
-        with patch.object(s, "_obscure_password", return_value="obs"), \
-             patch.dict("sys.modules", {"pyotp": mock_module}):
+        with (
+            patch.object(s, "_obscure_password", return_value="obs"),
+            patch.dict("sys.modules", {"pyotp": mock_module}),
+        ):
             env = s._build_env()
         prefix = f"RCLONE_CONFIG_{RCLONE_REMOTE_NAME.upper()}"
         assert env[f"{prefix}_2FA"] == "123456"
 
     def test_2fa_without_pyotp(self):
         s = ProtonDriveStorage(
-            username="u", password="p",
+            username="u",
+            password="p",
             twofa_seed="SEED",
             rclone_path="/usr/bin/rclone",
         )
-        with patch.object(s, "_obscure_password", return_value="obs"), \
-             patch.dict("sys.modules", {"pyotp": None}):
+        with (
+            patch.object(s, "_obscure_password", return_value="obs"),
+            patch.dict("sys.modules", {"pyotp": None}),
+        ):
             env = s._build_env()
         prefix = f"RCLONE_CONFIG_{RCLONE_REMOTE_NAME.upper()}"
         assert f"{prefix}_2FA" not in env
 
 
 # --- Upload ---
+
 
 class TestUpload:
     def test_upload_directory(self, storage, tmp_path):
@@ -163,6 +173,7 @@ class TestUpload:
 
 # --- List backups ---
 
+
 class TestListBackups:
     def test_list_parses_json(self, storage):
         entries = [
@@ -189,6 +200,7 @@ class TestListBackups:
 
 # --- Delete backup ---
 
+
 class TestDeleteBackup:
     def test_delete_via_deletefile(self, storage):
         result = MagicMock(returncode=0)
@@ -214,12 +226,15 @@ class TestDeleteBackup:
 
 # --- Test connection ---
 
+
 class TestConnection:
     def test_connection_success(self, storage):
         ver = MagicMock(stdout="rclone v1.62.0\n", returncode=0)
         lsd = MagicMock(returncode=0)
-        with patch("subprocess.run", return_value=ver), \
-             patch.object(storage, "_run_rclone", return_value=lsd):
+        with (
+            patch("subprocess.run", return_value=ver),
+            patch.object(storage, "_run_rclone", return_value=lsd),
+        ):
             ok, msg = storage.test_connection()
         assert ok is True
         assert "Connected" in msg
@@ -227,14 +242,17 @@ class TestConnection:
     def test_connection_lsd_fails(self, storage):
         ver = MagicMock(stdout="rclone v1.62.0\n", returncode=0)
         lsd = MagicMock(returncode=1, stderr="auth error")
-        with patch("subprocess.run", return_value=ver), \
-             patch.object(storage, "_run_rclone", return_value=lsd):
+        with (
+            patch("subprocess.run", return_value=ver),
+            patch.object(storage, "_run_rclone", return_value=lsd),
+        ):
             ok, msg = storage.test_connection()
         assert ok is False
         assert "error" in msg.lower()
 
 
 # --- Timeout and non-zero exit ---
+
 
 class TestEdgeCases:
     def test_rclone_timeout(self, storage):

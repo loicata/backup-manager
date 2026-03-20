@@ -34,7 +34,9 @@ def write_backup(
         encrypt_pw = _get_encrypt_password(ctx)
 
         ctx.backup_remote_name = write_remote(
-            ctx.files, ctx.backend, ctx.backup_name,
+            ctx.files,
+            ctx.backend,
+            ctx.backup_name,
             encrypt_password=encrypt_pw,
             events=ctx.events,
             cancel_check=cancel_check,
@@ -42,7 +44,10 @@ def write_backup(
     else:
         dest = Path(ctx.profile.storage.destination_path)
         ctx.backup_path = write_flat(
-            ctx.files, dest, ctx.backup_name, ctx.events,
+            ctx.files,
+            dest,
+            ctx.backup_name,
+            ctx.events,
         )
 
 

@@ -36,7 +36,7 @@ class NetworkStorage(LocalStorage):
 
                 free = self.get_free_space()
                 if free is not None:
-                    free_gb = free / (1024 ** 3)
+                    free_gb = free / (1024**3)
                     result[0] = True
                     result[1] = f"Connected — {free_gb:.1f} GB free"
                 else:

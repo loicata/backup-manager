@@ -19,7 +19,9 @@ class EmailTab(ScrollableTab):
 
     def _build_ui(self):
         # Trigger mode
-        mode_frame = ttk.LabelFrame(self.inner, text="Send notifications (beta)", padding=Spacing.PAD)
+        mode_frame = ttk.LabelFrame(
+            self.inner, text="Send notifications (beta)", padding=Spacing.PAD
+        )
         mode_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
         self.trigger_var = tk.StringVar(value="disabled")
@@ -31,7 +33,10 @@ class EmailTab(ScrollableTab):
         ]
         for value, label in modes:
             ttk.Radiobutton(
-                mode_frame, text=label, value=value, variable=self.trigger_var,
+                mode_frame,
+                text=label,
+                value=value,
+                variable=self.trigger_var,
             ).pack(anchor="w", pady=2)
 
         # SMTP configuration
@@ -44,7 +49,8 @@ class EmailTab(ScrollableTab):
         ttk.Label(preset_row, text="Presets:").pack(side="left")
         for name in ["Gmail", "Outlook", "ProtonMail"]:
             ttk.Button(
-                preset_row, text=name,
+                preset_row,
+                text=name,
                 command=lambda n=name.lower(): self._apply_preset(n),
             ).pack(side="left", padx=2)
 
@@ -74,21 +80,25 @@ class EmailTab(ScrollableTab):
 
         # TLS
         self.tls_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            smtp_frame, text="Use TLS (STARTTLS)", variable=self.tls_var
-        ).pack(anchor="w", pady=(Spacing.SMALL, 0))
-
-        ttk.Label(smtp_frame, text="For multiple recipients, separate with commas",
-                   foreground=Colors.TEXT_SECONDARY, font=Fonts.small()).pack(
+        ttk.Checkbutton(smtp_frame, text="Use TLS (STARTTLS)", variable=self.tls_var).pack(
             anchor="w", pady=(Spacing.SMALL, 0)
         )
+
+        ttk.Label(
+            smtp_frame,
+            text="For multiple recipients, separate with commas",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w", pady=(Spacing.SMALL, 0))
 
         # Test button
         btn_frame = ttk.Frame(self.inner)
         btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         self.test_btn = ttk.Button(
-            btn_frame, text="Send test email", command=self._test_email,
+            btn_frame,
+            text="Send test email",
+            command=self._test_email,
         )
         self.test_btn.pack(side="left")
 

@@ -73,18 +73,18 @@ class LocalStorage(StorageBackend):
                 continue
             stat = entry.stat()
             if entry.is_dir():
-                total_size = sum(
-                    f.stat().st_size for f in entry.rglob("*") if f.is_file()
-                )
+                total_size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
             else:
                 total_size = stat.st_size
 
-            backups.append({
-                "name": entry.name,
-                "size": total_size,
-                "modified": stat.st_mtime,
-                "is_dir": entry.is_dir(),
-            })
+            backups.append(
+                {
+                    "name": entry.name,
+                    "size": total_size,
+                    "modified": stat.st_mtime,
+                    "is_dir": entry.is_dir(),
+                }
+            )
 
         return sorted(backups, key=lambda b: b["modified"], reverse=True)
 
@@ -116,7 +116,7 @@ class LocalStorage(StorageBackend):
 
                 free = self.get_free_space()
                 if free is not None:
-                    free_gb = free / (1024 ** 3)
+                    free_gb = free / (1024**3)
                     result[0] = True
                     result[1] = f"Connected — {free_gb:.1f} GB free"
                 else:

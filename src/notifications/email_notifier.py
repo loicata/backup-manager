@@ -86,17 +86,16 @@ def _send_email(
         msg["To"] = config.to_address
         msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-        recipients = [
-            addr.strip() for addr in config.to_address.split(",")
-            if addr.strip()
-        ]
+        recipients = [addr.strip() for addr in config.to_address.split(",") if addr.strip()]
 
         if config.use_tls and config.smtp_port == 465:
             # SSL connection
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(
-                config.smtp_host, config.smtp_port,
-                context=context, timeout=30,
+                config.smtp_host,
+                config.smtp_port,
+                context=context,
+                timeout=30,
             ) as server:
                 if config.username:
                     server.login(config.username, config.password)
@@ -104,7 +103,9 @@ def _send_email(
         else:
             # STARTTLS or plain
             with smtplib.SMTP(
-                config.smtp_host, config.smtp_port, timeout=30,
+                config.smtp_host,
+                config.smtp_port,
+                timeout=30,
             ) as server:
                 if config.use_tls:
                     context = ssl.create_default_context()

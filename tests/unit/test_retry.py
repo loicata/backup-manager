@@ -212,7 +212,7 @@ class TestRetryBackup:
             RuntimeError("fail"),  # initial
             RuntimeError("fail"),  # retry 1
             RuntimeError("fail"),  # retry 2
-            None,                  # retry 3 succeeds
+            None,  # retry 3 succeeds
         ]
 
         profile = BackupProfile(

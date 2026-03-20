@@ -25,13 +25,12 @@ class RunTab(ttk.Frame):
 
     def _build_ui(self):
         # Header
-        self.header_label = ttk.Label(
-            self, text="Run backup", font=Fonts.title()
-        )
+        self.header_label = ttk.Label(self, text="Run backup", font=Fonts.title())
         self.header_label.pack(anchor="w", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
         self.profile_label = ttk.Label(
-            self, text="Profile: — | Type: — | Last backup: Never",
+            self,
+            text="Profile: — | Type: — | Last backup: Never",
             foreground=Colors.TEXT_SECONDARY,
         )
         self.profile_label.pack(anchor="w", padx=Spacing.LARGE)
@@ -41,7 +40,9 @@ class RunTab(ttk.Frame):
         progress_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
         self.progress_bar = ttk.Progressbar(
-            progress_frame, mode="determinate", maximum=100,
+            progress_frame,
+            mode="determinate",
+            maximum=100,
         )
         self.progress_bar.pack(fill="x")
 
@@ -49,12 +50,16 @@ class RunTab(ttk.Frame):
         status_row.pack(fill="x", pady=(Spacing.SMALL, 0))
 
         self.status_label = ttk.Label(
-            status_row, text="Waiting...", foreground=Colors.TEXT_SECONDARY,
+            status_row,
+            text="Waiting...",
+            foreground=Colors.TEXT_SECONDARY,
         )
         self.status_label.pack(side="left")
 
         self.percent_label = ttk.Label(
-            status_row, text="0%", foreground=Colors.TEXT_SECONDARY,
+            status_row,
+            text="0%",
+            foreground=Colors.TEXT_SECONDARY,
         )
         self.percent_label.pack(side="right")
 
@@ -71,8 +76,7 @@ class RunTab(ttk.Frame):
             state="disabled",
             height=15,
         )
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical",
-                                    command=self.log_text.yview)
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -82,12 +86,16 @@ class RunTab(ttk.Frame):
         btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         self.start_btn = ttk.Button(
-            btn_frame, text="▶ Start backup", style="Success.TButton",
+            btn_frame,
+            text="▶ Start backup",
+            style="Success.TButton",
         )
         self.start_btn.pack(side="left")
 
         self.cancel_btn = ttk.Button(
-            btn_frame, text="■ Cancel", style="Danger.TButton",
+            btn_frame,
+            text="■ Cancel",
+            style="Danger.TButton",
             state="disabled",
         )
         self.cancel_btn.pack(side="left", padx=Spacing.MEDIUM)

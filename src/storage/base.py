@@ -24,6 +24,7 @@ def with_retry(max_retries: int = 3, base_delay: float = 2.0):
         max_retries: Maximum number of retry attempts.
         base_delay: Base delay in seconds (doubled each retry).
     """
+
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -34,15 +35,20 @@ def with_retry(max_retries: int = 3, base_delay: float = 2.0):
                 except Exception as e:
                     last_exception = e
                     if attempt < max_retries:
-                        delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                        delay = base_delay * (2**attempt) + random.uniform(0, 1)
                         logger.warning(
                             "%s attempt %d/%d failed: %s. Retrying in %.1fs",
-                            func.__name__, attempt + 1, max_retries + 1,
-                            e, delay,
+                            func.__name__,
+                            attempt + 1,
+                            max_retries + 1,
+                            e,
+                            delay,
                         )
                         time.sleep(delay)
             raise last_exception
+
         return wrapper
+
     return decorator
 
 

@@ -16,6 +16,7 @@ import pytest
 
 try:
     import paramiko
+
     HAS_PARAMIKO = True
 except ImportError:
     HAS_PARAMIKO = False
@@ -103,6 +104,7 @@ def sftp_backend():
 def _recursive_rm(sftp, path: str) -> None:
     """Recursively remove a remote directory."""
     import stat as stat_mod
+
     for entry in sftp.listdir_attr(path):
         full = f"{path}/{entry.filename}"
         if stat_mod.S_ISDIR(entry.st_mode):
@@ -184,6 +186,7 @@ class TestSFTPUpload:
     def test_upload_file_stream(self, sftp_backend):
         """Upload via file-like object (streaming)."""
         import io
+
         data = b"Streamed SFTP content"
         fileobj = io.BytesIO(data)
         sftp_backend.upload_file(fileobj, "streamed.bin", size=len(data))
@@ -194,9 +197,7 @@ class TestSFTPUpload:
     def test_upload_with_progress(self, sftp_backend, sample_file):
         """Upload with progress callback tracking."""
         progress_calls = []
-        sftp_backend.set_progress_callback(
-            lambda sent, total: progress_calls.append((sent, total))
-        )
+        sftp_backend.set_progress_callback(lambda sent, total: progress_calls.append((sent, total)))
         sftp_backend.upload(sample_file, "progress_test.txt")
         assert len(progress_calls) > 0
 

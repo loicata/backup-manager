@@ -134,8 +134,10 @@ class TestConfigUnicode:
         profile = BackupProfile(name="Sauvegarde \u00e9t\u00e9 \u2014 2026")
 
         # Bypass encryption for test
-        with patch("src.core.config.store_password", side_effect=lambda x: x), \
-             patch("src.core.config.retrieve_password", side_effect=lambda x: x):
+        with (
+            patch("src.core.config.store_password", side_effect=lambda x: x),
+            patch("src.core.config.retrieve_password", side_effect=lambda x: x),
+        ):
             mgr = ConfigManager(config_dir=config_dir)
             mgr.save_profile(profile)
 

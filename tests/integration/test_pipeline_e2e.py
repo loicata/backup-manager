@@ -85,7 +85,10 @@ class TestFullBackupE2E:
     def test_full_backup_creates_files(self, e2e_env, full_profile):
         """A full backup should copy all source files to destination."""
         full_profile.retention = RetentionConfig(
-            policy=RetentionPolicy.GFS, gfs_daily=99, gfs_weekly=99, gfs_monthly=99,
+            policy=RetentionPolicy.GFS,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
         )
         engine = BackupEngine(e2e_env["config_manager"])
         stats = engine.run_backup(full_profile)
@@ -102,7 +105,10 @@ class TestFullBackupE2E:
     def test_full_backup_preserves_content(self, e2e_env, full_profile):
         """Backup should preserve exact file content."""
         full_profile.retention = RetentionConfig(
-            policy=RetentionPolicy.GFS, gfs_daily=99, gfs_weekly=99, gfs_monthly=99,
+            policy=RetentionPolicy.GFS,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
         )
         engine = BackupEngine(e2e_env["config_manager"])
         stats = engine.run_backup(full_profile)
@@ -183,7 +189,9 @@ class TestRotationE2E:
         """GFS rotation should run without error during pipeline."""
         full_profile.retention = RetentionConfig(
             policy=RetentionPolicy.GFS,
-            gfs_daily=7, gfs_weekly=4, gfs_monthly=12,
+            gfs_daily=7,
+            gfs_weekly=4,
+            gfs_monthly=12,
         )
         engine = BackupEngine(e2e_env["config_manager"])
 

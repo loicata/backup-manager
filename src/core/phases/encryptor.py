@@ -60,8 +60,10 @@ def encrypt_backup(
             phase_log.error(f"Encryption failed: {filepath.name}")
 
         phase_log.progress(
-            current=i + 1, total=total,
-            filename=filepath.name, phase="encryption",
+            current=i + 1,
+            total=total,
+            filename=filepath.name,
+            phase="encryption",
         )
 
     phase_log.info(f"Encryption complete: {total} files")

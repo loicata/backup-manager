@@ -64,8 +64,10 @@ def verify_backup(
             errors.append(f"Read error: {rel_path} ({e})")
 
         phase_log.progress(
-            current=i + 1, total=total,
-            filename=rel_path, phase="verification",
+            current=i + 1,
+            total=total,
+            filename=rel_path,
+            phase="verification",
         )
 
     if errors:

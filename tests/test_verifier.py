@@ -89,16 +89,9 @@ class TestVerifyBackup:
         backup.mkdir()
 
         # Create manifest with 15 files that don't exist in backup
-        manifest_data = {
-            "files": {
-                f"missing_{i}.txt": {"hash": "abc123"}
-                for i in range(15)
-            }
-        }
+        manifest_data = {"files": {f"missing_{i}.txt": {"hash": "abc123"} for i in range(15)}}
         manifest_path = tmp_path / "test.wbverify"
-        manifest_path.write_text(
-            json.dumps(manifest_data), encoding="utf-8"
-        )
+        manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
 
         ok, msg = verify_backup(backup, manifest_path)
         assert ok is False

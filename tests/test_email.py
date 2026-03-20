@@ -4,7 +4,9 @@ from unittest.mock import patch, MagicMock
 
 from src.core.config import EmailConfig
 from src.notifications.email_notifier import (
-    send_backup_report, send_test_email, _build_html,
+    send_backup_report,
+    send_test_email,
+    _build_html,
 )
 
 
@@ -75,6 +77,7 @@ class TestEmailNotifier:
     @patch("src.notifications.email_notifier.smtplib.SMTP")
     def test_auth_error(self, mock_smtp_class):
         import smtplib
+
         mock_smtp = MagicMock()
         mock_smtp.login.side_effect = smtplib.SMTPAuthenticationError(535, b"Bad credentials")
         mock_smtp_class.return_value.__enter__ = lambda s: mock_smtp

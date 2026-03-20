@@ -74,8 +74,10 @@ def write_remote(
                 phase_log.error(f"Upload error {file_info.relative_path}: {e}")
 
             phase_log.progress(
-                current=i + 1, total=total,
-                filename=file_info.relative_path, phase="upload",
+                current=i + 1,
+                total=total,
+                filename=file_info.relative_path,
+                phase="upload",
             )
     finally:
         # Always close persistent connection

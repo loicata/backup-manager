@@ -25,6 +25,7 @@ class PhaseError:
         message: Human-readable description.
         exception: Original exception, if available.
     """
+
     phase: str
     file_path: str
     message: str
@@ -50,6 +51,7 @@ class BackupResult:
         rotated_count: Number of old backups deleted by rotation.
         phase_errors: Accumulated errors from all pipeline phases.
     """
+
     files_found: int = 0
     files_processed: int = 0
     files_skipped: int = 0

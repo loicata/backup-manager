@@ -9,18 +9,25 @@ import pytest
 
 from src.core.config import BackupProfile, ScheduleConfig, ScheduleFrequency
 from src.core.scheduler import (
-    InAppScheduler, ScheduleJournal, ScheduleLogEntry,
-    SchedulerState, AutoStart,
+    InAppScheduler,
+    ScheduleJournal,
+    ScheduleLogEntry,
+    SchedulerState,
+    AutoStart,
 )
 
 
 class TestScheduleJournal:
     def test_add_and_get_entries(self, tmp_path):
         journal = ScheduleJournal(tmp_path)
-        journal.add(ScheduleLogEntry(
-            profile_id="abc", profile_name="Test",
-            status="success", detail="OK",
-        ))
+        journal.add(
+            ScheduleLogEntry(
+                profile_id="abc",
+                profile_name="Test",
+                status="success",
+                detail="OK",
+            )
+        )
         entries = journal.get_entries()
         assert len(entries) == 1
         assert entries[0]["profile_name"] == "Test"
@@ -92,18 +99,14 @@ class TestInAppScheduler:
             backup_callback=lambda p: triggered.append(p),
         )
         profile = BackupProfile(
-            schedule=ScheduleConfig(
-                enabled=True, frequency=ScheduleFrequency.DAILY, time="00:00"
-            )
+            schedule=ScheduleConfig(enabled=True, frequency=ScheduleFrequency.DAILY, time="00:00")
         )
         assert scheduler._is_due(profile, datetime.now()) is True
 
     def test_is_due_already_ran_today(self, tmp_path):
         scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
         profile = BackupProfile(
-            schedule=ScheduleConfig(
-                enabled=True, frequency=ScheduleFrequency.DAILY, time="00:00"
-            )
+            schedule=ScheduleConfig(enabled=True, frequency=ScheduleFrequency.DAILY, time="00:00")
         )
         scheduler._state.set_last_trigger(profile.id, datetime.now())
         assert scheduler._is_due(profile, datetime.now()) is False
@@ -111,9 +114,7 @@ class TestInAppScheduler:
     def test_is_due_hourly(self, tmp_path):
         scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
         profile = BackupProfile(
-            schedule=ScheduleConfig(
-                enabled=True, frequency=ScheduleFrequency.HOURLY
-            )
+            schedule=ScheduleConfig(enabled=True, frequency=ScheduleFrequency.HOURLY)
         )
         # Set last trigger 2 hours ago
         two_hours_ago = datetime.now() - timedelta(hours=2)
@@ -122,17 +123,13 @@ class TestInAppScheduler:
 
     def test_get_next_run_info_manual(self, tmp_path):
         scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
-        profile = BackupProfile(
-            schedule=ScheduleConfig(frequency=ScheduleFrequency.MANUAL)
-        )
+        profile = BackupProfile(schedule=ScheduleConfig(frequency=ScheduleFrequency.MANUAL))
         assert scheduler.get_next_run_info(profile) == "Manual"
 
     def test_get_next_run_info_daily(self, tmp_path):
         scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
         profile = BackupProfile(
-            schedule=ScheduleConfig(
-                enabled=True, frequency=ScheduleFrequency.DAILY, time="09:00"
-            )
+            schedule=ScheduleConfig(enabled=True, frequency=ScheduleFrequency.DAILY, time="09:00")
         )
         info = scheduler.get_next_run_info(profile)
         assert "09:00" in info
@@ -203,11 +200,13 @@ class TestScheduleJournalConcurrency:
         num_entries = 30
 
         def add_entry(idx: int) -> None:
-            journal.add(ScheduleLogEntry(
-                profile_id=f"p{idx}",
-                profile_name=f"Profile {idx}",
-                status="success",
-            ))
+            journal.add(
+                ScheduleLogEntry(
+                    profile_id=f"p{idx}",
+                    profile_name=f"Profile {idx}",
+                    status="success",
+                )
+            )
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             futures = [pool.submit(add_entry, i) for i in range(num_entries)]
@@ -223,17 +222,13 @@ class TestScheduleJournalConcurrency:
 
         # Seed with some entries
         for i in range(5):
-            journal.add(ScheduleLogEntry(
-                profile_id=f"p{i}", status="started"
-            ))
+            journal.add(ScheduleLogEntry(profile_id=f"p{i}", status="started"))
 
         barrier = threading.Barrier(6)
 
         def add_new(idx: int) -> None:
             barrier.wait()
-            journal.add(ScheduleLogEntry(
-                profile_id=f"new_{idx}", status="success"
-            ))
+            journal.add(ScheduleLogEntry(profile_id=f"new_{idx}", status="success"))
 
         def update_existing() -> None:
             barrier.wait()

@@ -10,8 +10,10 @@ class TestPhaseError:
         """PhaseError stores all provided fields."""
         exc = OSError("disk full")
         error = PhaseError(
-            phase="writer", file_path="/tmp/test.txt",
-            message="write failed", exception=exc,
+            phase="writer",
+            file_path="/tmp/test.txt",
+            message="write failed",
+            exception=exc,
         )
         assert error.phase == "writer"
         assert error.file_path == "/tmp/test.txt"

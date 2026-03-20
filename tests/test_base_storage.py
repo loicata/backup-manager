@@ -113,6 +113,7 @@ class TestWithRetry:
 
     def test_preserves_function_name(self):
         """Decorated function should keep its name."""
+
         @with_retry(max_retries=1, base_delay=0.01)
         def my_special_func():
             pass

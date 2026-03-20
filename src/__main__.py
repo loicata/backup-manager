@@ -65,6 +65,7 @@ def _set_window_icon(root):
         # iconphoto for taskbar — extract from ICO via PIL if available
         try:
             from PIL import Image, ImageTk
+
             img = Image.open(str(ico_path))
             # Get the largest size available in the ICO
             sizes = img.info.get("sizes", set())
@@ -140,13 +141,17 @@ def _setup_logging():
     log_file = log_dir / "backup_manager.log"
 
     handler = RotatingFileHandler(
-        log_file, maxBytes=5 * 1024 * 1024, backupCount=5,
+        log_file,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -250,10 +255,10 @@ def main():
 
         try:
             import tkinter.messagebox as mb
+
             mb.showerror(
                 "Backup Manager — Fatal Error",
-                f"An unexpected error occurred:\n\n{e}\n\n"
-                f"Details saved to crash.log",
+                f"An unexpected error occurred:\n\n{e}\n\n" f"Details saved to crash.log",
             )
         except Exception:
             pass

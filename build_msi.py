@@ -48,9 +48,7 @@ def _build_wxs(version: str) -> str:
 
     license_line = ""
     if license_rtf.exists():
-        license_line = (
-            f'<WixVariable Id="WixUILicenseRtf" Value="{license_rtf}" />'
-        )
+        license_line = f'<WixVariable Id="WixUILicenseRtf" Value="{license_rtf}" />'
 
     icon_lines = ""
     icon_attr = ""
@@ -154,21 +152,32 @@ def build():
 
     # Step 1: Harvest files with heat.exe
     heat_wxs = DIST / "HeatFiles.wxs"
-    run([
-        heat, "dir", str(BUILD_DIR),
-        "-cg", "ProductFiles",
-        "-dr", "INSTALLFOLDER",
-        "-srd",
-        "-ke",
-        "-gg",
-        "-sfrag",
-        "-sreg",
-        "-var", "var.SourceDir",
-        "-ag",
-        "-template", "fragment",
-        "-indent", "2",
-        "-out", str(heat_wxs),
-    ], "Harvesting files with heat.exe")
+    run(
+        [
+            heat,
+            "dir",
+            str(BUILD_DIR),
+            "-cg",
+            "ProductFiles",
+            "-dr",
+            "INSTALLFOLDER",
+            "-srd",
+            "-ke",
+            "-gg",
+            "-sfrag",
+            "-sreg",
+            "-var",
+            "var.SourceDir",
+            "-ag",
+            "-template",
+            "fragment",
+            "-indent",
+            "2",
+            "-out",
+            str(heat_wxs),
+        ],
+        "Harvesting files with heat.exe",
+    )
 
     # Step 2: Write main product WXS
     main_wxs = DIST / "Product.wxs"
@@ -178,25 +187,44 @@ def build():
     product_obj = DIST / "Product.wixobj"
     heat_obj = DIST / "HeatFiles.wixobj"
 
-    run([
-        candle, str(main_wxs), "-o", str(product_obj),
-        f"-dSourceDir={BUILD_DIR}",
-    ], "Compiling Product.wxs")
+    run(
+        [
+            candle,
+            str(main_wxs),
+            "-o",
+            str(product_obj),
+            f"-dSourceDir={BUILD_DIR}",
+        ],
+        "Compiling Product.wxs",
+    )
 
-    run([
-        candle, str(heat_wxs), "-o", str(heat_obj),
-        f"-dSourceDir={BUILD_DIR}",
-    ], "Compiling HeatFiles.wxs")
+    run(
+        [
+            candle,
+            str(heat_wxs),
+            "-o",
+            str(heat_obj),
+            f"-dSourceDir={BUILD_DIR}",
+        ],
+        "Compiling HeatFiles.wxs",
+    )
 
     # Step 4: Link into MSI
     msi_path = DIST / f"BackupManager-{version}.msi"
-    run([
-        light,
-        "-ext", "WixUIExtension",
-        str(product_obj), str(heat_obj),
-        "-o", str(msi_path),
-        "-b", str(BUILD_DIR),
-    ], "Linking MSI")
+    run(
+        [
+            light,
+            "-ext",
+            "WixUIExtension",
+            str(product_obj),
+            str(heat_obj),
+            "-o",
+            str(msi_path),
+            "-b",
+            str(BUILD_DIR),
+        ],
+        "Linking MSI",
+    )
 
     size_mb = msi_path.stat().st_size / (1024 * 1024)
     print(f"\nMSI build successful!")

@@ -60,8 +60,11 @@ def build():
     ]
 
     cmd = [
-        sys.executable, "-m", "PyInstaller",
-        "--name", "BackupManager",
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--name",
+        "BackupManager",
         "--windowed",
         "--onedir",
         "--noconfirm",
@@ -112,6 +115,7 @@ def build():
             launch_dst = DIST / "BackupManager" / "launch.vbs"
             if launch_src.exists() and not launch_dst.exists():
                 import shutil
+
                 shutil.copy2(launch_src, launch_dst)
 
             size_mb = exe.stat().st_size / (1024 * 1024)

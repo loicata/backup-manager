@@ -24,33 +24,23 @@ from src.core.config import (
 
 class TestStorageConfig:
     def test_local_is_not_remote(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.LOCAL, destination_path="/tmp/backup"
-        )
+        cfg = StorageConfig(storage_type=StorageType.LOCAL, destination_path="/tmp/backup")
         assert cfg.is_remote() is False
 
     def test_network_is_not_remote(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.NETWORK, destination_path="//server/share"
-        )
+        cfg = StorageConfig(storage_type=StorageType.NETWORK, destination_path="//server/share")
         assert cfg.is_remote() is False
 
     def test_sftp_is_remote(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.SFTP, sftp_host="example.com"
-        )
+        cfg = StorageConfig(storage_type=StorageType.SFTP, sftp_host="example.com")
         assert cfg.is_remote() is True
 
     def test_s3_is_remote(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.S3, s3_bucket="my-bucket"
-        )
+        cfg = StorageConfig(storage_type=StorageType.S3, s3_bucket="my-bucket")
         assert cfg.is_remote() is True
 
     def test_proton_is_remote(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.PROTON, proton_username="user@proton.me"
-        )
+        cfg = StorageConfig(storage_type=StorageType.PROTON, proton_username="user@proton.me")
         assert cfg.is_remote() is True
 
     def test_default_values(self):
@@ -92,27 +82,19 @@ class TestStorageConfig:
             StorageConfig(storage_type=StorageType.PROTON, proton_username="")
 
     def test_local_valid_destination_ok(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.LOCAL, destination_path="/tmp/backup"
-        )
+        cfg = StorageConfig(storage_type=StorageType.LOCAL, destination_path="/tmp/backup")
         assert cfg.destination_path == "/tmp/backup"
 
     def test_sftp_valid_host_ok(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.SFTP, sftp_host="backup.example.com"
-        )
+        cfg = StorageConfig(storage_type=StorageType.SFTP, sftp_host="backup.example.com")
         assert cfg.sftp_host == "backup.example.com"
 
     def test_s3_valid_bucket_ok(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.S3, s3_bucket="my-backup-bucket"
-        )
+        cfg = StorageConfig(storage_type=StorageType.S3, s3_bucket="my-backup-bucket")
         assert cfg.s3_bucket == "my-backup-bucket"
 
     def test_proton_valid_username_ok(self):
-        cfg = StorageConfig(
-            storage_type=StorageType.PROTON, proton_username="user@proton.me"
-        )
+        cfg = StorageConfig(storage_type=StorageType.PROTON, proton_username="user@proton.me")
         assert cfg.proton_username == "user@proton.me"
 
     def test_default_storage_config_no_validation(self):
@@ -245,9 +227,7 @@ class TestConfigManager:
 
         # Read raw JSON — secrets should be encrypted
         raw = json.loads(
-            (tmp_config_dir / "profiles" / f"{profile.id}.json").read_text(
-                encoding="utf-8"
-            )
+            (tmp_config_dir / "profiles" / f"{profile.id}.json").read_text(encoding="utf-8")
         )
         assert raw["storage"]["sftp_password"] != "my_secret"
         assert raw["email"]["password"] != "email_secret"

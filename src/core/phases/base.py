@@ -29,6 +29,7 @@ class PipelineContext:
         events: EventBus for UI notifications.
         result: BackupResult accumulating stats and errors.
     """
+
     # Provided at creation
     profile: BackupProfile
     config_manager: Any  # ConfigManager — avoid circular import

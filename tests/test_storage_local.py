@@ -53,6 +53,7 @@ class TestLocalStorage:
 
     def test_list_backups_sorted_newest_first(self, storage, tmp_path):
         import time
+
         for name in ["old.txt", "new.txt"]:
             src = tmp_path / name
             src.write_text(name, encoding="utf-8")

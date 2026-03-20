@@ -5,14 +5,17 @@ import pytest
 try:
     import boto3
     from moto import mock_aws
+
     HAS_MOTO = True
 except ImportError:
     HAS_MOTO = False
+
     # Provide a no-op decorator so class definitions don't fail at import
     def mock_aws(func=None):
         if func is not None:
             return func
         return lambda f: f
+
 
 from src.storage.s3 import S3Storage, PROVIDER_ENDPOINTS
 
@@ -98,7 +101,9 @@ class TestS3StorageConnection:
     def test_resolve_endpoint_wasabi(self):
         """Wasabi resolves a templated endpoint."""
         backend = S3Storage(
-            bucket="b", provider="wasabi", region="eu-central-1",
+            bucket="b",
+            provider="wasabi",
+            region="eu-central-1",
         )
         assert "wasabisys.com" in backend._endpoint_url
 
@@ -106,7 +111,9 @@ class TestS3StorageConnection:
         """Custom endpoint_url overrides provider."""
         custom = "https://my.storage.example.com"
         backend = S3Storage(
-            bucket="b", provider="aws", endpoint_url=custom,
+            bucket="b",
+            provider="aws",
+            endpoint_url=custom,
         )
         assert backend._endpoint_url == custom
 
@@ -127,7 +134,8 @@ class TestS3StorageUpload:
         # List using raw client to check nested keys
         client = s3_backend._get_client()
         response = client.list_objects_v2(
-            Bucket=TEST_BUCKET, Prefix=f"{TEST_PREFIX}/my_backup/",
+            Bucket=TEST_BUCKET,
+            Prefix=f"{TEST_PREFIX}/my_backup/",
         )
         keys = [obj["Key"] for obj in response.get("Contents", [])]
         assert any("file1.txt" in k for k in keys)
@@ -136,6 +144,7 @@ class TestS3StorageUpload:
     def test_upload_file_stream(self, s3_backend):
         """Upload via file-like object (streaming)."""
         import io
+
         data = b"Streamed content for backup"
         fileobj = io.BytesIO(data)
         s3_backend.upload_file(fileobj, "stream_test.bin", size=len(data))
@@ -146,9 +155,7 @@ class TestS3StorageUpload:
     def test_upload_with_progress(self, s3_backend, sample_file):
         """Upload with progress callback."""
         progress_calls = []
-        s3_backend.set_progress_callback(
-            lambda sent, total: progress_calls.append((sent, total))
-        )
+        s3_backend.set_progress_callback(lambda sent, total: progress_calls.append((sent, total)))
         s3_backend.upload(sample_file, "progress_test.txt")
         assert len(progress_calls) > 0
 
@@ -188,7 +195,8 @@ class TestS3StorageDelete:
         s3_backend.delete_backup("dir_to_delete")
         client = s3_backend._get_client()
         response = client.list_objects_v2(
-            Bucket=TEST_BUCKET, Prefix=f"{TEST_PREFIX}/dir_to_delete/",
+            Bucket=TEST_BUCKET,
+            Prefix=f"{TEST_PREFIX}/dir_to_delete/",
         )
         assert response.get("KeyCount", 0) == 0
 

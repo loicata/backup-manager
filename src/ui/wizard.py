@@ -12,9 +12,16 @@ from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 
 from src.core.config import (
-    BackupProfile, BackupType, StorageConfig, StorageType,
-    ScheduleConfig, ScheduleFrequency, RetentionConfig, RetentionPolicy,
-    EncryptionConfig, EmailConfig,
+    BackupProfile,
+    BackupType,
+    StorageConfig,
+    StorageType,
+    ScheduleConfig,
+    ScheduleFrequency,
+    RetentionConfig,
+    RetentionPolicy,
+    EncryptionConfig,
+    EmailConfig,
 )
 from src.installer import get_available_features, FEAT_SFTP, FEAT_S3
 from src.notifications.email_notifier import send_test_email, SMTP_PRESETS
@@ -91,6 +98,7 @@ class SetupWizard:
                 self._win.iconbitmap(str(ico_path))
                 try:
                     from PIL import Image, ImageTk
+
                     img = Image.open(str(ico_path))
                     photo = ImageTk.PhotoImage(img)
                     self._win.iconphoto(True, photo)
@@ -110,20 +118,28 @@ class SetupWizard:
         self._header.pack_propagate(False)
 
         self._title_label = tk.Label(
-            self._header, text="", bg=Colors.ACCENT, fg="white",
+            self._header,
+            text="",
+            bg=Colors.ACCENT,
+            fg="white",
             font=Fonts.header(),
         )
         self._title_label.pack(pady=(Spacing.LARGE, Spacing.SMALL))
 
         self._step_label = tk.Label(
-            self._header, text="", bg=Colors.ACCENT, fg="#bdc3c7",
+            self._header,
+            text="",
+            bg=Colors.ACCENT,
+            fg="#bdc3c7",
             font=Fonts.small(),
         )
         self._step_label.pack()
 
         # Progress bar
         self._progress = ttk.Progressbar(
-            self._win, maximum=self.TOTAL_STEPS, mode="determinate",
+            self._win,
+            maximum=self.TOTAL_STEPS,
+            mode="determinate",
         )
         self._progress.pack(fill="x")
 
@@ -133,7 +149,9 @@ class SetupWizard:
 
         self._canvas = tk.Canvas(content_outer, highlightthickness=0)
         self._scrollbar = ttk.Scrollbar(
-            content_outer, orient="vertical", command=self._canvas.yview,
+            content_outer,
+            orient="vertical",
+            command=self._canvas.yview,
         )
         self._content = ttk.Frame(self._canvas, padding=Spacing.XLARGE)
 
@@ -142,7 +160,9 @@ class SetupWizard:
             lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")),
         )
         self._canvas_window = self._canvas.create_window(
-            (0, 0), window=self._content, anchor="nw",
+            (0, 0),
+            window=self._content,
+            anchor="nw",
         )
         self._canvas.configure(yscrollcommand=self._scrollbar.set)
 
@@ -163,13 +183,17 @@ class SetupWizard:
         self._back_btn.pack(side="left")
 
         self._next_btn = ttk.Button(
-            footer, text="Next \u2192", style="Accent.TButton",
+            footer,
+            text="Next \u2192",
+            style="Accent.TButton",
             command=self._go_next,
         )
         self._next_btn.pack(side="right")
 
         ttk.Button(
-            footer, text="Cancel", command=self._cancel,
+            footer,
+            text="Cancel",
+            command=self._cancel,
         ).pack(side="right", padx=Spacing.MEDIUM)
 
         self._show_step()
@@ -264,8 +288,8 @@ class SetupWizard:
         ttk.Label(
             self._content,
             text="This wizard will guide you through creating\n"
-                 "your first backup profile.\n\n"
-                 "You can change any setting later.",
+            "your first backup profile.\n\n"
+            "You can change any setting later.",
             font=Fonts.large(),
         ).pack(pady=Spacing.XLARGE)
 
@@ -277,15 +301,19 @@ class SetupWizard:
         """Display the profile name input."""
         self._set_header("Profile name")
         ttk.Label(
-            self._content, text="Choose a name for this backup profile:",
+            self._content,
+            text="Choose a name for this backup profile:",
         ).pack(anchor="w")
         self._name_var = tk.StringVar(value=self._data["name"])
         ttk.Entry(
-            self._content, textvariable=self._name_var,
-            width=40, font=Fonts.large(),
+            self._content,
+            textvariable=self._name_var,
+            width=40,
+            font=Fonts.large(),
         ).pack(fill="x", pady=Spacing.MEDIUM)
         self._name_var.trace_add(
-            "write", lambda *a: self._data.update(name=self._name_var.get()),
+            "write",
+            lambda *a: self._data.update(name=self._name_var.get()),
         )
 
     # ------------------------------------------------------------------
@@ -296,11 +324,14 @@ class SetupWizard:
         """Display the source folder selection."""
         self._set_header("What to back up?")
         ttk.Label(
-            self._content, text="Select folders and files to include:",
+            self._content,
+            text="Select folders and files to include:",
         ).pack(anchor="w")
 
         self._src_listbox = tk.Listbox(
-            self._content, height=10, font=Fonts.normal(),
+            self._content,
+            height=10,
+            font=Fonts.normal(),
         )
         self._src_listbox.pack(fill="both", expand=True, pady=Spacing.MEDIUM)
 
@@ -310,10 +341,12 @@ class SetupWizard:
         btn = ttk.Frame(self._content)
         btn.pack(fill="x")
         ttk.Button(btn, text="Add", command=self._wizard_add_folder).pack(
-            side="left", padx=2,
+            side="left",
+            padx=2,
         )
         ttk.Button(btn, text="Remove", command=self._wizard_remove_source).pack(
-            side="left", padx=2,
+            side="left",
+            padx=2,
         )
 
     def _wizard_add_folder(self) -> None:
@@ -341,7 +374,9 @@ class SetupWizard:
     # ------------------------------------------------------------------
 
     def _build_storage_config_ui(
-        self, parent: ttk.Frame, storage_key: str,
+        self,
+        parent: ttk.Frame,
+        storage_key: str,
     ) -> dict:
         """Build the full storage type selection + config frames.
 
@@ -377,14 +412,18 @@ class SetupWizard:
 
         for stype, label, available in options:
             ttk.Radiobutton(
-                type_frame, text=label, value=stype.value,
+                type_frame,
+                text=label,
+                value=stype.value,
                 variable=type_var,
                 state="normal" if available else "disabled",
             ).pack(anchor="w", pady=2)
 
         # Config container
         config_container = ttk.LabelFrame(
-            parent, text="Configuration", padding=Spacing.PAD,
+            parent,
+            text="Configuration",
+            padding=Spacing.PAD,
         )
         config_container.pack(fill="both", expand=True, pady=Spacing.SMALL)
 
@@ -399,10 +438,13 @@ class SetupWizard:
         row = ttk.Frame(f)
         row.pack(fill="x")
         ttk.Entry(row, textvariable=local_path_var).pack(
-            side="left", fill="x", expand=True,
+            side="left",
+            fill="x",
+            expand=True,
         )
         ttk.Button(
-            row, text="Browse...",
+            row,
+            text="Browse...",
             command=lambda v=local_path_var: v.set(
                 filedialog.askdirectory(parent=self._win) or v.get()
             ),
@@ -415,8 +457,10 @@ class SetupWizard:
         network_path_var = tk.StringVar(value=saved.get("destination_path", ""))
         ttk.Entry(f, textvariable=network_path_var).pack(fill="x")
         ttk.Label(
-            f, text=r"e.g. \\server\share\backups",
-            foreground=Colors.TEXT_SECONDARY, font=Fonts.small(),
+            f,
+            text=r"e.g. \\server\share\backups",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
         ).pack(anchor="w")
 
         # --- SFTP config ---
@@ -441,10 +485,13 @@ class SetupWizard:
                 row = ttk.Frame(f)
                 row.pack(fill="x")
                 ttk.Entry(row, textvariable=var).pack(
-                    side="left", fill="x", expand=True,
+                    side="left",
+                    fill="x",
+                    expand=True,
                 )
                 ttk.Button(
-                    row, text="Browse...",
+                    row,
+                    text="Browse...",
                     command=lambda v=var: v.set(
                         filedialog.askopenfilename(
                             parent=self._win,
@@ -453,14 +500,19 @@ class SetupWizard:
                                 ("SSH keys", "*.pem *.key *.ppk id_*"),
                                 ("All files", "*.*"),
                             ],
-                        ) or v.get()
+                        )
+                        or v.get()
                     ),
                 ).pack(side="right", padx=(4, 0))
             elif "password" in key or "passphrase" in key:
                 ttk.Entry(f, textvariable=var, show="\u25cf").pack(fill="x")
             elif key == "sftp_port":
                 ttk.Spinbox(
-                    f, textvariable=var, from_=1, to=65535, width=8,
+                    f,
+                    textvariable=var,
+                    from_=1,
+                    to=65535,
+                    width=8,
                 ).pack(anchor="w")
             else:
                 ttk.Entry(f, textvariable=var).pack(fill="x")
@@ -468,12 +520,14 @@ class SetupWizard:
         ttk.Label(
             f,
             text="Supports RSA, Ed25519, ECDSA keys (.pem, .key, .ppk, id_rsa).",
-            foreground=Colors.TEXT_SECONDARY, font=Fonts.small(),
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
         ).pack(anchor="w")
         ttk.Label(
             f,
             text="Absolute path on the remote server, e.g. /home/username/backups",
-            foreground=Colors.TEXT_SECONDARY, font=Fonts.small(),
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
         ).pack(anchor="w")
 
         # --- S3 config ---
@@ -483,12 +537,21 @@ class SetupWizard:
         ttk.Label(f, text="Provider:").pack(anchor="w")
         s3_provider_var = tk.StringVar(value=saved.get("s3_provider", "aws"))
         providers = [
-            "aws", "minio", "wasabi", "ovh", "scaleway",
-            "digitalocean", "cloudflare", "backblaze_s3", "other",
+            "aws",
+            "minio",
+            "wasabi",
+            "ovh",
+            "scaleway",
+            "digitalocean",
+            "cloudflare",
+            "backblaze_s3",
+            "other",
         ]
         ttk.Combobox(
-            f, textvariable=s3_provider_var,
-            values=providers, state="readonly",
+            f,
+            textvariable=s3_provider_var,
+            values=providers,
+            state="readonly",
         ).pack(fill="x")
 
         s3_fields = [
@@ -539,9 +602,12 @@ class SetupWizard:
         test_label = ttk.Label(btn_frame, text="", foreground=Colors.TEXT_SECONDARY)
 
         test_btn = ttk.Button(
-            btn_frame, text="Test connection",
+            btn_frame,
+            text="Test connection",
             command=lambda: self._test_storage_connection(
-                storage_key, test_btn, test_label,
+                storage_key,
+                test_btn,
+                test_label,
             ),
         )
         test_btn.pack(side="left")
@@ -684,6 +750,7 @@ class SetupWizard:
         def _do_test() -> None:
             try:
                 from src.core.backup_engine import BackupEngine
+
                 engine = BackupEngine.__new__(BackupEngine)
                 backend = engine._get_backend(config)
                 ok, msg = backend.test_connection()
@@ -703,7 +770,11 @@ class SetupWizard:
         self._win.after(200, _poll)
 
     def _show_test_result(
-        self, btn: ttk.Button, lbl: ttk.Label, ok: bool, msg: str,
+        self,
+        btn: ttk.Button,
+        lbl: ttk.Label,
+        ok: bool,
+        msg: str,
     ) -> None:
         """Display connection test result.
 
@@ -732,26 +803,41 @@ class SetupWizard:
         guide_frame.pack(fill="x", pady=(8, 4))
 
         steps = [
-            ("1.", "Install rclone",
-             "Download from https://rclone.org/downloads/\n"
-             "Extract the .zip and place rclone.exe in\n"
-             "C:\\Program Files\\rclone\\ or add it to your PATH."),
-            ("2.", "Find your Proton credentials",
-             "Use your Proton Mail / Proton account email\n"
-             "as username, and your account password."),
-            ("3.", "2FA seed (optional)",
-             "If you have 2FA enabled on your Proton account:\n"
-             "Open your authenticator app settings, find the\n"
-             "secret key (base32 string) and paste it here.\n"
-             "Backup Manager will generate TOTP codes\n"
-             "automatically."),
-            ("4.", "Remote path",
-             "The folder on Proton Drive where backups will\n"
-             "be stored. Default: /Backups\n"
-             "The folder is created automatically if needed."),
-            ("5.", "Test your connection",
-             "Click 'Test connection' below to verify that\n"
-             "rclone can reach your Proton Drive account."),
+            (
+                "1.",
+                "Install rclone",
+                "Download from https://rclone.org/downloads/\n"
+                "Extract the .zip and place rclone.exe in\n"
+                "C:\\Program Files\\rclone\\ or add it to your PATH.",
+            ),
+            (
+                "2.",
+                "Find your Proton credentials",
+                "Use your Proton Mail / Proton account email\n"
+                "as username, and your account password.",
+            ),
+            (
+                "3.",
+                "2FA seed (optional)",
+                "If you have 2FA enabled on your Proton account:\n"
+                "Open your authenticator app settings, find the\n"
+                "secret key (base32 string) and paste it here.\n"
+                "Backup Manager will generate TOTP codes\n"
+                "automatically.",
+            ),
+            (
+                "4.",
+                "Remote path",
+                "The folder on Proton Drive where backups will\n"
+                "be stored. Default: /Backups\n"
+                "The folder is created automatically if needed.",
+            ),
+            (
+                "5.",
+                "Test your connection",
+                "Click 'Test connection' below to verify that\n"
+                "rclone can reach your Proton Drive account.",
+            ),
         ]
 
         for num, title, detail in steps:
@@ -761,17 +847,20 @@ class SetupWizard:
             header = ttk.Frame(step_frame)
             header.pack(fill="x")
             ttk.Label(
-                header, text=num,
+                header,
+                text=num,
                 foreground=Colors.ACCENT,
                 font=("Segoe UI", 9, "bold"),
             ).pack(side="left")
             ttk.Label(
-                header, text=title,
+                header,
+                text=title,
                 font=("Segoe UI", 9, "bold"),
             ).pack(side="left", padx=(4, 0))
 
             ttk.Label(
-                step_frame, text=detail,
+                step_frame,
+                text=detail,
                 foreground=Colors.TEXT_SECONDARY,
                 font=("Segoe UI", 8),
                 justify="left",
@@ -785,7 +874,8 @@ class SetupWizard:
         """Display the primary storage destination step."""
         self._set_header("Where to store?")
         ttk.Label(
-            self._content, text="Choose primary backup destination:",
+            self._content,
+            text="Choose primary backup destination:",
         ).pack(anchor="w")
 
         self._build_storage_config_ui(self._content, "storage")
@@ -820,7 +910,8 @@ class SetupWizard:
         # Enable checkbox
         enable_var = tk.BooleanVar(value=md.get("enabled", False))
         ttk.Checkbutton(
-            self._content, text=f"Enable Mirror {label_num} (beta)",
+            self._content,
+            text=f"Enable Mirror {label_num} (beta)",
             variable=enable_var,
         ).pack(anchor="w", pady=(0, Spacing.SMALL))
 
@@ -857,13 +948,19 @@ class SetupWizard:
         self._btype_var = tk.StringVar(value=self._data["backup_type"].value)
         for bt, desc in [
             (BackupType.FULL, "Full \u2014 backs up everything every time"),
-            (BackupType.INCREMENTAL,
-             "Incremental \u2014 only changed files since last backup (beta)"),
-            (BackupType.DIFFERENTIAL,
-             "Differential \u2014 only changed since last full backup (beta)"),
+            (
+                BackupType.INCREMENTAL,
+                "Incremental \u2014 only changed files since last backup (beta)",
+            ),
+            (
+                BackupType.DIFFERENTIAL,
+                "Differential \u2014 only changed since last full backup (beta)",
+            ),
         ]:
             ttk.Radiobutton(
-                self._content, text=desc, value=bt.value,
+                self._content,
+                text=desc,
+                value=bt.value,
                 variable=self._btype_var,
             ).pack(anchor="w", pady=4)
 
@@ -883,7 +980,8 @@ class SetupWizard:
         self._set_header("Retention policy")
 
         gfs_frame = ttk.LabelFrame(
-            self._content, text="GFS Retention (Grandfather-Father-Son)",
+            self._content,
+            text="GFS Retention (Grandfather-Father-Son)",
             padding=4,
         )
         gfs_frame.pack(fill="x", pady=(8, 0))
@@ -900,7 +998,11 @@ class SetupWizard:
             var = tk.IntVar(value=self._data.get(key, default))
             self._ret_gfs_vars[key] = var
             ttk.Spinbox(
-                row, textvariable=var, from_=1, to=999, width=8,
+                row,
+                textvariable=var,
+                from_=1,
+                to=999,
+                width=8,
             ).pack(side="right")
 
         for key, var in self._ret_gfs_vars.items():
@@ -926,7 +1028,8 @@ class SetupWizard:
         )
         self._enc_no_var = tk.BooleanVar(value=not any_enc)
         self._enc_no_cb = ttk.Checkbutton(
-            self._content, text="No encryption",
+            self._content,
+            text="No encryption",
             variable=self._enc_no_var,
             command=self._on_enc_no_toggled,
         )
@@ -937,7 +1040,8 @@ class SetupWizard:
         # Encrypt Primary
         self._enc_primary_var = tk.BooleanVar(value=self._data["encrypt_primary"])
         self._enc_primary_cb = ttk.Checkbutton(
-            self._content, text="Encrypt Primary",
+            self._content,
+            text="Encrypt Primary",
             variable=self._enc_primary_var,
             command=self._on_enc_option_toggled,
         )
@@ -946,7 +1050,8 @@ class SetupWizard:
         # Encrypt Mirror 1
         self._enc_mirror1_var = tk.BooleanVar(value=self._data["encrypt_mirror1"])
         self._enc_mirror1_cb = ttk.Checkbutton(
-            self._content, text="Encrypt Mirror 1",
+            self._content,
+            text="Encrypt Mirror 1",
             variable=self._enc_mirror1_var,
             command=self._on_enc_option_toggled,
         )
@@ -955,7 +1060,8 @@ class SetupWizard:
         # Encrypt Mirror 2
         self._enc_mirror2_var = tk.BooleanVar(value=self._data["encrypt_mirror2"])
         self._enc_mirror2_cb = ttk.Checkbutton(
-            self._content, text="Encrypt Mirror 2",
+            self._content,
+            text="Encrypt Mirror 2",
             variable=self._enc_mirror2_var,
             command=self._on_enc_option_toggled,
         )
@@ -964,20 +1070,26 @@ class SetupWizard:
         # Password frame
         self._enc_pw_frame = ttk.Frame(self._content)
         ttk.Label(
-            self._enc_pw_frame, text="Password:",
+            self._enc_pw_frame,
+            text="Password:",
         ).pack(anchor="w", pady=(8, 0))
         self._enc_pw_var = tk.StringVar(value=self._data["encryption_password"])
         ttk.Entry(
-            self._enc_pw_frame, textvariable=self._enc_pw_var,
-            show="\u25cf", width=30,
+            self._enc_pw_frame,
+            textvariable=self._enc_pw_var,
+            show="\u25cf",
+            width=30,
         ).pack(anchor="w")
         ttk.Label(
-            self._enc_pw_frame, text="Confirm password:",
+            self._enc_pw_frame,
+            text="Confirm password:",
         ).pack(anchor="w", pady=(8, 0))
         self._enc_pw_confirm_var = tk.StringVar()
         ttk.Entry(
-            self._enc_pw_frame, textvariable=self._enc_pw_confirm_var,
-            show="\u25cf", width=30,
+            self._enc_pw_frame,
+            textvariable=self._enc_pw_confirm_var,
+            show="\u25cf",
+            width=30,
         ).pack(anchor="w")
         self._enc_pw_var.trace_add(
             "write",
@@ -1043,7 +1155,8 @@ class SetupWizard:
         self._set_header("Schedule")
         self._sched_var = tk.BooleanVar(value=self._data["schedule_enabled"])
         ttk.Checkbutton(
-            self._content, text="Enable automatic scheduling",
+            self._content,
+            text="Enable automatic scheduling",
             variable=self._sched_var,
         ).pack(anchor="w")
 
@@ -1051,17 +1164,22 @@ class SetupWizard:
         self._freq_var = tk.StringVar(value=self._data["schedule_freq"].value)
         for f in [
             ScheduleFrequency.DAILY,
-            ScheduleFrequency.WEEKLY, ScheduleFrequency.MONTHLY,
+            ScheduleFrequency.WEEKLY,
+            ScheduleFrequency.MONTHLY,
         ]:
             ttk.Radiobutton(
-                self._content, text=f.value.capitalize(),
-                value=f.value, variable=self._freq_var,
+                self._content,
+                text=f.value.capitalize(),
+                value=f.value,
+                variable=self._freq_var,
             ).pack(anchor="w")
 
         ttk.Label(self._content, text="\nTime (HH:MM):").pack(anchor="w")
         self._time_var = tk.StringVar(value=self._data["schedule_time"])
         ttk.Entry(
-            self._content, textvariable=self._time_var, width=8,
+            self._content,
+            textvariable=self._time_var,
+            width=8,
         ).pack(anchor="w")
 
         self._sched_var.trace_add(
@@ -1101,7 +1219,9 @@ class SetupWizard:
             ("always", "Always (success + failure)"),
         ]:
             ttk.Radiobutton(
-                self._content, text=label, value=val,
+                self._content,
+                text=label,
+                value=val,
                 variable=self._email_trigger_var,
             ).pack(anchor="w", pady=2)
 
@@ -1109,7 +1229,9 @@ class SetupWizard:
 
         # SMTP config frame
         self._email_smtp_frame = ttk.LabelFrame(
-            self._content, text="SMTP server", padding=4,
+            self._content,
+            text="SMTP server",
+            padding=4,
         )
 
         # Presets
@@ -1118,7 +1240,8 @@ class SetupWizard:
         ttk.Label(preset_row, text="Presets:").pack(side="left")
         for name in ["Gmail", "Outlook", "ProtonMail"]:
             ttk.Button(
-                preset_row, text=name,
+                preset_row,
+                text=name,
                 command=lambda n=name.lower(): self._apply_email_preset(n),
             ).pack(side="left", padx=2)
 
@@ -1142,40 +1265,53 @@ class SetupWizard:
             self._email_vars[key] = var
             if key == "password":
                 ttk.Entry(
-                    row, textvariable=var, show="\u25cf",
+                    row,
+                    textvariable=var,
+                    show="\u25cf",
                 ).pack(side="left", fill="x", expand=True)
             elif key == "port":
                 ttk.Spinbox(
-                    row, textvariable=var, from_=1, to=65535, width=8,
+                    row,
+                    textvariable=var,
+                    from_=1,
+                    to=65535,
+                    width=8,
                 ).pack(side="left")
             else:
                 ttk.Entry(row, textvariable=var).pack(
-                    side="left", fill="x", expand=True,
+                    side="left",
+                    fill="x",
+                    expand=True,
                 )
 
         # TLS
         self._email_tls_var = tk.BooleanVar(value=sc.get("tls", True))
         ttk.Checkbutton(
-            self._email_smtp_frame, text="Use TLS (STARTTLS)",
+            self._email_smtp_frame,
+            text="Use TLS (STARTTLS)",
             variable=self._email_tls_var,
         ).pack(anchor="w", pady=(2, 0))
 
         ttk.Label(
             self._email_smtp_frame,
             text="For multiple recipients, separate with commas",
-            foreground=Colors.TEXT_SECONDARY, font=Fonts.small(),
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
         ).pack(anchor="w", pady=(2, 0))
 
         # Test button
         test_row = ttk.Frame(self._email_smtp_frame)
         test_row.pack(fill="x", pady=(4, 0))
         self._email_test_btn = ttk.Button(
-            test_row, text="Send test email",
+            test_row,
+            text="Send test email",
             command=self._test_wizard_email,
         )
         self._email_test_btn.pack(side="left")
         self._email_test_lbl = ttk.Label(
-            test_row, text="", foreground=Colors.TEXT_SECONDARY,
+            test_row,
+            text="",
+            foreground=Colors.TEXT_SECONDARY,
         )
         self._email_test_lbl.pack(side="left", padx=8)
 
@@ -1283,7 +1419,10 @@ class SetupWizard:
             f"Email: {d['email_config'].get('trigger', 'disabled').capitalize()}\n"
         )
         ttk.Label(
-            self._content, text=summary, font=Fonts.normal(), justify="left",
+            self._content,
+            text=summary,
+            font=Fonts.normal(),
+            justify="left",
         ).pack(anchor="w")
 
     # ------------------------------------------------------------------
@@ -1326,11 +1465,7 @@ class SetupWizard:
             encrypt_mirror1=d["encrypt_mirror1"],
             encrypt_mirror2=d["encrypt_mirror2"],
             encryption=EncryptionConfig(
-                enabled=(
-                    d["encrypt_primary"]
-                    or d["encrypt_mirror1"]
-                    or d["encrypt_mirror2"]
-                ),
+                enabled=(d["encrypt_primary"] or d["encrypt_mirror1"] or d["encrypt_mirror2"]),
                 stored_password=d["encryption_password"],
             ),
             schedule=ScheduleConfig(

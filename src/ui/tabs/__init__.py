@@ -16,10 +16,14 @@ class ScrollableTab(ttk.Frame):
 
         # Canvas + scrollbar layout
         self._canvas = tk.Canvas(
-            self, highlightthickness=0, borderwidth=0,
+            self,
+            highlightthickness=0,
+            borderwidth=0,
         )
         self._scrollbar = ttk.Scrollbar(
-            self, orient="vertical", command=self._canvas.yview,
+            self,
+            orient="vertical",
+            command=self._canvas.yview,
         )
         self._canvas.configure(yscrollcommand=self._scrollbar.set)
 
@@ -29,7 +33,9 @@ class ScrollableTab(ttk.Frame):
         # Inner frame where subclasses pack their widgets
         self.inner = ttk.Frame(self._canvas)
         self._window_id = self._canvas.create_window(
-            (0, 0), window=self.inner, anchor="nw",
+            (0, 0),
+            window=self.inner,
+            anchor="nw",
         )
 
         # Resize inner frame width to match canvas

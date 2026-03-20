@@ -33,9 +33,7 @@ def compute_sha256(filepath: Path) -> str:
         OSError: On other I/O errors.
     """
     if not isinstance(filepath, Path):
-        raise TypeError(
-            f"Expected Path, got {type(filepath).__name__}: {filepath!r}"
-        )
+        raise TypeError(f"Expected Path, got {type(filepath).__name__}: {filepath!r}")
 
     if filepath.is_dir():
         raise ValueError(f"Expected a file, not a directory: {filepath}")

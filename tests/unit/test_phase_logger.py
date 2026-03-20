@@ -120,8 +120,17 @@ class TestPhaseLoggerConstruction:
         received = []
         events.subscribe(LOG, lambda **kw: received.append(kw))
 
-        for name in ["collector", "filter", "manifest", "writer", "verifier",
-                      "encryptor", "mirror", "rotator", "remote_writer"]:
+        for name in [
+            "collector",
+            "filter",
+            "manifest",
+            "writer",
+            "verifier",
+            "encryptor",
+            "mirror",
+            "rotator",
+            "remote_writer",
+        ]:
             logger = PhaseLogger(name, events)
             logger.info(f"hello from {name}")
             assert received[-1]["phase"] == name

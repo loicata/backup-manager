@@ -141,9 +141,7 @@ class TestRotatorEdgeCases:
         ]
         backend = _make_backend(backups)
         backend.delete_backup.side_effect = lambda name: (
-            (_ for _ in ()).throw(PermissionError("locked"))
-            if name == "fail_del"
-            else None
+            (_ for _ in ()).throw(PermissionError("locked")) if name == "fail_del" else None
         )
         retention = RetentionConfig(gfs_daily=1, gfs_weekly=1, gfs_monthly=1)
 

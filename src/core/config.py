@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # --- Enums ---
 
+
 class BackupType(str, Enum):
     FULL = "full"
     INCREMENTAL = "incremental"
@@ -50,6 +51,7 @@ class RetentionPolicy(str, Enum):
 
 
 # --- Dataclasses ---
+
 
 @dataclass
 class StorageConfig:
@@ -123,33 +125,23 @@ class StorageConfig:
 
         if st in (StorageType.LOCAL, StorageType.NETWORK):
             if not self.destination_path or not self.destination_path.strip():
-                raise ValueError(
-                    f"destination_path is required for {st.value} storage"
-                )
+                raise ValueError(f"destination_path is required for {st.value} storage")
 
         elif st == StorageType.SFTP:
             if not self.sftp_host or not self.sftp_host.strip():
-                raise ValueError(
-                    "sftp_host is required for SFTP storage"
-                )
+                raise ValueError("sftp_host is required for SFTP storage")
 
         elif st == StorageType.S3:
             if not self.s3_bucket or not self.s3_bucket.strip():
-                raise ValueError(
-                    "s3_bucket is required for S3 storage"
-                )
+                raise ValueError("s3_bucket is required for S3 storage")
 
         elif st == StorageType.PROTON:
             if not self.proton_username or not self.proton_username.strip():
-                raise ValueError(
-                    "proton_username is required for Proton storage"
-                )
+                raise ValueError("proton_username is required for Proton storage")
 
     def is_remote(self) -> bool:
         """True if this storage requires network upload (no local path)."""
-        return self.storage_type in (
-            StorageType.SFTP, StorageType.S3, StorageType.PROTON
-        )
+        return self.storage_type in (StorageType.SFTP, StorageType.S3, StorageType.PROTON)
 
 
 @dataclass
@@ -204,8 +196,14 @@ class BackupProfile:
     source_paths: list[str] = field(default_factory=list)
     exclude_patterns: list[str] = field(
         default_factory=lambda: [
-            "*.tmp", "*.log", "~$*", "Thumbs.db", "desktop.ini",
-            "__pycache__", ".git", "node_modules",
+            "*.tmp",
+            "*.log",
+            "~$*",
+            "Thumbs.db",
+            "desktop.ini",
+            "__pycache__",
+            ".git",
+            "node_modules",
         ]
     )
     backup_type: BackupType = BackupType.FULL
@@ -228,15 +226,19 @@ class BackupProfile:
 # --- Sensitive fields that must be encrypted before save ---
 
 _STORAGE_SECRET_FIELDS = [
-    "sftp_password", "sftp_key_passphrase",
-    "s3_access_key", "s3_secret_key",
-    "proton_password", "proton_2fa",
+    "sftp_password",
+    "sftp_key_passphrase",
+    "s3_access_key",
+    "s3_secret_key",
+    "proton_password",
+    "proton_2fa",
 ]
 
 _EMAIL_SECRET_FIELDS = ["password"]
 
 
 # --- ConfigManager ---
+
 
 class ConfigManager:
     """Manages profile persistence in %APPDATA%/BackupManager/."""
@@ -374,6 +376,7 @@ class ConfigManager:
             An instance of cls with known fields only.
         """
         import dataclasses
+
         known = {f.name for f in dataclasses.fields(cls)}
         filtered = {k: v for k, v in data.items() if k in known}
         return cls(**filtered)

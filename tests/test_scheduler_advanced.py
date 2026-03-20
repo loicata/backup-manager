@@ -37,9 +37,7 @@ class TestIsDueWeekly:
             )
         )
         # Set last trigger 2 days ago
-        scheduler._state.set_last_trigger(
-            profile.id, now - timedelta(days=2)
-        )
+        scheduler._state.set_last_trigger(profile.id, now - timedelta(days=2))
         assert scheduler._is_due(profile, now) is True
 
     def test_not_due_on_wrong_day(self, tmp_path):
@@ -55,9 +53,7 @@ class TestIsDueWeekly:
             )
         )
         # Set a last trigger so it doesn't return True for "first run"
-        scheduler._state.set_last_trigger(
-            profile.id, now - timedelta(hours=1)
-        )
+        scheduler._state.set_last_trigger(profile.id, now - timedelta(hours=1))
         assert scheduler._is_due(profile, now) is False
 
 
@@ -75,9 +71,7 @@ class TestIsDueMonthly:
                 day_of_month=now.day,
             )
         )
-        scheduler._state.set_last_trigger(
-            profile.id, now - timedelta(days=2)
-        )
+        scheduler._state.set_last_trigger(profile.id, now - timedelta(days=2))
         assert scheduler._is_due(profile, now) is True
 
     def test_not_due_on_wrong_day(self, tmp_path):
@@ -95,9 +89,7 @@ class TestIsDueMonthly:
             )
         )
         # Set a last trigger so it doesn't return True for "first run"
-        scheduler._state.set_last_trigger(
-            profile.id, now - timedelta(hours=1)
-        )
+        scheduler._state.set_last_trigger(profile.id, now - timedelta(hours=1))
         assert scheduler._is_due(profile, now) is False
 
 
@@ -127,9 +119,7 @@ class TestIsDueEdgeCases:
                 frequency=ScheduleFrequency.HOURLY,
             )
         )
-        scheduler._state.set_last_trigger(
-            profile.id, now - timedelta(minutes=30)
-        )
+        scheduler._state.set_last_trigger(profile.id, now - timedelta(minutes=30))
         assert scheduler._is_due(profile, now) is False
 
 
@@ -168,6 +158,7 @@ class TestTriggerBackup:
 
     def test_trigger_handles_callback_exception(self, tmp_path):
         """Callback exception should not crash the scheduler."""
+
         def failing_callback(p):
             raise RuntimeError("Backup exploded")
 
@@ -254,9 +245,13 @@ class TestJournalTrimming:
     def test_trims_old_entries(self, tmp_path):
         journal = ScheduleJournal(tmp_path)
         for i in range(MAX_JOURNAL_ENTRIES + 50):
-            journal.add(ScheduleLogEntry(
-                profile_id="trim", status="success", detail=str(i),
-            ))
+            journal.add(
+                ScheduleLogEntry(
+                    profile_id="trim",
+                    status="success",
+                    detail=str(i),
+                )
+            )
         entries = journal.get_entries(limit=10000)
         assert len(entries) <= MAX_JOURNAL_ENTRIES
 
@@ -297,7 +292,8 @@ class TestGetNextRunInfo:
         scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
         profile = BackupProfile(
             schedule=ScheduleConfig(
-                enabled=True, frequency=ScheduleFrequency.HOURLY,
+                enabled=True,
+                frequency=ScheduleFrequency.HOURLY,
             )
         )
         assert scheduler.get_next_run_info(profile) == "Every hour"
@@ -332,7 +328,8 @@ class TestGetNextRunInfo:
         scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
         profile = BackupProfile(
             schedule=ScheduleConfig(
-                enabled=False, frequency=ScheduleFrequency.DAILY,
+                enabled=False,
+                frequency=ScheduleFrequency.DAILY,
             )
         )
         assert scheduler.get_next_run_info(profile) == "Manual"

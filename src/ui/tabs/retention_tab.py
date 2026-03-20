@@ -17,7 +17,8 @@ class RetentionTab(ScrollableTab):
 
     def _build_ui(self):
         frame = ttk.LabelFrame(
-            self.inner, text="GFS Retention (Grandfather-Father-Son)",
+            self.inner,
+            text="GFS Retention (Grandfather-Father-Son)",
             padding=Spacing.PAD,
         )
         frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)

@@ -52,9 +52,7 @@ class ScheduleJournal:
     def _load(self) -> None:
         if self._path.exists():
             try:
-                self._entries = json.loads(
-                    self._path.read_text(encoding="utf-8")
-                )
+                self._entries = json.loads(self._path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 self._entries = []
 
@@ -91,9 +89,7 @@ class ScheduleJournal:
                 self._entries[-1].update(kwargs)
                 self._save()
 
-    def get_entries(
-        self, limit: int = 50, profile_id: str = ""
-    ) -> list[dict]:
+    def get_entries(self, limit: int = 50, profile_id: str = "") -> list[dict]:
         """Retrieve journal entries (thread-safe).
 
         Args:
@@ -106,9 +102,7 @@ class ScheduleJournal:
         with self._lock:
             entries = self._entries
             if profile_id:
-                entries = [
-                    e for e in entries if e.get("profile_id") == profile_id
-                ]
+                entries = [e for e in entries if e.get("profile_id") == profile_id]
             return entries[-limit:]
 
     def get_last_run(self, profile_id: str) -> Optional[dict]:
@@ -144,17 +138,13 @@ class SchedulerState:
     def _load(self) -> None:
         if self._path.exists():
             try:
-                self._state = json.loads(
-                    self._path.read_text(encoding="utf-8")
-                )
+                self._state = json.loads(self._path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 self._state = {}
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(self._state, indent=2), encoding="utf-8"
-        )
+        self._path.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
 
     def get_last_trigger(self, profile_id: str) -> Optional[datetime]:
         """Get the last trigger time for a profile (thread-safe).
@@ -212,9 +202,7 @@ class InAppScheduler:
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="Scheduler"
-        )
+        self._thread = threading.Thread(target=self._run, daemon=True, name="Scheduler")
         self._thread.start()
         logger.info("Scheduler started")
 
@@ -267,9 +255,7 @@ class InAppScheduler:
         except (ValueError, AttributeError):
             target_hour, target_minute = 2, 0
 
-        target_today = now.replace(
-            hour=target_hour, minute=target_minute, second=0, microsecond=0
-        )
+        target_today = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
 
         if sched.frequency == ScheduleFrequency.DAILY:
             return now >= target_today and last.date() < now.date()
@@ -307,12 +293,14 @@ class InAppScheduler:
         """
         logger.info("Triggering scheduled backup: %s", profile.name)
         self._state.set_last_trigger(profile.id, now)
-        self._journal.add(ScheduleLogEntry(
-            profile_id=profile.id,
-            profile_name=profile.name,
-            trigger=trigger,
-            status="started",
-        ))
+        self._journal.add(
+            ScheduleLogEntry(
+                profile_id=profile.id,
+                profile_name=profile.name,
+                trigger=trigger,
+                status="started",
+            )
+        )
 
         try:
             self._backup_callback(profile)
@@ -347,15 +335,20 @@ class InAppScheduler:
             total_attempts = len(delays)
             logger.info(
                 "Retry %d/%d for '%s' in %d minutes",
-                attempt, total_attempts, profile.name, delay_minutes,
+                attempt,
+                total_attempts,
+                profile.name,
+                delay_minutes,
             )
-            self._journal.add(ScheduleLogEntry(
-                profile_id=profile.id,
-                profile_name=profile.name,
-                trigger=f"retry_{attempt}",
-                status="waiting",
-                detail=f"Retry {attempt}/{total_attempts} in {delay_minutes}min",
-            ))
+            self._journal.add(
+                ScheduleLogEntry(
+                    profile_id=profile.id,
+                    profile_name=profile.name,
+                    trigger=f"retry_{attempt}",
+                    status="waiting",
+                    detail=f"Retry {attempt}/{total_attempts} in {delay_minutes}min",
+                )
+            )
 
             # Sleep in small increments to allow scheduler stop
             sleep_seconds = delay_minutes * 60
@@ -371,7 +364,9 @@ class InAppScheduler:
             # Attempt the backup again
             logger.info(
                 "Retry %d/%d executing for '%s'",
-                attempt, total_attempts, profile.name,
+                attempt,
+                total_attempts,
+                profile.name,
             )
             self._journal.update_last(status="started")
 
@@ -380,13 +375,17 @@ class InAppScheduler:
                 self._journal.update_last(status="success")
                 logger.info(
                     "Retry %d/%d succeeded for '%s'",
-                    attempt, total_attempts, profile.name,
+                    attempt,
+                    total_attempts,
+                    profile.name,
                 )
                 return  # Success — stop retrying
             except Exception as e:
                 logger.exception(
                     "Retry %d/%d failed for '%s'",
-                    attempt, total_attempts, profile.name,
+                    attempt,
+                    total_attempts,
+                    profile.name,
                 )
                 self._journal.update_last(
                     status="failed",
@@ -395,7 +394,8 @@ class InAppScheduler:
 
         logger.error(
             "All %d retries exhausted for '%s'",
-            len(delays), profile.name,
+            len(delays),
+            profile.name,
         )
 
     def _check_missed_backups(self, now: datetime) -> None:
@@ -426,7 +426,11 @@ class AutoStart:
 
     STARTUP_DIR = Path(
         os.environ.get("APPDATA", ""),
-        "Microsoft", "Windows", "Start Menu", "Programs", "Startup",
+        "Microsoft",
+        "Windows",
+        "Start Menu",
+        "Programs",
+        "Startup",
     )
     VBS_FILENAME = "BackupManager.vbs"
 

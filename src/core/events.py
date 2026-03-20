@@ -63,9 +63,7 @@ class EventBus:
             try:
                 callback(**data)
             except Exception:
-                logger.exception(
-                    "Error in event callback for %r", event_type
-                )
+                logger.exception("Error in event callback for %r", event_type)
 
     def clear(self) -> None:
         """Remove all subscribers."""

@@ -99,7 +99,9 @@ class S3Storage(StorageBackend):
             with open(local_path, "rb") as f:
                 reader = self._get_throttled_reader(f)
                 client.upload_fileobj(
-                    reader, self._bucket, key,
+                    reader,
+                    self._bucket,
+                    key,
                     Callback=self._make_progress_cb(file_size),
                 )
         else:
@@ -112,7 +114,9 @@ class S3Storage(StorageBackend):
         key = self._s3_key(remote_path)
         reader = self._get_throttled_reader(fileobj)
         client.upload_fileobj(
-            reader, self._bucket, key,
+            reader,
+            self._bucket,
+            key,
             Callback=self._make_progress_cb(size),
         )
 
@@ -124,32 +128,34 @@ class S3Storage(StorageBackend):
 
         # Use delimiter to get top-level "folders" and files
         paginator = client.get_paginator("list_objects_v2")
-        pages = paginator.paginate(
-            Bucket=self._bucket, Prefix=prefix, Delimiter="/"
-        )
+        pages = paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/")
 
         for page in pages:
             # Common prefixes (directories)
             for cp in page.get("CommonPrefixes", []):
                 name = cp["Prefix"].rstrip("/").rsplit("/", 1)[-1]
-                backups.append({
-                    "name": name,
-                    "size": 0,
-                    "modified": 0,
-                    "is_dir": True,
-                })
+                backups.append(
+                    {
+                        "name": name,
+                        "size": 0,
+                        "modified": 0,
+                        "is_dir": True,
+                    }
+                )
 
             # Objects (files)
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 name = key.rsplit("/", 1)[-1]
                 if name and key != prefix:
-                    backups.append({
-                        "name": name,
-                        "size": obj.get("Size", 0),
-                        "modified": obj.get("LastModified", 0),
-                        "is_dir": False,
-                    })
+                    backups.append(
+                        {
+                            "name": name,
+                            "size": obj.get("Size", 0),
+                            "modified": obj.get("LastModified", 0),
+                            "is_dir": False,
+                        }
+                    )
 
         return backups
 
@@ -171,7 +177,7 @@ class S3Storage(StorageBackend):
 
         # Delete in batches of 1000
         for i in range(0, len(objects_to_delete), 1000):
-            batch = objects_to_delete[i:i + 1000]
+            batch = objects_to_delete[i : i + 1000]
             client.delete_objects(
                 Bucket=self._bucket,
                 Delete={"Objects": batch},
@@ -187,9 +193,7 @@ class S3Storage(StorageBackend):
 
             # Count objects
             prefix = f"{self._prefix}/" if self._prefix else ""
-            response = client.list_objects_v2(
-                Bucket=self._bucket, Prefix=prefix, MaxKeys=1
-            )
+            response = client.list_objects_v2(Bucket=self._bucket, Prefix=prefix, MaxKeys=1)
             count = response.get("KeyCount", 0)
 
             return True, f"Connected to {self._bucket} ({self._provider})"

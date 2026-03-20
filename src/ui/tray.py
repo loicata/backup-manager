@@ -21,10 +21,10 @@ class TrayState(Enum):
 
 # Shield icon colors per state
 _STATE_COLORS = {
-    TrayState.IDLE: ("#3498db", "B"),        # Blue
+    TrayState.IDLE: ("#3498db", "B"),  # Blue
     TrayState.BACKUP_RUNNING: ("#f39c12", "▶"),  # Orange
     TrayState.BACKUP_SUCCESS: ("#27ae60", "✓"),  # Green
-    TrayState.BACKUP_ERROR: ("#e74c3c", "!"),    # Red
+    TrayState.BACKUP_ERROR: ("#e74c3c", "!"),  # Red
 }
 
 
@@ -42,10 +42,10 @@ def _create_icon_image(state: TrayState, size: int = 64):
         cx, cy = size // 2, size // 2
         r = size // 2 - 2
         points = [
-            (cx, cy - r),           # Top
+            (cx, cy - r),  # Top
             (cx + r, cy - r // 2),  # Top right
             (cx + r, cy + r // 4),  # Right
-            (cx, cy + r),           # Bottom
+            (cx, cy + r),  # Bottom
             (cx - r, cy + r // 4),  # Left
             (cx - r, cy - r // 2),  # Top left
         ]
@@ -62,7 +62,9 @@ def _create_icon_image(state: TrayState, size: int = 64):
         th = bbox[3] - bbox[1]
         draw.text(
             (cx - tw // 2, cy - th // 2 - 2),
-            letter, fill="white", font=font,
+            letter,
+            fill="white",
+            font=font,
         )
 
         return img
@@ -104,13 +106,13 @@ class BackupTray:
             )
 
             self._icon = pystray.Icon(
-                "BackupManager", icon_image,
-                "Backup Manager", menu,
+                "BackupManager",
+                icon_image,
+                "Backup Manager",
+                menu,
             )
 
-            self._thread = threading.Thread(
-                target=self._icon.run, daemon=True, name="TrayIcon"
-            )
+            self._thread = threading.Thread(target=self._icon.run, daemon=True, name="TrayIcon")
             self._thread.start()
             logger.info("Tray icon started")
 

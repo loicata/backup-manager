@@ -17,6 +17,7 @@ import pytest
 
 try:
     import paramiko
+
     HAS_PARAMIKO = True
 except ImportError:
     HAS_PARAMIKO = False
@@ -70,6 +71,7 @@ pytestmark = pytest.mark.skipif(
 
 
 # --- Helpers ---
+
 
 def _sftp_session():
     """Open a raw SFTP session for setup/cleanup."""
@@ -133,6 +135,7 @@ def _list_remote_dir(path: str) -> list[str]:
 
 
 # --- Fixtures ---
+
 
 @pytest.fixture
 def source_files(tmp_path):
@@ -204,11 +207,15 @@ def _make_sftp_storage_config(remote_path: str) -> StorageConfig:
 # Test 1: SFTP as primary storage
 # ============================================================
 
+
 class TestSFTPAsPrimaryStorage:
     """Test full backup pipeline with SFTP as primary destination."""
 
     def test_full_backup_to_sftp(
-        self, source_files, config_manager, remote_storage_path,
+        self,
+        source_files,
+        config_manager,
+        remote_storage_path,
     ):
         """Full backup should stream all files to SFTP server."""
         profile = BackupProfile(
@@ -242,7 +249,10 @@ class TestSFTPAsPrimaryStorage:
         assert any("complete" in m.lower() for m in log_msgs)
 
     def test_incremental_backup_to_sftp(
-        self, source_files, config_manager, remote_storage_path,
+        self,
+        source_files,
+        config_manager,
+        remote_storage_path,
     ):
         """Incremental backup should skip unchanged files."""
         profile = BackupProfile(
@@ -272,11 +282,16 @@ class TestSFTPAsPrimaryStorage:
 # Test 2: SFTP as Mirror 1
 # ============================================================
 
+
 class TestSFTPAsMirror1:
     """Test backup with local primary + SFTP mirror 1."""
 
     def test_local_backup_with_sftp_mirror1(
-        self, source_files, config_manager, remote_mirror1_path, tmp_path,
+        self,
+        source_files,
+        config_manager,
+        remote_mirror1_path,
+        tmp_path,
     ):
         """Local backup + SFTP mirror should upload to both destinations."""
         local_dest = tmp_path / "local_backups"
@@ -329,11 +344,16 @@ class TestSFTPAsMirror1:
 # Test 3: SFTP as Mirror 2
 # ============================================================
 
+
 class TestSFTPAsMirror2:
     """Test backup with local primary + SFTP mirror 2."""
 
     def test_local_backup_with_sftp_mirror2(
-        self, source_files, config_manager, remote_mirror2_path, tmp_path,
+        self,
+        source_files,
+        config_manager,
+        remote_mirror2_path,
+        tmp_path,
     ):
         """Local backup + SFTP mirror 2 only."""
         local_dest = tmp_path / "local_backups"
@@ -400,12 +420,17 @@ class TestSFTPAsMirror2:
 # Test 4: Combined — local primary + 2 SFTP mirrors
 # ============================================================
 
+
 class TestDualSFTPMirrors:
     """Test backup with local primary + 2 SFTP mirrors simultaneously."""
 
     def test_local_plus_two_sftp_mirrors(
-        self, source_files, config_manager,
-        remote_mirror1_path, remote_mirror2_path, tmp_path,
+        self,
+        source_files,
+        config_manager,
+        remote_mirror1_path,
+        remote_mirror2_path,
+        tmp_path,
     ):
         """Full pipeline: local backup + mirror to 2 SFTP destinations."""
         local_dest = tmp_path / "local_backups"
@@ -464,11 +489,15 @@ class TestDualSFTPMirrors:
 # Test 5: Mirror failure handling
 # ============================================================
 
+
 class TestMirrorFailure:
     """Test that a failing mirror doesn't break the pipeline."""
 
     def test_bad_mirror_does_not_crash(
-        self, source_files, config_manager, tmp_path,
+        self,
+        source_files,
+        config_manager,
+        tmp_path,
     ):
         """A mirror pointing to an unreachable host should fail gracefully."""
         local_dest = tmp_path / "local_backups"

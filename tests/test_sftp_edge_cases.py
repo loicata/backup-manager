@@ -14,10 +14,10 @@ import pytest
 
 from src.storage.sftp import _validate_remote_name
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _setup_mock_paramiko():
     """Inject a mock paramiko into sys.modules and return it."""
@@ -45,9 +45,13 @@ def _cleanup_paramiko():
 
 def _make_storage():
     from src.storage.sftp import SFTPStorage
+
     storage = SFTPStorage(
-        host="10.0.0.1", port=22, username="user",
-        password="pass", remote_path="/backups",
+        host="10.0.0.1",
+        port=22,
+        username="user",
+        password="pass",
+        remote_path="/backups",
     )
     storage._verify_host_key = lambda t: None
     return storage
@@ -57,20 +61,29 @@ def _make_storage():
 # 1-3  Path traversal / shell injection / null bytes
 # ---------------------------------------------------------------------------
 
+
 class TestRemoteNameSecurity:
     """Reject dangerous remote names."""
 
-    @pytest.mark.parametrize("name", [
-        "../etc/passwd", "foo/../bar", "a/../../b",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "../etc/passwd",
+            "foo/../bar",
+            "a/../../b",
+        ],
+    )
     def test_path_traversal_rejected(self, name):
         with pytest.raises(ValueError, match="traversal"):
             _validate_remote_name(name)
 
-    @pytest.mark.parametrize("name", [
-        "/absolute/path",
-        "//double",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "/absolute/path",
+            "//double",
+        ],
+    )
     def test_leading_slash_stripped(self, name):
         result = _validate_remote_name(name)
         assert not result.startswith("/")
@@ -94,6 +107,7 @@ class TestRemoteNameSecurity:
 # 4  Very long remote name
 # ---------------------------------------------------------------------------
 
+
 class TestLongRemoteName:
     def test_long_name_accepted_by_validator(self):
         """Validator does not enforce length; server will reject if needed."""
@@ -106,14 +120,19 @@ class TestLongRemoteName:
 # 5  Host key changed (MITM detection)
 # ---------------------------------------------------------------------------
 
+
 class TestHostKeyMismatch:
     def test_host_key_changed_raises(self, tmp_path):
         mp = _setup_mock_paramiko()
         try:
             from src.storage.sftp import SFTPStorage
+
             storage = SFTPStorage(
-                host="10.0.0.1", port=22, username="user",
-                password="pass", remote_path="/backups",
+                host="10.0.0.1",
+                port=22,
+                username="user",
+                password="pass",
+                remote_path="/backups",
             )
 
             transport = MagicMock()
@@ -148,14 +167,13 @@ class TestHostKeyMismatch:
 # 6  Connection timeout
 # ---------------------------------------------------------------------------
 
+
 class TestConnectionTimeout:
     def test_connect_socket_timeout(self):
         mp = _setup_mock_paramiko()
         try:
             storage = _make_storage()
-            mp.Transport.return_value.connect.side_effect = socket.timeout(
-                "Connection timed out"
-            )
+            mp.Transport.return_value.connect.side_effect = socket.timeout("Connection timed out")
             ok, msg = storage.test_connection()
             assert ok is False
             assert "failed" in msg.lower() or "timed out" in msg.lower()
@@ -167,13 +185,14 @@ class TestConnectionTimeout:
 # 7  Authentication failure
 # ---------------------------------------------------------------------------
 
+
 class TestAuthFailure:
     def test_auth_exception(self):
         mp = _setup_mock_paramiko()
         try:
             storage = _make_storage()
-            mp.Transport.return_value.connect.side_effect = (
-                mp.AuthenticationException("Bad password")
+            mp.Transport.return_value.connect.side_effect = mp.AuthenticationException(
+                "Bad password"
             )
             ok, msg = storage.test_connection()
             assert ok is False
@@ -185,6 +204,7 @@ class TestAuthFailure:
 # ---------------------------------------------------------------------------
 # 8  Exec channel unavailable — fallback to SFTP mode
 # ---------------------------------------------------------------------------
+
 
 class TestExecFallback:
     def test_upload_falls_back_to_sftp(self, tmp_path):
@@ -215,6 +235,7 @@ class TestExecFallback:
 # ---------------------------------------------------------------------------
 # 9  Upload with progress callback
 # ---------------------------------------------------------------------------
+
 
 class TestProgressCallback:
     def test_fast_upload_calls_progress(self, tmp_path):
@@ -247,6 +268,7 @@ class TestProgressCallback:
 # 10  Delete backup — correct SFTP commands
 # ---------------------------------------------------------------------------
 
+
 class TestDeleteBackup:
     def test_delete_file_calls_remove(self):
         mp = _setup_mock_paramiko()
@@ -264,9 +286,7 @@ class TestDeleteBackup:
 
             storage.delete_backup("old_backup.tar")
 
-            mock_sftp.remove.assert_called_once_with(
-                "/backups/old_backup.tar"
-            )
+            mock_sftp.remove.assert_called_once_with("/backups/old_backup.tar")
         finally:
             _cleanup_paramiko()
 

@@ -8,7 +8,10 @@ import pytest
 from src.core.events import EventBus
 from src.core.phases.collector import collect_files, FileInfo
 from src.core.phases.filter import (
-    filter_changed_files, build_updated_manifest, save_manifest, load_manifest,
+    filter_changed_files,
+    build_updated_manifest,
+    save_manifest,
+    load_manifest,
 )
 from src.core.phases.local_writer import write_flat, generate_backup_name
 from src.core.phases.manifest import build_integrity_manifest, save_integrity_manifest
@@ -17,8 +20,8 @@ from src.core.phases.rotator import rotate_backups, _rotate_gfs
 from src.core.config import RetentionConfig, RetentionPolicy
 from src.core.events import EventBus
 
-
 # --- Collector tests ---
+
 
 class TestCollector:
     def test_collect_from_directory(self, sample_files):
@@ -79,6 +82,7 @@ class TestCollector:
 
 # --- Filter tests ---
 
+
 class TestFilter:
     def test_no_manifest_returns_all(self, sample_files, tmp_path):
         files = collect_files([str(sample_files)])
@@ -127,6 +131,7 @@ class TestFilter:
 
 # --- LocalWriter tests ---
 
+
 class TestLocalWriter:
     def test_write_flat(self, sample_files, tmp_path):
         files = collect_files([str(sample_files)])
@@ -150,6 +155,7 @@ class TestLocalWriter:
 
 # --- Manifest tests ---
 
+
 class TestManifest:
     def test_build_integrity_manifest(self, sample_files):
         files = collect_files([str(sample_files)])
@@ -170,6 +176,7 @@ class TestManifest:
 
 
 # --- Verifier tests ---
+
 
 class TestVerifier:
     def test_verify_ok(self, sample_files, tmp_path):
@@ -192,9 +199,11 @@ class TestVerifier:
 
 # --- Rotator tests ---
 
+
 class TestRotator:
     def _make_mock_backend(self, backups):
         from unittest.mock import MagicMock
+
         backend = MagicMock()
         backend.list_backups.return_value = backups
         return backend
@@ -206,6 +215,7 @@ class TestRotator:
 
     def test_gfs_keeps_recent(self):
         import time
+
         now = time.time()
         backups = [
             {"name": "today", "modified": now},
@@ -215,7 +225,9 @@ class TestRotator:
         backend = self._make_mock_backend(backups)
         retention = RetentionConfig(
             policy=RetentionPolicy.GFS,
-            gfs_daily=7, gfs_weekly=4, gfs_monthly=3,
+            gfs_daily=7,
+            gfs_weekly=4,
+            gfs_monthly=3,
         )
 
         rotate_backups(backend, retention)
@@ -226,10 +238,14 @@ class TestRotator:
 
 # --- BackupEngine tests ---
 
+
 class TestBackupEngine:
     def test_full_local_backup(self, sample_files, tmp_config_dir, tmp_path):
         from src.core.config import (
-            BackupProfile, StorageConfig, StorageType, ConfigManager,
+            BackupProfile,
+            StorageConfig,
+            StorageType,
+            ConfigManager,
         )
         from src.core.backup_engine import BackupEngine
 
@@ -256,7 +272,10 @@ class TestBackupEngine:
 
     def test_cancel_backup(self, sample_files, tmp_config_dir, tmp_path):
         from src.core.config import (
-            BackupProfile, StorageConfig, StorageType, ConfigManager,
+            BackupProfile,
+            StorageConfig,
+            StorageType,
+            ConfigManager,
         )
         from src.core.backup_engine import BackupEngine, CancelledError
 
@@ -288,7 +307,11 @@ class TestBackupEngine:
 
     def test_incremental_skips_unchanged(self, sample_files, tmp_config_dir, tmp_path):
         from src.core.config import (
-            BackupProfile, BackupType, StorageConfig, StorageType, ConfigManager,
+            BackupProfile,
+            BackupType,
+            StorageConfig,
+            StorageType,
+            ConfigManager,
         )
         from src.core.backup_engine import BackupEngine
 
@@ -320,7 +343,10 @@ class TestBackupEngine:
 
     def test_events_emitted(self, sample_files, tmp_config_dir, tmp_path):
         from src.core.config import (
-            BackupProfile, StorageConfig, StorageType, ConfigManager,
+            BackupProfile,
+            StorageConfig,
+            StorageType,
+            ConfigManager,
         )
         from src.core.backup_engine import BackupEngine
 

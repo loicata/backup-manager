@@ -69,7 +69,9 @@ def mirror_backup(
             if config.is_remote():
                 # Stream files directly to remote mirror
                 write_remote(
-                    files, backend, backup_name,
+                    files,
+                    backend,
+                    backup_name,
                     encrypt_password=mirror_pw,
                     events=events,
                     cancel_check=cancel_check,

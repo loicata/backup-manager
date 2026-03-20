@@ -79,7 +79,8 @@ class TestWriteBackupLocal:
             FileInfo(
                 source_path=src_dir / "f.txt",
                 relative_path="f.txt",
-                size=1, mtime=1000.0,
+                size=1,
+                mtime=1000.0,
                 source_root=str(src_dir),
             ),
         ]
@@ -123,6 +124,7 @@ class TestWriteBackupRemote:
         mock_write_remote.return_value = "enc_backup"
 
         from src.core.config import EncryptionConfig
+
         ctx = PipelineContext(
             profile=BackupProfile(
                 storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="my-bucket"),
@@ -140,6 +142,8 @@ class TestWriteBackupRemote:
         write_backup(ctx)
 
         call_kwargs = mock_write_remote.call_args
-        assert call_kwargs[1]["encrypt_password"] == "secret123" or \
-               call_kwargs[0][3] == "secret123" if len(call_kwargs[0]) > 3 else \
-               "encrypt_password" in call_kwargs[1]
+        assert (
+            call_kwargs[1]["encrypt_password"] == "secret123" or call_kwargs[0][3] == "secret123"
+            if len(call_kwargs[0]) > 3
+            else "encrypt_password" in call_kwargs[1]
+        )

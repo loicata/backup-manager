@@ -35,6 +35,7 @@ def check_for_update(
     Returns:
         The background thread.
     """
+
     def _check():
         try:
             # Reject non-HTTPS check URLs
@@ -64,8 +65,7 @@ def check_for_update(
                 logger.info("Update available: %s -> %s", current_version, latest)
                 callback(latest, download_url)
             else:
-                logger.debug("No update available (current=%s, latest=%s)",
-                             current_version, latest)
+                logger.debug("No update available (current=%s, latest=%s)", current_version, latest)
 
         except Exception as e:
             logger.debug("Update check failed: %s", e)
@@ -99,7 +99,8 @@ def verify_update_hash(file_data: bytes, expected_hash: Optional[str]) -> bool:
     if actual_hash != expected_hash.lower():
         logger.error(
             "SHA-256 mismatch: expected %s, got %s",
-            expected_hash, actual_hash,
+            expected_hash,
+            actual_hash,
         )
         return False
 

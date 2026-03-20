@@ -58,8 +58,4 @@ def get_unavailable_features_detail() -> dict[str, list[str]]:
     Returns:
         Dict mapping feature name to list of missing dependencies.
     """
-    return {
-        feat: info["missing"]
-        for feat, info in check_all().items()
-        if not info["available"]
-    }
+    return {feat: info["missing"] for feat, info in check_all().items() if not info["available"]}

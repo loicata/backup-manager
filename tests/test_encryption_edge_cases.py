@@ -136,6 +136,7 @@ class TestDPAPIFallback:
         """When _has_dpapi() returns False, store_password must use AES prefix."""
         with patch("src.security.encryption._has_dpapi", return_value=False):
             from src.security.encryption import store_password, retrieve_password
+
             stored = store_password("test_secret")
             assert stored.startswith("aes:")
             assert retrieve_password(stored) == "test_secret"
@@ -147,8 +148,9 @@ class TestKeyDerivationIterations:
     def test_pbkdf2_uses_600k_iterations(self):
         """derive_key must call pbkdf2_hmac with PBKDF2_ITERATIONS (600000)."""
         salt = os.urandom(SALT_SIZE)
-        with patch("src.security.encryption.hashlib.pbkdf2_hmac",
-                    wraps=__import__("hashlib").pbkdf2_hmac) as mock_pbkdf2:
+        with patch(
+            "src.security.encryption.hashlib.pbkdf2_hmac", wraps=__import__("hashlib").pbkdf2_hmac
+        ) as mock_pbkdf2:
             derive_key("password", salt)
 
         mock_pbkdf2.assert_called_once_with(

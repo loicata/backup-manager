@@ -14,16 +14,27 @@ from typing import Optional
 
 from src.core.backup_result import BackupResult
 from src.core.config import (
-    BackupProfile, BackupType, StorageConfig, StorageType,
+    BackupProfile,
+    BackupType,
+    StorageConfig,
+    StorageType,
 )
 from src.core.events import (
-    EventBus, LOG, STATUS, BACKUP_DONE, ERROR, PHASE_CHANGED, PHASE_COUNT,
+    EventBus,
+    LOG,
+    STATUS,
+    BACKUP_DONE,
+    ERROR,
+    PHASE_CHANGED,
+    PHASE_COUNT,
 )
 from src.core.exceptions import CancelledError
 from src.core.phases.base import PipelineContext
 from src.core.phases.collector import collect_files, FileInfo
 from src.core.phases.filter import (
-    filter_changed_files, build_updated_manifest, save_manifest,
+    filter_changed_files,
+    build_updated_manifest,
+    save_manifest,
 )
 from src.core.phases.local_writer import generate_backup_name
 from src.core.phases.manifest import build_integrity_manifest, save_integrity_manifest
@@ -170,6 +181,7 @@ class BackupEngine:
             for temp_dir in temp_dirs:
                 try:
                     import shutil
+
                     shutil.rmtree(temp_dir)
                     self._log(f"Cleaned up temp directory: {temp_dir.name}")
                 except OSError as e:
@@ -180,7 +192,9 @@ class BackupEngine:
         self._phase("Collecting files...")
         self._check_cancel()
         ctx.files = collect_files(
-            ctx.profile.source_paths, ctx.profile.exclude_patterns, self._events,
+            ctx.profile.source_paths,
+            ctx.profile.exclude_patterns,
+            self._events,
         )
         ctx.result.files_found = len(ctx.files)
         ctx.result.bytes_source = sum(f.size for f in ctx.files)
@@ -221,9 +235,7 @@ class BackupEngine:
     def _phase_verify(self, ctx: PipelineContext) -> None:
         """Phase 6: Post-backup verification (local directories only)."""
         is_local_dir = (
-            ctx.backup_path is not None
-            and ctx.backup_path.exists()
-            and ctx.backup_path.is_dir()
+            ctx.backup_path is not None and ctx.backup_path.exists() and ctx.backup_path.is_dir()
         )
         if ctx.profile.verification.auto_verify and is_local_dir:
             self._phase("Verifying backup...")
@@ -246,7 +258,9 @@ class BackupEngine:
             self._phase("Encrypting backup...")
             self._check_cancel()
             ctx.backup_path = encrypt_backup(
-                ctx.backup_path, ctx.profile.encryption.stored_password, self._events,
+                ctx.backup_path,
+                ctx.profile.encryption.stored_password,
+                self._events,
             )
 
     def _phase_update_delta(self, ctx: PipelineContext) -> None:
@@ -274,8 +288,11 @@ class BackupEngine:
 
             ctx.result.mirror_results = mirror_backup(
                 mirror_path,
-                ctx.files, ctx.profile.mirror_destinations, ctx.backup_name,
-                self._get_backend, self._events,
+                ctx.files,
+                ctx.profile.mirror_destinations,
+                ctx.backup_name,
+                self._get_backend,
+                self._events,
                 encrypt_password=encrypt_pw,
                 encrypt_flags=encrypt_flags,
                 cancel_check=self._check_cancel,
@@ -286,7 +303,9 @@ class BackupEngine:
         self._phase("Rotating old backups...")
         self._check_cancel()
         ctx.result.rotated_count = rotate_backups(
-            ctx.backend, ctx.profile.retention, self._events,
+            ctx.backend,
+            ctx.profile.retention,
+            self._events,
         )
 
     def _get_backend(self, storage: StorageConfig) -> StorageBackend:
@@ -316,16 +335,19 @@ class BackupEngine:
     @staticmethod
     def _build_local(storage: StorageConfig) -> StorageBackend:
         from src.storage.local import LocalStorage
+
         return LocalStorage(storage.destination_path)
 
     @staticmethod
     def _build_network(storage: StorageConfig) -> StorageBackend:
         from src.storage.network import NetworkStorage
+
         return NetworkStorage(storage.destination_path)
 
     @staticmethod
     def _build_sftp(storage: StorageConfig) -> StorageBackend:
         from src.storage.sftp import SFTPStorage
+
         return SFTPStorage(
             host=storage.sftp_host,
             port=storage.sftp_port,
@@ -339,6 +361,7 @@ class BackupEngine:
     @staticmethod
     def _build_s3(storage: StorageConfig) -> StorageBackend:
         from src.storage.s3 import S3Storage
+
         return S3Storage(
             bucket=storage.s3_bucket,
             prefix=storage.s3_prefix,
@@ -352,6 +375,7 @@ class BackupEngine:
     @staticmethod
     def _build_proton(storage: StorageConfig) -> StorageBackend:
         from src.storage.proton import ProtonDriveStorage
+
         return ProtonDriveStorage(
             username=storage.proton_username,
             password=storage.proton_password,
@@ -393,10 +417,7 @@ class BackupEngine:
         if has_mirrors:
             count += 1  # mirror upload
 
-        has_encryption = (
-            ctx.profile.encrypt_primary
-            and ctx.profile.encryption.enabled
-        )
+        has_encryption = ctx.profile.encrypt_primary and ctx.profile.encryption.enabled
         if has_encryption:
             count += 1  # encryption
 

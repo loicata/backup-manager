@@ -32,7 +32,8 @@ class EncryptionTab(ScrollableTab):
         # No encryption checkbox
         self.no_enc_var = tk.BooleanVar(value=True)
         self._no_enc_cb = ttk.Checkbutton(
-            mode_frame, text="No encryption",
+            mode_frame,
+            text="No encryption",
             variable=self.no_enc_var,
             command=self._on_no_enc_toggled,
         )
@@ -44,7 +45,8 @@ class EncryptionTab(ScrollableTab):
         # Encrypt Primary
         self.primary_var = tk.BooleanVar(value=False)
         self._primary_cb = ttk.Checkbutton(
-            mode_frame, text="Encrypt Primary",
+            mode_frame,
+            text="Encrypt Primary",
             variable=self.primary_var,
             command=self._on_encrypt_toggled,
         )
@@ -53,7 +55,8 @@ class EncryptionTab(ScrollableTab):
         # Encrypt Mirror 1
         self.mirror1_var = tk.BooleanVar(value=False)
         self._mirror1_cb = ttk.Checkbutton(
-            mode_frame, text="Encrypt Mirror 1",
+            mode_frame,
+            text="Encrypt Mirror 1",
             variable=self.mirror1_var,
             command=self._on_encrypt_toggled,
         )
@@ -62,7 +65,8 @@ class EncryptionTab(ScrollableTab):
         # Encrypt Mirror 2
         self.mirror2_var = tk.BooleanVar(value=False)
         self._mirror2_cb = ttk.Checkbutton(
-            mode_frame, text="Encrypt Mirror 2",
+            mode_frame,
+            text="Encrypt Mirror 2",
             variable=self.mirror2_var,
             command=self._on_encrypt_toggled,
         )
@@ -82,7 +86,9 @@ class EncryptionTab(ScrollableTab):
 
         self.show_pw_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            pw_row, text="Show", variable=self.show_pw_var,
+            pw_row,
+            text="Show",
+            variable=self.show_pw_var,
             command=self._toggle_show,
         ).pack(side="right", padx=(Spacing.SMALL, 0))
 
@@ -99,12 +105,14 @@ class EncryptionTab(ScrollableTab):
         self.strength_label.pack(anchor="w", pady=(Spacing.SMALL, 0))
 
         # DPAPI info
-        dpapi_text = "Password protected by Windows DPAPI" if _has_dpapi() else \
-                      "DPAPI unavailable — password protected by AES-256-GCM"
-        ttk.Label(self._pw_frame, text=dpapi_text,
-                   foreground=Colors.TEXT_SECONDARY, font=Fonts.small()).pack(
-            anchor="w", pady=(Spacing.MEDIUM, 0)
+        dpapi_text = (
+            "Password protected by Windows DPAPI"
+            if _has_dpapi()
+            else "DPAPI unavailable — password protected by AES-256-GCM"
         )
+        ttk.Label(
+            self._pw_frame, text=dpapi_text, foreground=Colors.TEXT_SECONDARY, font=Fonts.small()
+        ).pack(anchor="w", pady=(Spacing.MEDIUM, 0))
 
         # Apply initial state
         self._update_ui_state()
@@ -130,11 +138,7 @@ class EncryptionTab(ScrollableTab):
             return
         self._updating = True
 
-        any_encrypt = (
-            self.primary_var.get()
-            or self.mirror1_var.get()
-            or self.mirror2_var.get()
-        )
+        any_encrypt = self.primary_var.get() or self.mirror1_var.get() or self.mirror2_var.get()
 
         if any_encrypt:
             # At least one encrypt active → uncheck No encryption
@@ -148,17 +152,11 @@ class EncryptionTab(ScrollableTab):
 
     def _update_ui_state(self):
         """Update password frame visibility."""
-        any_encrypt = (
-            self.primary_var.get()
-            or self.mirror1_var.get()
-            or self.mirror2_var.get()
-        )
+        any_encrypt = self.primary_var.get() or self.mirror1_var.get() or self.mirror2_var.get()
 
         # Show/hide password frame
         if any_encrypt:
-            self._pw_frame.pack(
-                fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM
-            )
+            self._pw_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
         else:
             self._pw_frame.pack_forget()
 
@@ -227,11 +225,7 @@ class EncryptionTab(ScrollableTab):
         Returns:
             Error message string, or None if valid.
         """
-        any_encrypt = (
-            self.primary_var.get()
-            or self.mirror1_var.get()
-            or self.mirror2_var.get()
-        )
+        any_encrypt = self.primary_var.get() or self.mirror1_var.get() or self.mirror2_var.get()
         if not any_encrypt:
             return None
         pw = self.password_var.get()

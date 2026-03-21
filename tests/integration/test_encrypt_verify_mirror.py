@@ -5,9 +5,7 @@ phases inside the full backup pipeline, using local storage and
 temporary directories.
 """
 
-import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
 
 import pytest
 
@@ -134,7 +132,7 @@ class TestVerifyBeforeEncrypt:
         events.subscribe("log", lambda message="", **kw: log_messages.append(message))
 
         engine = BackupEngine(pipeline_env["config_manager"], events=events)
-        stats = engine.run_backup(profile)
+        _stats = engine.run_backup(profile)
 
         # Verification should not report warnings about mismatches
         warning_msgs = [m for m in log_messages if "WARNING" in m and "Verification" in m]

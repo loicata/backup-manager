@@ -6,13 +6,13 @@ delete_backup, test_connection, get_free_space, get_file_size.
 """
 
 import functools
-import io
 import logging
 import random
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from pathlib import Path
-from typing import BinaryIO, Callable, Optional
+from typing import BinaryIO
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class StorageBackend(ABC):
     """Abstract base class for all storage backends."""
 
     def __init__(self):
-        self._progress_callback: Optional[Callable] = None
+        self._progress_callback: Callable | None = None
         self._bandwidth_limit_kbps: int = 0
 
     def set_progress_callback(self, callback: Callable) -> None:
@@ -176,11 +176,11 @@ class StorageBackend(ABC):
         """
 
     @abstractmethod
-    def get_free_space(self) -> Optional[int]:
+    def get_free_space(self) -> int | None:
         """Get available space in bytes, or None if unknown."""
 
     @abstractmethod
-    def get_file_size(self, remote_name: str) -> Optional[int]:
+    def get_file_size(self, remote_name: str) -> int | None:
         """Get size of a remote file in bytes, or None if unknown."""
 
     @abstractmethod

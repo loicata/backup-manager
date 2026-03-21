@@ -24,7 +24,7 @@ jobs:
         run: black --check --diff . --exclude .claude
 
       - name: Lint (Ruff)
-        run: ruff check . --exclude .claude
+        run: ruff check . --exclude .claude --select E,F,W
 
   test:
     name: Tests (Python ${{ matrix.python-version }})

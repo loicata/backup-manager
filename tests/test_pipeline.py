@@ -1,24 +1,21 @@
 """Tests for the backup pipeline phases."""
 
 import json
-from pathlib import Path
 
 import pytest
 
-from src.core.events import EventBus
-from src.core.phases.collector import collect_files, FileInfo
-from src.core.phases.filter import (
-    filter_changed_files,
-    build_updated_manifest,
-    save_manifest,
-    load_manifest,
-)
-from src.core.phases.local_writer import write_flat, generate_backup_name
-from src.core.phases.manifest import build_integrity_manifest, save_integrity_manifest
-from src.core.phases.verifier import verify_backup
-from src.core.phases.rotator import rotate_backups, _rotate_gfs
 from src.core.config import RetentionConfig, RetentionPolicy
 from src.core.events import EventBus
+from src.core.phases.collector import collect_files
+from src.core.phases.filter import (
+    build_updated_manifest,
+    filter_changed_files,
+    save_manifest,
+)
+from src.core.phases.local_writer import generate_backup_name, write_flat
+from src.core.phases.manifest import build_integrity_manifest, save_integrity_manifest
+from src.core.phases.rotator import rotate_backups
+from src.core.phases.verifier import verify_backup
 
 # --- Collector tests ---
 
@@ -241,13 +238,13 @@ class TestRotator:
 
 class TestBackupEngine:
     def test_full_local_backup(self, sample_files, tmp_config_dir, tmp_path):
+        from src.core.backup_engine import BackupEngine
         from src.core.config import (
             BackupProfile,
+            ConfigManager,
             StorageConfig,
             StorageType,
-            ConfigManager,
         )
-        from src.core.backup_engine import BackupEngine
 
         dest = tmp_path / "backups"
         dest.mkdir()
@@ -271,13 +268,13 @@ class TestBackupEngine:
         assert stats.duration_seconds > 0
 
     def test_cancel_backup(self, sample_files, tmp_config_dir, tmp_path):
+        from src.core.backup_engine import BackupEngine, CancelledError
         from src.core.config import (
             BackupProfile,
+            ConfigManager,
             StorageConfig,
             StorageType,
-            ConfigManager,
         )
-        from src.core.backup_engine import BackupEngine, CancelledError
 
         dest = tmp_path / "backups"
         dest.mkdir()
@@ -306,14 +303,14 @@ class TestBackupEngine:
             engine.run_backup(profile)
 
     def test_incremental_skips_unchanged(self, sample_files, tmp_config_dir, tmp_path):
+        from src.core.backup_engine import BackupEngine
         from src.core.config import (
             BackupProfile,
             BackupType,
+            ConfigManager,
             StorageConfig,
             StorageType,
-            ConfigManager,
         )
-        from src.core.backup_engine import BackupEngine
 
         dest = tmp_path / "backups"
         dest.mkdir()
@@ -342,13 +339,13 @@ class TestBackupEngine:
         assert stats2.files_processed == 0
 
     def test_events_emitted(self, sample_files, tmp_config_dir, tmp_path):
+        from src.core.backup_engine import BackupEngine
         from src.core.config import (
             BackupProfile,
+            ConfigManager,
             StorageConfig,
             StorageType,
-            ConfigManager,
         )
-        from src.core.backup_engine import BackupEngine
 
         dest = tmp_path / "backups"
         dest.mkdir()

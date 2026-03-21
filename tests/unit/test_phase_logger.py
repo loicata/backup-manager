@@ -1,6 +1,6 @@
 """Tests for src.core.phase_logger — unified pipeline phase logging."""
 
-from src.core.events import EventBus, LOG, PROGRESS
+from src.core.events import LOG, PROGRESS, EventBus
 from src.core.phase_logger import PhaseLogger
 
 

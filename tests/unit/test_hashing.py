@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.core.hashing import compute_sha256, HASH_CHUNK_SIZE
+from src.core.hashing import HASH_CHUNK_SIZE, compute_sha256
 
 
 class TestComputeSha256:

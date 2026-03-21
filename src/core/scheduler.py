@@ -9,10 +9,10 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
 
 from src.core.config import BackupProfile, ScheduleFrequency
 
@@ -105,7 +105,7 @@ class ScheduleJournal:
                 entries = [e for e in entries if e.get("profile_id") == profile_id]
             return entries[-limit:]
 
-    def get_last_run(self, profile_id: str) -> Optional[dict]:
+    def get_last_run(self, profile_id: str) -> dict | None:
         """Get the most recent run for a given profile (thread-safe).
 
         Args:
@@ -146,7 +146,7 @@ class SchedulerState:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
 
-    def get_last_trigger(self, profile_id: str) -> Optional[datetime]:
+    def get_last_trigger(self, profile_id: str) -> datetime | None:
         """Get the last trigger time for a profile (thread-safe).
 
         Args:
@@ -190,7 +190,7 @@ class InAppScheduler:
         self._backup_callback = backup_callback
         self._journal = ScheduleJournal(config_dir)
         self._state = SchedulerState(config_dir)
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._running = False
         self._last_check_time = time.monotonic()
 

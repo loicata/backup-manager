@@ -2,8 +2,8 @@
 bandwidth limit, auto-start, and retry on failure."""
 
 import tkinter as tk
-from tkinter import ttk, filedialog
 from pathlib import Path
+from tkinter import filedialog, ttk
 
 from src.core.config import BackupProfile, BackupType
 from src.ui.tabs import ScrollableTab

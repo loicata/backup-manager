@@ -4,10 +4,8 @@ Covers: local_writer, encryptor, manifest, config, local storage.
 """
 
 import errno
-import json
-import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -128,7 +126,7 @@ class TestConfigSaveDiskFull:
                 cm._atomic_write(filepath, {"key": "value"})
 
     def test_save_profile_enospc(self, tmp_path):
-        from src.core.config import ConfigManager, BackupProfile
+        from src.core.config import BackupProfile, ConfigManager
 
         cm = ConfigManager(config_dir=tmp_path / "cfg")
         profile = BackupProfile(name="Test")

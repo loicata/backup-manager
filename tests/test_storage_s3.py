@@ -17,7 +17,7 @@ except ImportError:
         return lambda f: f
 
 
-from src.storage.s3 import S3Storage, PROVIDER_ENDPOINTS
+from src.storage.s3 import S3Storage
 
 pytestmark = pytest.mark.skipif(not HAS_MOTO, reason="moto not installed")
 

@@ -4,11 +4,10 @@ Supports flat directory copy and file-by-file streaming.
 """
 
 import logging
-import os
 import shutil
 import threading
 from pathlib import Path
-from typing import BinaryIO, Optional
+from typing import BinaryIO
 
 from src.storage.base import StorageBackend
 
@@ -138,7 +137,7 @@ class LocalStorage(StorageBackend):
 
         return result[0], result[1]
 
-    def get_free_space(self) -> Optional[int]:
+    def get_free_space(self) -> int | None:
         """Get available disk space in bytes."""
         try:
             usage = shutil.disk_usage(self._dest)
@@ -146,7 +145,7 @@ class LocalStorage(StorageBackend):
         except Exception:
             return None
 
-    def get_file_size(self, remote_name: str) -> Optional[int]:
+    def get_file_size(self, remote_name: str) -> int | None:
         """Get size of a backup file or directory."""
         target = self._dest / remote_name
         if not target.exists():

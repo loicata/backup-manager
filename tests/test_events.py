@@ -2,7 +2,7 @@
 
 import threading
 
-from src.core.events import EventBus, PROGRESS, LOG, STATUS
+from src.core.events import LOG, PROGRESS, STATUS, EventBus
 
 
 class TestEventBus:
@@ -33,7 +33,10 @@ class TestEventBus:
     def test_unsubscribe_removes_callback(self):
         bus = EventBus()
         results = []
-        cb = lambda **kw: results.append(1)
+
+        def cb(**kw):
+            results.append(1)
+
         bus.subscribe(LOG, cb)
         bus.unsubscribe(LOG, cb)
         bus.emit(LOG, message="test")
@@ -62,7 +65,10 @@ class TestEventBus:
     def test_duplicate_subscribe_ignored(self):
         bus = EventBus()
         results = []
-        cb = lambda **kw: results.append(1)
+
+        def cb(**kw):
+            results.append(1)
+
         bus.subscribe(LOG, cb)
         bus.subscribe(LOG, cb)
         bus.emit(LOG, message="test")

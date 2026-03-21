@@ -22,20 +22,17 @@ try:
 except ImportError:
     HAS_PARAMIKO = False
 
-from src.core.backup_engine import BackupEngine, BackupStats
+from src.core.backup_engine import BackupEngine
 from src.core.config import (
     BackupProfile,
     BackupType,
     ConfigManager,
-    EncryptionConfig,
     RetentionConfig,
     RetentionPolicy,
     StorageConfig,
     StorageType,
-    VerificationConfig,
 )
 from src.core.events import EventBus
-from src.storage.sftp import SFTPStorage
 
 # --- Connection config ---
 SFTP_HOST = "192.168.3.243"

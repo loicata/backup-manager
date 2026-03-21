@@ -7,8 +7,6 @@ encryption flags per mirror, local backends, and edge cases.
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from src.core.config import StorageConfig, StorageType
 from src.core.phases.collector import FileInfo
 from src.core.phases.mirror import mirror_backup

@@ -202,7 +202,6 @@ class TestMirrorFailures:
 
         # Make the first backend.upload raise, second succeed
         call_count = 0
-        original_get_backend = BackupEngine._get_backend
 
         def patched_get_backend(self_engine, storage):
             nonlocal call_count

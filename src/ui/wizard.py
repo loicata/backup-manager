@@ -9,22 +9,22 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, ttk
 
 from src.core.config import (
     BackupProfile,
     BackupType,
-    StorageConfig,
-    StorageType,
-    ScheduleConfig,
-    ScheduleFrequency,
+    EmailConfig,
+    EncryptionConfig,
     RetentionConfig,
     RetentionPolicy,
-    EncryptionConfig,
-    EmailConfig,
+    ScheduleConfig,
+    ScheduleFrequency,
+    StorageConfig,
+    StorageType,
 )
-from src.installer import get_available_features, FEAT_SFTP, FEAT_S3
-from src.notifications.email_notifier import send_test_email, SMTP_PRESETS
+from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
+from src.notifications.email_notifier import SMTP_PRESETS, send_test_email
 from src.ui.theme import Colors, Fonts, Spacing
 
 logger = logging.getLogger(__name__)
@@ -919,7 +919,7 @@ class SetupWizard:
         content = ttk.Frame(self._content)
         content.pack(fill="both", expand=True)
 
-        refs = self._build_storage_config_ui(content, storage_key)
+        _refs = self._build_storage_config_ui(content, storage_key)
 
         # Toggle content enable/disable
         def _toggle(*_args: object) -> None:

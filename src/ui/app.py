@@ -2,36 +2,35 @@
 
 import logging
 import os
-import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
 from pathlib import Path
+from tkinter import messagebox, ttk
 
 from src import __version__
-from src.core.config import BackupProfile, ConfigManager
-from src.core.events import EventBus, STATUS
 from src.core.backup_engine import BackupEngine, CancelledError
-from src.core.scheduler import InAppScheduler, AutoStart
+from src.core.config import BackupProfile, ConfigManager
+from src.core.events import STATUS, EventBus
+from src.core.scheduler import InAppScheduler
+from src.ui.tabs.email_tab import EmailTab
+from src.ui.tabs.encryption_tab import EncryptionTab
+from src.ui.tabs.general_tab import GeneralTab
+from src.ui.tabs.history_tab import HistoryTab
+from src.ui.tabs.mirror_tab import MirrorTab
+from src.ui.tabs.recovery_tab import RecoveryTab
+from src.ui.tabs.retention_tab import RetentionTab
+from src.ui.tabs.run_tab import RunTab
+from src.ui.tabs.schedule_tab import ScheduleTab
+from src.ui.tabs.storage_tab import StorageTab
 from src.ui.theme import (
+    APP_TITLE,
+    MIN_SIZE,
+    WINDOW_SIZE,
     Colors,
     Fonts,
     Spacing,
-    APP_TITLE,
-    WINDOW_SIZE,
-    MIN_SIZE,
     setup_theme,
 )
-from src.ui.tabs.general_tab import GeneralTab
-from src.ui.tabs.storage_tab import StorageTab
-from src.ui.tabs.mirror_tab import MirrorTab
-from src.ui.tabs.retention_tab import RetentionTab
-from src.ui.tabs.encryption_tab import EncryptionTab
-from src.ui.tabs.schedule_tab import ScheduleTab
-from src.ui.tabs.email_tab import EmailTab
-from src.ui.tabs.run_tab import RunTab
-from src.ui.tabs.recovery_tab import RecoveryTab
-from src.ui.tabs.history_tab import HistoryTab
 from src.ui.tray import BackupTray, TrayState
 
 logger = logging.getLogger(__name__)
@@ -626,8 +625,6 @@ class BackupManagerApp:
         When a second instance starts, it writes a signal file
         and exits. We poll for that file and show the window.
         """
-        import os
-        from pathlib import Path
 
         appdata = os.environ.get("APPDATA", "")
         signal_file = Path(appdata) / "BackupManager" / ".show_signal"

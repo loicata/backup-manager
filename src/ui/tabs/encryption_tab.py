@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from src.core.config import BackupProfile, EncryptionConfig
-from src.security.encryption import evaluate_password, _has_dpapi
+from src.security.encryption import _has_dpapi, evaluate_password
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 

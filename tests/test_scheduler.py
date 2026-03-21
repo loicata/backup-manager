@@ -3,17 +3,14 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from pathlib import Path
-
-import pytest
 
 from src.core.config import BackupProfile, ScheduleConfig, ScheduleFrequency
 from src.core.scheduler import (
+    AutoStart,
     InAppScheduler,
     ScheduleJournal,
     ScheduleLogEntry,
     SchedulerState,
-    AutoStart,
 )
 
 

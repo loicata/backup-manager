@@ -5,9 +5,7 @@ progress callbacks, and edge cases.
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 from src.core.phases.collector import FileInfo
 from src.core.phases.remote_writer import write_remote

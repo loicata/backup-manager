@@ -1,11 +1,11 @@
 """Email tab: SMTP notification configuration."""
 
-import tkinter as tk
-from tkinter import ttk, messagebox
 import threading
+import tkinter as tk
+from tkinter import ttk
 
 from src.core.config import BackupProfile, EmailConfig
-from src.notifications.email_notifier import send_test_email, SMTP_PRESETS
+from src.notifications.email_notifier import SMTP_PRESETS, send_test_email
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 

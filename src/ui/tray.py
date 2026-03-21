@@ -6,8 +6,8 @@ Status states: idle, running, success, error.
 
 import logging
 import threading
+from collections.abc import Callable
 from enum import Enum
-from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class BackupTray:
         self._quit_cb = quit_callback
         self._icon = None
         self._state = TrayState.IDLE
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         """Start tray icon in a daemon thread."""

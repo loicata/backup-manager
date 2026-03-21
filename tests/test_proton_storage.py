@@ -2,12 +2,11 @@
 
 import json
 import subprocess
-from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.storage.proton import ProtonDriveStorage, RCLONE_REMOTE_NAME, _MIN_RCLONE_VERSION
+from src.storage.proton import RCLONE_REMOTE_NAME, ProtonDriveStorage
 
 
 @pytest.fixture

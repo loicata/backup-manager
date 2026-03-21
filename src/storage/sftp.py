@@ -11,14 +11,10 @@ Security:
 - Password decrypted via DPAPI/AES at connection time
 """
 
-import io
 import logging
-import os
-import re
 import stat
-import time
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Optional
+from typing import BinaryIO
 
 from src.storage.base import StorageBackend, with_retry
 
@@ -90,7 +86,7 @@ class SFTPStorage(StorageBackend):
         self._key_path = key_path
         self._key_passphrase = key_passphrase
         self._remote_path = remote_path
-        self._exec_available: Optional[bool] = None
+        self._exec_available: bool | None = None
         self._persistent_transport = None
 
     def connect(self) -> None:
@@ -596,7 +592,7 @@ class SFTPStorage(StorageBackend):
         finally:
             transport.close()
 
-    def get_free_space(self) -> Optional[int]:
+    def get_free_space(self) -> int | None:
         """Get free space on the remote filesystem."""
         try:
             transport = self._get_transport()
@@ -612,7 +608,7 @@ class SFTPStorage(StorageBackend):
         except Exception:
             return None
 
-    def get_file_size(self, remote_name: str) -> Optional[int]:
+    def get_file_size(self, remote_name: str) -> int | None:
         """Get size of a remote file."""
         try:
             transport = self._get_transport()

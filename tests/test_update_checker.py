@@ -4,17 +4,12 @@ verification, network timeout handling, and security checks.
 
 import hashlib
 import json
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from src.core.update_checker import (
     _version_tuple,
     check_for_update,
     verify_update_hash,
-    CHECK_TIMEOUT,
 )
 
 # ---------------------------------------------------------------------------

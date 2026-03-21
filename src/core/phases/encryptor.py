@@ -8,7 +8,6 @@ Only directory backups are supported (ZIP compression has been removed).
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from src.core.events import EventBus
 from src.core.phase_logger import PhaseLogger
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 def encrypt_backup(
     backup_path: Path,
     password: str,
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
 ) -> Path:
     """Encrypt all files in a backup directory.
 

@@ -119,7 +119,7 @@ def build():
                 shutil.copy2(launch_src, launch_dst)
 
             size_mb = exe.stat().st_size / (1024 * 1024)
-            print(f"\nBuild successful!")
+            print("\nBuild successful!")
             print(f"  Executable: {exe}")
             print(f"  Size: {size_mb:.1f} MB")
             print(f"  Version: {version}")

@@ -8,10 +8,10 @@ import json
 import logging
 import os
 import re
-import subprocess
 import shutil
+import subprocess
 from pathlib import Path
-from typing import BinaryIO, Optional
+from typing import BinaryIO
 
 from src.storage.base import StorageBackend
 
@@ -70,7 +70,8 @@ class ProtonDriveStorage(StorageBackend):
                     return True, f"rclone {'.'.join(str(v) for v in version)}"
                 return (
                     False,
-                    f"rclone {'.'.join(str(v) for v in version)} too old (need {'.'.join(str(v) for v in _MIN_RCLONE_VERSION)}+)",
+                    f"rclone {'.'.join(str(v) for v in version)}"
+                    f" too old (need {'.'.join(str(v) for v in _MIN_RCLONE_VERSION)}+)",
                 )
             return False, "Could not determine rclone version"
         except FileNotFoundError:
@@ -234,7 +235,7 @@ class ProtonDriveStorage(StorageBackend):
             return True, f"Connected to Proton Drive ({self._username})"
         return False, f"Proton Drive error: {result.stderr.strip()}"
 
-    def get_free_space(self) -> Optional[int]:
+    def get_free_space(self) -> int | None:
         """Get free space (not available for Proton Drive)."""
         return None
 
@@ -251,7 +252,7 @@ class ProtonDriveStorage(StorageBackend):
             raise RuntimeError(f"rclone download failed: {result.stderr.strip()}")
         return dst
 
-    def get_file_size(self, remote_name: str) -> Optional[int]:
+    def get_file_size(self, remote_name: str) -> int | None:
         """Get file size via rclone size."""
         result = self._run_rclone(["size", self._remote_spec(remote_name), "--json"], timeout=30)
         if result.returncode == 0:

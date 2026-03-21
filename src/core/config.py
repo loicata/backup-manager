@@ -10,13 +10,12 @@ import logging
 import os
 import shutil
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
-from src.security.encryption import store_password, retrieve_password
+from src.security.encryption import retrieve_password, store_password
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +220,8 @@ class BackupProfile:
     sort_order: int = 0
     active: bool = True
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    last_backup: Optional[str] = None
-    last_full_backup: Optional[str] = None
+    last_backup: str | None = None
+    last_full_backup: str | None = None
 
 
 # --- Sensitive fields that must be encrypted before save ---
@@ -245,7 +244,7 @@ _EMAIL_SECRET_FIELDS = ["password"]
 class ConfigManager:
     """Manages profile persistence in %APPDATA%/BackupManager/."""
 
-    def __init__(self, config_dir: Optional[Path] = None):
+    def __init__(self, config_dir: Path | None = None):
         if config_dir is None:
             appdata = os.environ.get("APPDATA", "")
             self.config_dir = Path(appdata) / "BackupManager"

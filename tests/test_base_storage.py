@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from src.storage.base import ThrottledReader, with_retry, StorageBackend
+from src.storage.base import ThrottledReader, with_retry
 
 _IN_CI = os.environ.get("CI") == "true"
 

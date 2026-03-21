@@ -1,13 +1,11 @@
 """History tab: browse backup logs."""
 
-import tkinter as tk
-from tkinter import ttk
 import os
-import subprocess
 from pathlib import Path
+from tkinter import ttk
 
 from src.ui.tabs import ScrollableTab
-from src.ui.theme import Colors, Fonts, Spacing
+from src.ui.theme import Spacing
 
 
 class HistoryTab(ScrollableTab):
@@ -93,7 +91,7 @@ class HistoryTab(ScrollableTab):
             Profile name, or 'Unknown' if not found.
         """
         try:
-            with open(log_file, "r", encoding="utf-8") as f:
+            with open(log_file, encoding="utf-8") as f:
                 first_line = f.readline()
             # Format: "... Starting backup 'ProfileName'..."
             if "'" in first_line:

@@ -10,7 +10,6 @@ with code that used BackupStats.errors as an integer count.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,7 @@ class PhaseError:
     phase: str
     file_path: str
     message: str
-    exception: Optional[Exception] = None
+    exception: Exception | None = None
 
 
 @dataclass
@@ -81,7 +80,7 @@ class BackupResult:
         phase: str,
         file_path: str,
         message: str,
-        exception: Optional[Exception] = None,
+        exception: Exception | None = None,
     ) -> None:
         """Record an error from a pipeline phase.
 

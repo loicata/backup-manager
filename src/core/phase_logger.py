@@ -6,9 +6,8 @@ phase name to each event for downstream filtering.
 """
 
 import logging
-from typing import Optional
 
-from src.core.events import EventBus, LOG, PROGRESS
+from src.core.events import LOG, PROGRESS, EventBus
 
 
 class PhaseLogger:
@@ -25,7 +24,7 @@ class PhaseLogger:
                 Python logging is used.
     """
 
-    def __init__(self, phase_name: str, events: Optional[EventBus] = None):
+    def __init__(self, phase_name: str, events: EventBus | None = None):
         self._logger = logging.getLogger(f"src.core.phases.{phase_name}")
         self._events = events
         self._phase_name = phase_name

@@ -4,15 +4,12 @@ Uses mock paramiko injected via sys.modules since paramiko
 may not be installed in the test environment.
 """
 
-import io
-import stat as stat_mod
 import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock
 
 import pytest
 
-from src.storage.sftp import _validate_remote_name, _shell_escape
+from src.storage.sftp import _shell_escape, _validate_remote_name
 
 
 class TestValidateRemoteName:
@@ -121,7 +118,7 @@ class TestSFTPStorageWithMock:
             self._cleanup_paramiko()
 
     def test_check_exec_channel_available(self):
-        mp = self._setup_mock_paramiko()
+        _mp = self._setup_mock_paramiko()
         try:
             storage = self._make_storage()
             transport = MagicMock()
@@ -136,7 +133,7 @@ class TestSFTPStorageWithMock:
             self._cleanup_paramiko()
 
     def test_check_exec_channel_restricted(self):
-        mp = self._setup_mock_paramiko()
+        _mp = self._setup_mock_paramiko()
         try:
             storage = self._make_storage()
             transport = MagicMock()
@@ -150,7 +147,7 @@ class TestSFTPStorageWithMock:
             self._cleanup_paramiko()
 
     def test_check_exec_channel_cached(self):
-        mp = self._setup_mock_paramiko()
+        _mp = self._setup_mock_paramiko()
         try:
             storage = self._make_storage()
             storage._exec_available = True
@@ -161,7 +158,7 @@ class TestSFTPStorageWithMock:
             self._cleanup_paramiko()
 
     def test_check_exec_channel_exception(self):
-        mp = self._setup_mock_paramiko()
+        _mp = self._setup_mock_paramiko()
         try:
             storage = self._make_storage()
             transport = MagicMock()
@@ -214,7 +211,7 @@ class TestSFTPStorageWithMock:
             self._cleanup_paramiko()
 
     def test_join_remote(self):
-        mp = self._setup_mock_paramiko()
+        _mp = self._setup_mock_paramiko()
         try:
             storage = self._make_storage()
             assert storage._join_remote("backup1") == "/home/testuser/backups/backup1"

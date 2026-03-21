@@ -5,7 +5,7 @@ from tkinter import ttk
 
 from src.core.config import BackupProfile, ScheduleConfig, ScheduleFrequency
 from src.ui.tabs import ScrollableTab
-from src.ui.theme import Colors, Fonts, Spacing
+from src.ui.theme import Spacing
 
 
 class ScheduleTab(ScrollableTab):

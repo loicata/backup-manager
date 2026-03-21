@@ -1,12 +1,12 @@
 """Tests for src.notifications.email_notifier."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.core.config import EmailConfig
 from src.notifications.email_notifier import (
+    _build_html,
     send_backup_report,
     send_test_email,
-    _build_html,
 )
 
 

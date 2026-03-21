@@ -7,7 +7,7 @@ writes to the context, making data flow explicit.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from src.core.backup_result import BackupResult
 from src.core.config import BackupProfile
@@ -39,10 +39,10 @@ class PipelineContext:
     # Populated by phases as pipeline progresses
     files: list = field(default_factory=list)
     backup_name: str = ""
-    backup_path: Optional[Path] = None
+    backup_path: Path | None = None
     backup_remote_name: str = ""
     integrity_manifest: dict = field(default_factory=dict)
-    backend: Optional[Any] = None  # StorageBackend
+    backend: Any | None = None  # StorageBackend
 
     def is_local(self) -> bool:
         """True if backup target is a local or network path.

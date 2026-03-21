@@ -184,10 +184,11 @@ def main():
 
     try:
         import tkinter as tk
+
         from src.core.config import ConfigManager
+        from src.security.integrity_check import verify_integrity
         from src.ui.app import BackupManagerApp
         from src.ui.wizard import SetupWizard
-        from src.security.integrity_check import verify_integrity
 
         # Create root window (hidden until app is ready)
         logger.info("Creating root window...")
@@ -241,7 +242,7 @@ def main():
         root.attributes("-alpha", 1)  # Ensure fully opaque
         root.deiconify()
         root.update_idletasks()
-        app = BackupManagerApp(root)
+        _app = BackupManagerApp(root)
         root.lift()
         root.attributes("-topmost", True)
         root.after(100, lambda: root.attributes("-topmost", False))

@@ -6,7 +6,6 @@ daily, weekly, and monthly backups.
 
 import logging
 from datetime import datetime
-from typing import Optional
 
 from src.core.config import RetentionConfig
 from src.core.events import EventBus
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 def rotate_backups(
     backend: StorageBackend,
     retention: RetentionConfig,
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
 ) -> int:
     """Apply GFS retention policy and delete old backups.
 
@@ -42,7 +41,7 @@ def _rotate_gfs(
     backend: StorageBackend,
     backups: list[dict],
     retention: RetentionConfig,
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
 ) -> int:
     """GFS rotation: keep daily/weekly/monthly backups."""
     phase_log = PhaseLogger("rotator", events)

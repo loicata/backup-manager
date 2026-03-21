@@ -9,7 +9,6 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from src.core.events import EventBus
 from src.core.phase_logger import PhaseLogger
@@ -61,7 +60,7 @@ class FileInfo:
 def collect_files(
     source_paths: list[str],
     exclude_patterns: list[str] | None = None,
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
 ) -> list[FileInfo]:
     """Collect all files from source paths.
 

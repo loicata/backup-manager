@@ -6,15 +6,14 @@ per-mirror boolean flags (encrypt_mirror1, encrypt_mirror2).
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 from src.core.config import StorageConfig
 from src.core.events import EventBus
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
 from src.core.phases.remote_writer import write_remote
-from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +24,10 @@ def mirror_backup(
     mirror_configs: list[StorageConfig],
     backup_name: str,
     get_backend: callable,
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
     encrypt_password: str = "",
-    encrypt_flags: Optional[list[bool]] = None,
-    cancel_check: Optional[Callable[[], None]] = None,
+    encrypt_flags: list[bool] | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> list[tuple[str, bool, str]]:
     """Upload backup to mirror destinations.
 

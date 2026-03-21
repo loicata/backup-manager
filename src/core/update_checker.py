@@ -11,7 +11,7 @@ import logging
 import re
 import threading
 import urllib.request
-from typing import Callable, Optional
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ def check_for_update(
     return thread
 
 
-def verify_update_hash(file_data: bytes, expected_hash: Optional[str]) -> bool:
+def verify_update_hash(file_data: bytes, expected_hash: str | None) -> bool:
     """Verify the SHA-256 hash of downloaded update data.
 
     Args:

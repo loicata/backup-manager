@@ -4,18 +4,15 @@ Tests the complete backup workflow: collect → filter → write → verify → 
 Uses local storage with temporary directories.
 """
 
-import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.backup_engine import BackupEngine, BackupStats
+from src.core.backup_engine import BackupEngine
 from src.core.config import (
     BackupProfile,
     BackupType,
     ConfigManager,
-    EncryptionConfig,
     RetentionConfig,
     RetentionPolicy,
     StorageConfig,

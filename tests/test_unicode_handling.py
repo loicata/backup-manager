@@ -1,13 +1,12 @@
 """Tests for unicode and special character handling across pipeline phases."""
 
 import json
-from pathlib import Path
 
 import pytest
 
 from src.core.phases.collector import collect_files
+from src.core.phases.local_writer import generate_backup_name, write_flat
 from src.core.phases.manifest import build_integrity_manifest, save_integrity_manifest
-from src.core.phases.local_writer import write_flat, generate_backup_name
 
 
 class TestCollectorUnicode:
@@ -123,6 +122,7 @@ class TestConfigUnicode:
     def test_profile_name_with_special_characters(self, tmp_path):
         """Profile with unicode name is saved and loaded correctly."""
         from unittest.mock import patch
+
         from src.core.config import BackupProfile, ConfigManager
 
         config_dir = tmp_path / "config"

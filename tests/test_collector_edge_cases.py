@@ -1,13 +1,12 @@
 """Additional edge-case tests for the collector phase."""
 
 import os
-import stat
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from src.core.phases.collector import collect_files, FileInfo
+from src.core.phases.collector import FileInfo, collect_files
 
 
 class TestPermissionDenied:

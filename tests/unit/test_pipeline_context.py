@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from src.core.backup_result import BackupResult
-from src.core.config import BackupProfile, StorageType
+from src.core.config import BackupProfile
 from src.core.events import EventBus
 from src.core.phases.base import PipelineContext
 

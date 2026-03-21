@@ -9,7 +9,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from src.core.config import BackupProfile, StorageConfig, StorageType
-from src.installer import get_available_features, FEAT_SFTP, FEAT_S3
+from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
 from src.security.encryption import decrypt_file
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
@@ -481,19 +481,18 @@ class RecoveryTab(ScrollableTab):
                             lambda: self._on_retrieve_error("No files found on remote."),
                         )
                         return
-                    last_path = None
                     for b in backups:
-                        last_path = backend.download_backup(b["name"], dest)
+                        backend.download_backup(b["name"], dest)
                     self.after(
                         0,
                         lambda: self._on_retrieve_done(str(dest)),
                     )
                 except Exception as e2:
                     logger.error("Failed to retrieve backups: %s", e2)
-                    self.after(0, lambda: self._on_retrieve_error(str(e2)))
+                    self.after(0, lambda _e=e2: self._on_retrieve_error(str(_e)))
             except Exception as e:
                 logger.error("Failed to retrieve: %s", e)
-                self.after(0, lambda: self._on_retrieve_error(str(e)))
+                self.after(0, lambda _e=e: self._on_retrieve_error(str(_e)))
 
         threading.Thread(target=_do_retrieve, daemon=True).start()
 
@@ -711,7 +710,7 @@ class RecoveryTab(ScrollableTab):
             self.after(0, lambda: self._restore_done(success, msg))
         except Exception as e:
             logger.exception("Restore failed")
-            self.after(0, lambda: self._restore_done(False, str(e)))
+            self.after(0, lambda _e=e: self._restore_done(False, str(_e)))
 
     def _restore_done(self, ok: bool, msg: str) -> None:
         """Display restore result.

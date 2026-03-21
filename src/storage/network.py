@@ -6,7 +6,6 @@ Extends LocalStorage with connection timeout handling.
 import logging
 import threading
 from pathlib import Path
-from typing import Optional
 
 from src.storage.local import LocalStorage
 

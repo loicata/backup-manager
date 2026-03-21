@@ -4,11 +4,8 @@ Covers security validation, connection errors, fallback, progress,
 and delete operations NOT already present in test_storage_sftp.py.
 """
 
-import socket
-import stat as stat_mod
 import sys
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -173,7 +170,7 @@ class TestConnectionTimeout:
         mp = _setup_mock_paramiko()
         try:
             storage = _make_storage()
-            mp.Transport.return_value.connect.side_effect = socket.timeout("Connection timed out")
+            mp.Transport.return_value.connect.side_effect = TimeoutError("Connection timed out")
             ok, msg = storage.test_connection()
             assert ok is False
             assert "failed" in msg.lower() or "timed out" in msg.lower()
@@ -239,7 +236,7 @@ class TestExecFallback:
 
 class TestProgressCallback:
     def test_fast_upload_calls_progress(self, tmp_path):
-        mp = _setup_mock_paramiko()
+        _mp = _setup_mock_paramiko()
         try:
             storage = _make_storage()
             cb = MagicMock()

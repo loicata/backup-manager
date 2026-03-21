@@ -1,13 +1,10 @@
 """Edge-case tests for GFS backup rotation."""
 
-import time
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from src.core.config import RetentionConfig, RetentionPolicy
-from src.core.phases.rotator import rotate_backups, _rotate_gfs
+from src.core.config import RetentionConfig
+from src.core.phases.rotator import rotate_backups
 
 
 def _make_backend(backups: list[dict]) -> MagicMock:

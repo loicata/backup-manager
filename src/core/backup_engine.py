@@ -10,7 +10,6 @@ for error accumulation.
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
 from src.core.backup_result import BackupResult
 from src.core.config import (
@@ -20,29 +19,29 @@ from src.core.config import (
     StorageType,
 )
 from src.core.events import (
-    EventBus,
-    LOG,
-    STATUS,
     BACKUP_DONE,
     ERROR,
+    LOG,
     PHASE_CHANGED,
     PHASE_COUNT,
+    STATUS,
+    EventBus,
 )
 from src.core.exceptions import CancelledError
 from src.core.phases.base import PipelineContext
-from src.core.phases.collector import collect_files, FileInfo
+from src.core.phases.collector import collect_files
+from src.core.phases.encryptor import encrypt_backup
 from src.core.phases.filter import (
-    filter_changed_files,
     build_updated_manifest,
+    filter_changed_files,
     save_manifest,
 )
 from src.core.phases.local_writer import generate_backup_name
 from src.core.phases.manifest import build_integrity_manifest, save_integrity_manifest
-from src.core.phases.writer import write_backup
-from src.core.phases.verifier import verify_backup
-from src.core.phases.encryptor import encrypt_backup
 from src.core.phases.mirror import mirror_backup
 from src.core.phases.rotator import rotate_backups
+from src.core.phases.verifier import verify_backup
+from src.core.phases.writer import write_backup
 from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -62,7 +61,7 @@ class BackupEngine:
     def __init__(
         self,
         config_manager,
-        events: Optional[EventBus] = None,
+        events: EventBus | None = None,
     ):
         self._config = config_manager
         self._events = events or EventBus()

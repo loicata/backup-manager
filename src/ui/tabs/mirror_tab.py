@@ -2,12 +2,12 @@
 
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import filedialog, ttk
 
 from src.core.config import BackupProfile, StorageConfig, StorageType
-from src.installer import get_available_features, FEAT_SFTP, FEAT_S3
+from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
 from src.ui.tabs import ScrollableTab
-from src.ui.theme import Colors, Fonts, Spacing
+from src.ui.theme import Colors, Spacing
 
 
 class MirrorTab(ScrollableTab):
@@ -239,7 +239,7 @@ class MirrorTab(ScrollableTab):
                 ok, msg = backend.test_connection()
                 self.after(0, lambda: self._show_test_result(ok, msg))
             except Exception as e:
-                self.after(0, lambda: self._show_test_result(False, str(e)))
+                self.after(0, lambda _e=e: self._show_test_result(False, str(_e)))
 
         threading.Thread(target=_do_test, daemon=True).start()
 

@@ -5,20 +5,15 @@ weekly/monthly is_due, missed backup detection, AutoStart, and journal trimming.
 import json
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 from src.core.config import BackupProfile, ScheduleConfig, ScheduleFrequency
 from src.core.scheduler import (
-    AutoStart,
+    CHECK_INTERVAL,
+    MAX_JOURNAL_ENTRIES,
     InAppScheduler,
     ScheduleJournal,
     ScheduleLogEntry,
     SchedulerState,
-    CHECK_INTERVAL,
-    MAX_JOURNAL_ENTRIES,
 )
 
 

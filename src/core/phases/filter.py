@@ -7,7 +7,6 @@ which files have changed and need to be backed up.
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from src.core.events import EventBus
 from src.core.hashing import compute_sha256
@@ -44,7 +43,7 @@ def save_manifest(manifest: dict[str, dict], manifest_path: Path) -> None:
 def filter_changed_files(
     files: list[FileInfo],
     manifest_path: Path,
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
 ) -> list[FileInfo]:
     """Filter files that have changed since last backup.
 

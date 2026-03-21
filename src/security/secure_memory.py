@@ -38,7 +38,7 @@ def secure_clear(data) -> None:
             else:
                 byte_len = length
 
-            buf = ctypes.c_char * byte_len
+            _buf = ctypes.c_char * byte_len
             addr = id(data)
             # Skip CPython object header (varies by type and platform)
             # This is best-effort; not guaranteed on all interpreters

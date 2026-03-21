@@ -1,8 +1,6 @@
 """Tests for src.core.config — ConfigManager and dataclasses."""
 
 import json
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -10,15 +8,12 @@ from src.core.config import (
     BackupProfile,
     BackupType,
     ConfigManager,
-    EmailConfig,
-    EncryptionConfig,
     RetentionConfig,
     RetentionPolicy,
     ScheduleConfig,
     ScheduleFrequency,
     StorageConfig,
     StorageType,
-    VerificationConfig,
 )
 
 

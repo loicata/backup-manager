@@ -1,14 +1,12 @@
 """Tests for scheduler retry logic."""
 
-import time
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.config import BackupProfile, ScheduleConfig, ScheduleFrequency
-from src.core.scheduler import InAppScheduler, ScheduleLogEntry
+from src.core.config import BackupProfile, ScheduleConfig
+from src.core.scheduler import InAppScheduler
 
 
 @pytest.fixture

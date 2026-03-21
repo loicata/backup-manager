@@ -5,8 +5,8 @@ does not need to know the storage details for writing.
 """
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 from src.core.phases.base import PipelineContext
 from src.core.phases.local_writer import write_flat
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def write_backup(
     ctx: PipelineContext,
-    cancel_check: Optional[Callable[[], None]] = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> None:
     """Write backup to the configured destination.
 

@@ -9,7 +9,6 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from src.core.events import EventBus
 from src.core.hashing import compute_sha256
@@ -21,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def build_integrity_manifest(
     files: list[FileInfo],
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
 ) -> dict:
     """Build integrity manifest with hashes of all source files.
 

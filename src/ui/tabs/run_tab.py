@@ -3,7 +3,7 @@
 import tkinter as tk
 from tkinter import ttk
 
-from src.core.events import EventBus, PROGRESS, LOG, STATUS, PHASE_CHANGED, PHASE_COUNT
+from src.core.events import LOG, PHASE_CHANGED, PHASE_COUNT, PROGRESS, STATUS, EventBus
 from src.ui.theme import Colors, Fonts, Spacing
 
 

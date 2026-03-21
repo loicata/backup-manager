@@ -5,14 +5,12 @@ Encryption uses a temporary encrypted file to avoid loading
 the entire plaintext into memory.
 """
 
-import io
 import logging
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 from src.core.events import EventBus
-from src.core.exceptions import CancelledError
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
 from src.storage.base import StorageBackend
@@ -27,8 +25,8 @@ def write_remote(
     backend: StorageBackend,
     backup_name: str,
     encrypt_password: str = "",
-    events: Optional[EventBus] = None,
-    cancel_check: Optional[Callable[[], None]] = None,
+    events: EventBus | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> str:
     """Stream files one by one to a remote storage backend.
 

@@ -1,24 +1,21 @@
 """Tests for src.security.encryption."""
 
 import os
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from src.security.encryption import (
+    KEY_SIZE,
+    SALT_SIZE,
+    decrypt_bytes,
+    decrypt_file,
     derive_key,
     encrypt_bytes,
-    decrypt_bytes,
     encrypt_file,
-    decrypt_file,
-    store_password,
-    retrieve_password,
     evaluate_password,
-    SALT_SIZE,
-    NONCE_SIZE,
-    KEY_SIZE,
-    PBKDF2_ITERATIONS,
+    retrieve_password,
+    store_password,
 )
 
 

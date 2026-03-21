@@ -13,10 +13,8 @@ import hashlib
 import logging
 import os
 import secrets
-import struct
 import sys
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +30,7 @@ CHUNK_SIZE = 1024 * 1024  # 1 MB read chunks for file encryption
 def _has_cryptography() -> bool:
     """Check if the cryptography library is available."""
     try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # noqa: F401
 
         return True
     except ImportError:
@@ -404,7 +402,7 @@ def _protect_machine_key(key_data: bytes) -> bytes:
     return key_data
 
 
-def _unprotect_machine_key(raw: bytes) -> Optional[bytes]:
+def _unprotect_machine_key(raw: bytes) -> bytes | None:
     """Unprotect a machine key from disk.
 
     Handles both DPAPI-protected and legacy raw keys.

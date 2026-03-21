@@ -8,7 +8,6 @@ Requires:
 These tests create and clean up their own subdirectory under the remote path.
 """
 
-import os
 import uuid
 from pathlib import Path
 

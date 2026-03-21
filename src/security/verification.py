@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +46,8 @@ class VerifyReport:
     profile_name: str = ""
     backup_path: str = ""
     verify_level: str = "deep"
-    start_time: Optional[datetime] = None
-    end_time: Optional[datetime] = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
     total_files: int = 0
     verified_ok: int = 0
     mismatches: int = 0

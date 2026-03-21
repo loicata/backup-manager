@@ -7,7 +7,6 @@ import logging
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from src.core.events import EventBus
 from src.core.phase_logger import PhaseLogger
@@ -20,7 +19,7 @@ def write_flat(
     files: list[FileInfo],
     destination: Path,
     backup_name: str,
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
 ) -> Path:
     """Write files as a flat directory copy.
 

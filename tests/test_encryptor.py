@@ -39,7 +39,7 @@ class TestEncryptBackupDirectory:
         # Create a .wbenc file that should be skipped
         (backup_dir / "already.wbenc").write_bytes(b"encrypted data")
 
-        result = encrypt_backup(backup_dir, "test_password_123!")
+        encrypt_backup(backup_dir, "test_password_123!")
         # Only 3 txt files should be encrypted, not the .wbenc
         enc_files = list(backup_dir.rglob("*.wbenc"))
         assert len(enc_files) == 4  # 3 new + 1 existing

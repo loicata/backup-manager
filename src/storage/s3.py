@@ -7,7 +7,7 @@ Supported providers:
 
 import logging
 from pathlib import Path
-from typing import BinaryIO, Optional
+from typing import BinaryIO
 
 from src.storage.base import StorageBackend, with_retry
 
@@ -193,18 +193,17 @@ class S3Storage(StorageBackend):
 
             # Count objects
             prefix = f"{self._prefix}/" if self._prefix else ""
-            response = client.list_objects_v2(Bucket=self._bucket, Prefix=prefix, MaxKeys=1)
-            count = response.get("KeyCount", 0)
+            client.list_objects_v2(Bucket=self._bucket, Prefix=prefix, MaxKeys=1)
 
             return True, f"Connected to {self._bucket} ({self._provider})"
         except Exception as e:
             return False, f"S3 Error: {type(e).__name__}: {e}"
 
-    def get_free_space(self) -> Optional[int]:
+    def get_free_space(self) -> int | None:
         """S3 has unlimited space."""
         return None
 
-    def get_file_size(self, remote_name: str) -> Optional[int]:
+    def get_file_size(self, remote_name: str) -> int | None:
         """Get size of an S3 object."""
         try:
             client = self._get_client()

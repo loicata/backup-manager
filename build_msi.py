@@ -227,7 +227,7 @@ def build():
     )
 
     size_mb = msi_path.stat().st_size / (1024 * 1024)
-    print(f"\nMSI build successful!")
+    print("\nMSI build successful!")
     print(f"  Installer: {msi_path}")
     print(f"  Size: {size_mb:.1f} MB")
     print(f"  Version: {version}")

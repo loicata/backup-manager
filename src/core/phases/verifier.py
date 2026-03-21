@@ -7,7 +7,6 @@ to ensure no corruption occurred during the backup process.
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from src.core.events import EventBus
 from src.core.hashing import compute_sha256
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 def verify_backup(
     backup_path: Path,
     manifest_path: Path,
-    events: Optional[EventBus] = None,
+    events: EventBus | None = None,
 ) -> tuple[bool, str]:
     """Verify backup contents against manifest.
 

@@ -5,22 +5,20 @@ handling, DPAPI fallback, PBKDF2 iteration count, and key cleanup.
 """
 
 import os
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
 from src.security.encryption import (
+    KEY_SIZE,
+    NONCE_SIZE,
+    PBKDF2_ITERATIONS,
+    SALT_SIZE,
+    decrypt_bytes,
+    decrypt_file,
     derive_key,
     encrypt_bytes,
-    decrypt_bytes,
     encrypt_file,
-    decrypt_file,
-    SALT_SIZE,
-    NONCE_SIZE,
-    TAG_SIZE,
-    KEY_SIZE,
-    PBKDF2_ITERATIONS,
 )
 
 
@@ -135,7 +133,7 @@ class TestDPAPIFallback:
     def test_store_password_uses_aes_when_dpapi_unavailable(self):
         """When _has_dpapi() returns False, store_password must use AES prefix."""
         with patch("src.security.encryption._has_dpapi", return_value=False):
-            from src.security.encryption import store_password, retrieve_password
+            from src.security.encryption import retrieve_password, store_password
 
             stored = store_password("test_secret")
             assert stored.startswith("aes:")
@@ -176,10 +174,12 @@ class TestKeyMaterialCleanup:
 
     def test_key_zeroed_even_on_error(self):
         """Key cleanup must happen even when encryption raises."""
-        with patch(
-            "cryptography.hazmat.primitives.ciphers.aead.AESGCM.encrypt",
-            side_effect=RuntimeError("simulated failure"),
+        with (
+            patch(
+                "cryptography.hazmat.primitives.ciphers.aead.AESGCM.encrypt",
+                side_effect=RuntimeError("simulated failure"),
+            ),
+            pytest.raises(RuntimeError, match="simulated failure"),
         ):
-            with pytest.raises(RuntimeError, match="simulated failure"):
-                encrypt_bytes(b"data", "password")
+            encrypt_bytes(b"data", "password")
         # If we reach here, the finally block ran (no resource leak)

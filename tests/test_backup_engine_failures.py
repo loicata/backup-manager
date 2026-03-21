@@ -5,13 +5,11 @@ failures, cancellation at each phase, empty backups, and non-fatal
 error propagation through the pipeline.
 """
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.core.backup_engine import BackupEngine
-from src.core.backup_result import BackupResult
 from src.core.config import (
     BackupProfile,
     BackupType,
@@ -130,12 +128,14 @@ class TestManifestFailures:
     def test_cannot_write_manifest_file(self, env, profile):
         """Pipeline should raise when integrity manifest write fails."""
         engine = _engine(env)
-        with patch(
-            "src.core.backup_engine.save_integrity_manifest",
-            side_effect=OSError("Permission denied"),
+        with (
+            patch(
+                "src.core.backup_engine.save_integrity_manifest",
+                side_effect=OSError("Permission denied"),
+            ),
+            pytest.raises(OSError, match="Permission denied"),
         ):
-            with pytest.raises(OSError, match="Permission denied"):
-                engine.run_backup(profile)
+            engine.run_backup(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +170,14 @@ class TestEncryptFailures:
         profile.encryption = EncryptionConfig(enabled=True, stored_password="secret")
 
         engine = _engine(env)
-        with patch(
-            "src.core.backup_engine.encrypt_backup",
-            side_effect=OSError("disk full"),
+        with (
+            patch(
+                "src.core.backup_engine.encrypt_backup",
+                side_effect=OSError("disk full"),
+            ),
+            pytest.raises(OSError, match="disk full"),
         ):
-            with pytest.raises(OSError, match="disk full"):
-                engine.run_backup(profile)
+            engine.run_backup(profile)
 
 
 # ---------------------------------------------------------------------------

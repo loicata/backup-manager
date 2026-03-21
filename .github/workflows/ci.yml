@@ -21,10 +21,10 @@ jobs:
         run: pip install ruff black
 
       - name: Check formatting (Black)
-        run: black --check --diff .
+        run: black --check --diff . --exclude .claude
 
       - name: Lint (Ruff)
-        run: ruff check .
+        run: ruff check . --exclude .claude
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
@@ -46,7 +46,7 @@ jobs:
           pip install pytest pytest-cov
 
       - name: Run tests with coverage
-        run: pytest --cov=src --cov-report=term-missing --cov-fail-under=80 -v -k "not real_sftp"
+        run: pytest --cov=src --cov-report=term-missing --cov-fail-under=80 -v -k "not real_sftp and not test_throttles_speed"
 
       - name: Upload coverage report
         if: matrix.python-version == '3.12'

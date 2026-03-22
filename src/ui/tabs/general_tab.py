@@ -1,6 +1,9 @@
 """General tab: profile name, backup type, source paths, exclusions,
 bandwidth limit, auto-start, and retry on failure."""
 
+import logging
+import os
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
@@ -9,6 +12,8 @@ from src.core.config import BackupProfile, BackupType
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 
+logger = logging.getLogger(__name__)
+
 
 class GeneralTab(ScrollableTab):
     """Profile name, backup type, sources, exclusion patterns,
@@ -16,6 +21,7 @@ class GeneralTab(ScrollableTab):
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
+        self._size_cancel = threading.Event()
         self._build_ui()
 
     def _build_ui(self):
@@ -81,6 +87,14 @@ class GeneralTab(ScrollableTab):
         ttk.Button(btn_frame, text="Move Down", command=lambda: self._move(1)).pack(
             side="left", padx=2
         )
+
+        self.total_size_var = tk.StringVar(value="Total: --")
+        ttk.Label(
+            btn_frame,
+            textvariable=self.total_size_var,
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(side="right", padx=(Spacing.MEDIUM, 0))
 
         # Exclusion patterns
         excl_frame = ttk.LabelFrame(self.inner, text="Exclusion patterns", padding=Spacing.PAD)
@@ -162,10 +176,12 @@ class GeneralTab(ScrollableTab):
         ]
         if path not in existing:
             self.sources_tree.insert("", "end", values=(path, path_type))
+            self._update_total_size()
 
     def _remove_selected(self):
         for item in self.sources_tree.selection():
             self.sources_tree.delete(item)
+        self._update_total_size()
 
     def _move(self, direction: int):
         sel = self.sources_tree.selection()
@@ -175,6 +191,99 @@ class GeneralTab(ScrollableTab):
         idx = self.sources_tree.index(item)
         new_idx = max(0, idx + direction)
         self.sources_tree.move(item, "", new_idx)
+
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """Format byte count into human-readable string.
+
+        Args:
+            size_bytes: Size in bytes.
+
+        Returns:
+            Formatted string like '1.23 GB', '456 MB', etc.
+        """
+        if size_bytes < 0:
+            return "0 B"
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if abs(size_bytes) < 1024.0:
+                if unit == "B":
+                    return f"{size_bytes} {unit}"
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.2f} PB"
+
+    @staticmethod
+    def _calculate_dir_size(path: Path, cancel: threading.Event) -> int:
+        """Recursively calculate directory size in bytes.
+
+        Args:
+            path: Directory or file path.
+            cancel: Event to signal cancellation.
+
+        Returns:
+            Total size in bytes, or 0 if path is inaccessible.
+        """
+        if cancel.is_set():
+            return 0
+        if not path.exists():
+            return 0
+        if path.is_file():
+            try:
+                return path.stat().st_size
+            except OSError:
+                return 0
+        total = 0
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if cancel.is_set():
+                        return 0
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            total += GeneralTab._calculate_dir_size(
+                                Path(entry.path), cancel
+                            )
+                    except OSError:
+                        continue
+        except OSError as exc:
+            logger.debug("Cannot scan %s: %s", path, exc)
+        return total
+
+    def _update_total_size(self):
+        """Recalculate total size of all source paths asynchronously."""
+        # Cancel any running calculation
+        self._size_cancel.set()
+        self._size_cancel = threading.Event()
+        cancel = self._size_cancel
+
+        paths = []
+        for iid in self.sources_tree.get_children():
+            paths.append(self.sources_tree.item(iid)["values"][0])
+
+        if not paths:
+            self.total_size_var.set("Total: --")
+            return
+
+        self.total_size_var.set("Total: Calculating...")
+
+        def _worker():
+            total = 0
+            for p in paths:
+                if cancel.is_set():
+                    return
+                total += self._calculate_dir_size(Path(str(p)), cancel)
+            if cancel.is_set():
+                return
+            formatted = self._format_size(total)
+            try:
+                self.after(0, lambda: self.total_size_var.set(f"Total: {formatted}"))
+            except RuntimeError:
+                pass  # Widget destroyed
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
 
     def load_profile(self, profile: BackupProfile):
         """Load profile data into UI widgets."""
@@ -194,6 +303,8 @@ class GeneralTab(ScrollableTab):
 
         # Retry from schedule config
         self.retry_var.set(profile.schedule.retry_enabled)
+
+        self._update_total_size()
 
     def collect_config(self) -> dict:
         """Collect configuration from all widgets.

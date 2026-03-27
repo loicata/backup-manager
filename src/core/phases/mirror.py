@@ -3,13 +3,16 @@
 Mirrors are optional additional copies of the backup.
 Each mirror can have independent encryption controlled by
 per-mirror boolean flags (encrypt_mirror1, encrypt_mirror2).
+
+All mirrors are attempted even if one fails, but any failure
+causes the entire backup to be marked as failed.
 """
 
 import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from src.core.config import StorageConfig
+from src.core.config import StorageConfig, StorageType
 from src.core.events import EventBus
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
@@ -31,6 +34,9 @@ def mirror_backup(
 ) -> list[tuple[str, bool, str]]:
     """Upload backup to mirror destinations.
 
+    All mirrors are attempted regardless of individual failures,
+    but raises RuntimeError if any mirror fails.
+
     Args:
         backup_path: Path to the local backup directory.
         files: Original source files (for remote streaming).
@@ -45,6 +51,9 @@ def mirror_backup(
 
     Returns:
         List of (mirror_name, success, message) tuples.
+
+    Raises:
+        RuntimeError: If any mirror upload failed.
     """
     phase_log = PhaseLogger("mirror", events)
     results = []
@@ -52,7 +61,8 @@ def mirror_backup(
 
     for i, config in enumerate(mirror_configs):
         mirror_name = f"Mirror {i + 1}"
-        phase_log.info(f"Uploading to {mirror_name}...")
+        mirror_desc = _describe_mirror(config)
+        phase_log.info(f"Uploading to {mirror_name} — {mirror_desc}...")
 
         # Check cancel between mirrors
         if cancel_check is not None:
@@ -80,11 +90,33 @@ def mirror_backup(
                 backend.upload(backup_path, backup_name)
 
             results.append((mirror_name, True, "OK"))
-            phase_log.info(f"{mirror_name}: upload complete")
+            phase_log.info(f"{mirror_name} ({mirror_desc}): upload complete")
 
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
             results.append((mirror_name, False, msg))
             phase_log.error(f"{mirror_name}: upload failed — {msg}")
 
+    # Any mirror failure = backup failure
+    failed = [name for name, ok, _ in results if not ok]
+    if failed:
+        details = "; ".join(f"{name}: {msg}" for name, ok, msg in results if not ok)
+        raise RuntimeError(f"Mirror upload failed: {details}")
+
     return results
+
+
+def _describe_mirror(config: StorageConfig) -> str:
+    """Build a short human-readable label for a mirror destination."""
+    st = config.storage_type
+    if st == StorageType.LOCAL:
+        return f"USB drive {config.destination_path}"
+    if st == StorageType.NETWORK:
+        return f"Network {config.destination_path}"
+    if st == StorageType.SFTP:
+        return f"SSH {config.sftp_username}@{config.sftp_host}:{config.sftp_port}"
+    if st == StorageType.S3:
+        return f"S3 {config.s3_bucket}"
+    if st == StorageType.PROTON:
+        return f"Proton Drive ({config.proton_username})"
+    return config.storage_type.value

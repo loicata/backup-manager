@@ -236,9 +236,7 @@ class InAppScheduler:
         """
         now = datetime.now()
         profiles = self._get_profiles()
-        logger.info(
-            "Startup missed-backup check: %d profiles loaded", len(profiles)
-        )
+        logger.info("Startup missed-backup check: %d profiles loaded", len(profiles))
 
         for profile in profiles:
             if not profile.active:

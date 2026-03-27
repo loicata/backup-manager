@@ -104,9 +104,14 @@ class BackupEngine:
             ctx.result.duration_seconds = time.monotonic() - start_time
             self._emit_status("success")
             self._events.emit(BACKUP_DONE, stats=ctx.result)
+            # Summary with all destinations
+            destinations = [f"Storage ({self._describe_target(profile.storage)})"]
+            for i, mirror in enumerate(profile.mirror_destinations):
+                destinations.append(f"Mirror {i + 1} ({self._describe_target(mirror)})")
+            dest_summary = ", ".join(destinations)
             self._log(
                 f"Backup complete: {ctx.result.files_processed} files "
-                f"in {ctx.result.duration_seconds:.1f}s"
+                f"in {ctx.result.duration_seconds:.1f}s → {dest_summary}"
             )
             return ctx.result
 
@@ -167,7 +172,10 @@ class BackupEngine:
         # Phase 9: Mirror
         self._phase_mirror(ctx)
 
-        # Phase 10: Rotate
+        # Phase 10: Verify mirrors
+        self._phase_verify_mirrors(ctx)
+
+        # Phase 11: Rotate
         self._phase_rotate(ctx)
 
         # Phase 11: Cleanup temp artifacts
@@ -219,10 +227,11 @@ class BackupEngine:
 
     def _phase_write(self, ctx: PipelineContext) -> None:
         """Phase 4: Write backup to primary destination."""
+        target = self._describe_target(ctx.profile.storage)
         if ctx.profile.storage.is_remote():
-            self._phase("Uploading to remote...")
+            self._phase(f"Uploading to Storage — {target}...")
         else:
-            self._phase("Copying files...")
+            self._phase(f"Copying to Storage — {target}...")
         write_backup(ctx, cancel_check=self._check_cancel)
 
     def _phase_save_manifest(self, ctx: PipelineContext) -> None:
@@ -232,17 +241,218 @@ class BackupEngine:
             save_integrity_manifest(ctx.integrity_manifest, ctx.backup_path)
 
     def _phase_verify(self, ctx: PipelineContext) -> None:
-        """Phase 6: Post-backup verification (local directories only)."""
+        """Phase 6: Post-backup verification.
+
+        Local backups: re-hash files and compare to manifest.
+        Remote backups: verify file count and sizes on the server.
+
+        Raises:
+            RuntimeError: If any file fails integrity verification.
+        """
+        if not ctx.profile.verification.auto_verify:
+            return
+
         is_local_dir = (
             ctx.backup_path is not None and ctx.backup_path.exists() and ctx.backup_path.is_dir()
         )
-        if ctx.profile.verification.auto_verify and is_local_dir:
-            self._phase("Verifying backup...")
+
+        if is_local_dir:
+            self._phase("Verifying backup (hash)...")
             self._check_cancel()
             manifest_file = ctx.backup_path.parent / f"{ctx.backup_path.name}.wbverify"
             ok, msg = verify_backup(ctx.backup_path, manifest_file, self._events)
-            if not ok and ctx.profile.verification.alert_on_failure:
-                self._log(f"WARNING: {msg}")
+            if not ok:
+                raise RuntimeError(msg)
+
+        elif ctx.backup_remote_name and ctx.backend is not None:
+            self._phase("Verifying remote backup (file count + sizes)...")
+            self._check_cancel()
+            self._verify_remote(ctx)
+
+    def _verify_remote(self, ctx: PipelineContext) -> None:
+        """Verify a remote backup by checking files on the server.
+
+        Verification levels (best available per backend):
+        - SFTP: SHA-256 computed server-side via exec channel
+        - S3: MD5 from ETag (simple uploads < 5GB)
+        - Proton/other: file count + sizes only
+
+        Args:
+            ctx: Pipeline context with backend and files.
+
+        Raises:
+            RuntimeError: If any file fails verification.
+        """
+        # Try hash-based verification first
+        verified_files = ctx.backend.verify_backup_files(ctx.backup_remote_name)
+        has_checksums = verified_files and any(checksum for _, _, checksum in verified_files)
+
+        if has_checksums:
+            self._verify_remote_checksums(ctx, verified_files)
+        else:
+            # Fall back to size-only verification
+            remote_files = ctx.backend.list_backup_files(ctx.backup_remote_name)
+            if not remote_files:
+                self._log("Remote verification skipped: backend does not " "support file listing")
+                return
+            self._verify_remote_sizes(ctx, remote_files)
+
+    def _verify_remote_checksums(
+        self,
+        ctx: PipelineContext,
+        remote_files: list[tuple[str, int, str]],
+    ) -> None:
+        """Verify remote files using checksums (SHA-256 or MD5).
+
+        For files with checksums: compare against local hash.
+        For files without checksums: fall back to size comparison.
+
+        Args:
+            ctx: Pipeline context with files.
+            remote_files: List of (relative_path, size, checksum) tuples.
+
+        Raises:
+            RuntimeError: If any file fails verification.
+        """
+        from src.core.hashing import compute_sha256
+
+        remote_map = {path: (size, checksum) for path, size, checksum in remote_files}
+
+        errors = []
+        hash_verified = 0
+        size_verified = 0
+
+        for f in ctx.files:
+            if f.relative_path not in remote_map:
+                errors.append(f"Missing on remote: {f.relative_path}")
+                continue
+
+            remote_size, remote_checksum = remote_map[f.relative_path]
+
+            if remote_checksum:
+                # Hash-based verification
+                if len(remote_checksum) == 64:
+                    # SHA-256 (SFTP) — compare directly
+                    local_hash = compute_sha256(f.source_path)
+                    if local_hash != remote_checksum:
+                        errors.append(
+                            f"Hash mismatch: {f.relative_path} "
+                            f"(local={local_hash[:16]}... "
+                            f"remote={remote_checksum[:16]}...)"
+                        )
+                        continue
+                    hash_verified += 1
+                elif len(remote_checksum) == 32:
+                    # MD5 (S3 ETag) — compute local MD5 and compare
+                    local_md5 = self._compute_md5(f.source_path)
+                    if local_md5 != remote_checksum:
+                        errors.append(
+                            f"MD5 mismatch: {f.relative_path} "
+                            f"(local={local_md5[:16]}... "
+                            f"remote={remote_checksum[:16]}...)"
+                        )
+                        continue
+                    hash_verified += 1
+                else:
+                    # Unknown checksum format — fall back to size
+                    if remote_size != f.size:
+                        errors.append(
+                            f"Size mismatch: {f.relative_path} "
+                            f"(expected {f.size}, got {remote_size})"
+                        )
+                        continue
+                    size_verified += 1
+            else:
+                # No checksum available — size only
+                if remote_size != f.size:
+                    errors.append(
+                        f"Size mismatch: {f.relative_path} "
+                        f"(expected {f.size}, got {remote_size})"
+                    )
+                    continue
+                size_verified += 1
+
+        if errors:
+            self._raise_verify_error(errors, len(ctx.files))
+
+        total = len(ctx.files)
+        parts = []
+        if hash_verified:
+            parts.append(f"{hash_verified} by checksum")
+        if size_verified:
+            parts.append(f"{size_verified} by size")
+        method = ", ".join(parts)
+        self._log(f"Remote verification OK: {total}/{total} files verified " f"({method})")
+
+    def _verify_remote_sizes(
+        self,
+        ctx: PipelineContext,
+        remote_files: list[tuple[str, int]],
+    ) -> None:
+        """Verify remote files by count and size only.
+
+        Args:
+            ctx: Pipeline context with files.
+            remote_files: List of (relative_path, size) tuples.
+
+        Raises:
+            RuntimeError: If any file fails verification.
+        """
+        remote_map = {path: size for path, size in remote_files}
+        errors = []
+
+        for f in ctx.files:
+            if f.relative_path not in remote_map:
+                errors.append(f"Missing on remote: {f.relative_path}")
+            elif remote_map[f.relative_path] != f.size:
+                errors.append(
+                    f"Size mismatch: {f.relative_path} "
+                    f"(expected {f.size}, "
+                    f"got {remote_map[f.relative_path]})"
+                )
+
+        if errors:
+            self._raise_verify_error(errors, len(ctx.files))
+
+        total = len(ctx.files)
+        self._log(f"Remote verification OK: {total}/{total} files verified " f"(by size)")
+
+    @staticmethod
+    def _compute_md5(file_path: Path) -> str:
+        """Compute MD5 hex digest of a local file.
+
+        Args:
+            file_path: Path to the file.
+
+        Returns:
+            MD5 hex digest string.
+        """
+        import hashlib
+
+        md5 = hashlib.md5()  # nosec B303 — used for S3 ETag comparison
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                md5.update(chunk)
+        return md5.hexdigest()
+
+    @staticmethod
+    def _raise_verify_error(errors: list[str], total: int) -> None:
+        """Raise RuntimeError with formatted verification errors.
+
+        Args:
+            errors: List of error messages.
+            total: Total number of files expected.
+        """
+        detail = "\n  - ".join(errors[:10])
+        extra = ""
+        if len(errors) > 10:
+            extra = f"\n  ... and {len(errors) - 10} more"
+        raise RuntimeError(
+            f"Remote verification failed: {len(errors)}/{total} " f"errors\n  - {detail}{extra}"
+        )
 
     def _phase_encrypt(self, ctx: PipelineContext) -> None:
         """Phase 7: Encryption (local backups only)."""
@@ -297,8 +507,135 @@ class BackupEngine:
                 cancel_check=self._check_cancel,
             )
 
+    def _phase_verify_mirrors(self, ctx: PipelineContext) -> None:
+        """Phase 10: Verify mirror uploads.
+
+        Runs the same verification as _verify_remote for each
+        mirror destination that was successfully uploaded.
+
+        Raises:
+            RuntimeError: If any mirror file fails verification.
+        """
+        if not ctx.profile.mirror_destinations:
+            return
+        if not ctx.profile.verification.auto_verify:
+            return
+
+        for i, config in enumerate(ctx.profile.mirror_destinations):
+            mirror_name = f"Mirror {i + 1}"
+            self._check_cancel()
+
+            try:
+                backend = self._get_backend(config)
+
+                if config.is_remote():
+                    self._phase(f"Verifying {mirror_name}...")
+                    # Use same verification as primary remote
+                    verified = backend.verify_backup_files(ctx.backup_name)
+                    has_checksums = verified and any(c for _, _, c in verified)
+
+                    if has_checksums:
+                        self._verify_mirror_checksums(ctx, verified, mirror_name)
+                    else:
+                        remote_files = backend.list_backup_files(ctx.backup_name)
+                        if remote_files:
+                            self._verify_mirror_sizes(ctx, remote_files, mirror_name)
+                        else:
+                            self._log(
+                                f"{mirror_name}: verification skipped "
+                                f"(file listing not supported)"
+                            )
+                else:
+                    # Local mirror — hash verification
+                    mirror_path = Path(config.destination_path) / ctx.backup_name
+                    if mirror_path.exists() and mirror_path.is_dir():
+                        self._phase(f"Verifying {mirror_name} (hash)...")
+                        manifest_file = mirror_path.parent / f"{mirror_path.name}.wbverify"
+                        if manifest_file.exists():
+                            ok, msg = verify_backup(mirror_path, manifest_file, self._events)
+                            if not ok:
+                                raise RuntimeError(f"{mirror_name}: {msg}")
+
+            except RuntimeError:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"{mirror_name} verification failed: {e}") from e
+
+    def _verify_mirror_checksums(
+        self,
+        ctx: PipelineContext,
+        remote_files: list[tuple[str, int, str]],
+        mirror_name: str,
+    ) -> None:
+        """Verify mirror files using checksums. Delegates to checksum logic."""
+        from src.core.hashing import compute_sha256
+
+        remote_map = {path: (size, checksum) for path, size, checksum in remote_files}
+        errors = []
+        hash_verified = 0
+        size_verified = 0
+
+        for f in ctx.files:
+            if f.relative_path not in remote_map:
+                errors.append(f"Missing on {mirror_name}: {f.relative_path}")
+                continue
+
+            remote_size, remote_checksum = remote_map[f.relative_path]
+
+            if remote_checksum and len(remote_checksum) == 64:
+                local_hash = compute_sha256(f.source_path)
+                if local_hash != remote_checksum:
+                    errors.append(f"Hash mismatch on {mirror_name}: " f"{f.relative_path}")
+                    continue
+                hash_verified += 1
+            elif remote_checksum and len(remote_checksum) == 32:
+                local_md5 = self._compute_md5(f.source_path)
+                if local_md5 != remote_checksum:
+                    errors.append(f"MD5 mismatch on {mirror_name}: " f"{f.relative_path}")
+                    continue
+                hash_verified += 1
+            else:
+                if remote_size != f.size:
+                    errors.append(f"Size mismatch on {mirror_name}: " f"{f.relative_path}")
+                    continue
+                size_verified += 1
+
+        if errors:
+            self._raise_verify_error(errors, len(ctx.files))
+
+        total = len(ctx.files)
+        parts = []
+        if hash_verified:
+            parts.append(f"{hash_verified} by checksum")
+        if size_verified:
+            parts.append(f"{size_verified} by size")
+        method = ", ".join(parts)
+        self._log(f"{mirror_name} verification OK: {total}/{total} files " f"({method})")
+
+    def _verify_mirror_sizes(
+        self,
+        ctx: PipelineContext,
+        remote_files: list[tuple[str, int]],
+        mirror_name: str,
+    ) -> None:
+        """Verify mirror files by size only."""
+        remote_map = {path: size for path, size in remote_files}
+        errors = []
+
+        for f in ctx.files:
+            if f.relative_path not in remote_map:
+                errors.append(f"Missing on {mirror_name}: {f.relative_path}")
+            elif remote_map[f.relative_path] != f.size:
+                errors.append(f"Size mismatch on {mirror_name}: {f.relative_path}")
+
+        if errors:
+            self._raise_verify_error(errors, len(ctx.files))
+
+        total = len(ctx.files)
+        self._log(f"{mirror_name} verification OK: {total}/{total} files " f"(by size)")
+
     def _phase_rotate(self, ctx: PipelineContext) -> None:
-        """Phase 10: Rotation — delete old backups."""
+        """Phase 11: Rotation — delete old backups."""
         self._phase("Rotating old backups...")
         self._check_cancel()
         ctx.result.rotated_count = rotate_backups(
@@ -383,6 +720,64 @@ class BackupEngine:
             rclone_path=storage.proton_rclone_path,
         )
 
+    def precheck_targets(self, profile: BackupProfile) -> list[tuple[str, str, bool, str]]:
+        """Test connectivity of all configured destinations before backup.
+
+        Tests the primary storage and all mirror destinations.
+
+        Args:
+            profile: Backup profile with storage and mirror configs.
+
+        Returns:
+            List of (role, action, success, detail) for each target.
+            role: "Storage", "Mirror 1", "Mirror 2"
+            action: Human-readable action, e.g. "Connect USB drive D:\\Backups"
+            success: True if reachable, False otherwise.
+            detail: Message from test_connection() or error string.
+        """
+        results = []
+        targets = [("Storage", profile.storage)]
+        for i, mirror in enumerate(profile.mirror_destinations):
+            targets.append((f"Mirror {i + 1}", mirror))
+
+        for role, config in targets:
+            action = self._describe_target(config)
+            try:
+                backend = self._get_backend(config)
+                ok, msg = backend.test_connection()
+                results.append((role, action, ok, msg))
+            except Exception as e:
+                results.append((role, action, False, str(e)))
+
+        return results
+
+    @staticmethod
+    def _describe_target(config: StorageConfig) -> str:
+        """Build a human-readable action for a storage target.
+
+        Args:
+            config: Storage configuration.
+
+        Returns:
+            Action string like "Connect USB drive D:\\Backups".
+        """
+        st = config.storage_type
+        if st == StorageType.LOCAL:
+            return f"Connect USB drive {config.destination_path}"
+        if st == StorageType.NETWORK:
+            return f"Connect network share {config.destination_path}"
+        if st == StorageType.SFTP:
+            return (
+                f"Start SSH server " f"{config.sftp_username}@{config.sftp_host}:{config.sftp_port}"
+            )
+        if st == StorageType.S3:
+            return (
+                f"Check S3 bucket {config.s3_bucket} " f"({config.s3_provider} {config.s3_region})"
+            )
+        if st == StorageType.PROTON:
+            return f"Sign in to Proton Drive ({config.proton_username})"
+        return f"Check {st.value} destination"
+
     def _check_cancel(self) -> None:
         """Check if cancellation was requested."""
         if self._cancelled:
@@ -401,26 +796,32 @@ class BackupEngine:
         self._events.emit(STATUS, state=state)
 
     def _emit_phase_count(self, ctx: PipelineContext) -> None:
-        """Calculate and emit the number of progress-emitting phases.
+        """Calculate and emit phase weights for progress bar.
 
-        Phases that emit progress events:
-        1. hashing (manifest) — always
-        2. backup/upload (write) — always
-        3. verification — always
-        4. upload (mirror) — only if mirrors configured
-        5. encryption — only if encryption enabled for primary
+        Weights reflect relative duration of each phase:
+        - hashing: 1 (local disk read, fast)
+        - backup/upload: 2 (local) or 5 (remote network)
+        - verification: 1 (local hash or remote size check)
+        - upload (mirror): 5 (network upload)
+        - encryption: 1 (CPU-bound, fast)
         """
-        count = 3  # hashing + write + verification (always present)
+        is_remote = ctx.profile.storage.is_remote()
+        write_weight = 5 if is_remote else 2
 
-        has_mirrors = bool(ctx.profile.mirror_destinations)
-        if has_mirrors:
-            count += 1  # mirror upload
+        weights = {
+            "hashing": 1,
+            "backup": write_weight,  # local_writer phase name
+            "upload": write_weight,  # remote_writer phase name
+            "verification": 1,
+        }
 
-        has_encryption = ctx.profile.encrypt_primary and ctx.profile.encryption.enabled
-        if has_encryption:
-            count += 1  # encryption
+        if ctx.profile.mirror_destinations:
+            weights["mirror_upload"] = 5
 
-        self._events.emit(PHASE_COUNT, count=count)
+        if ctx.profile.encrypt_primary and ctx.profile.encryption.enabled:
+            weights["encryption"] = 1
+
+        self._events.emit(PHASE_COUNT, weights=weights)
 
 
 # Re-export for backward compatibility

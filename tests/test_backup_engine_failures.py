@@ -110,12 +110,11 @@ class TestCollectionFailures:
 class TestWriteFailures:
 
     def test_disk_full_during_copy(self, env, profile):
-        """Write phase should not crash pipeline when copy2 raises OSError."""
+        """Write phase must raise when copy2 fails — zero tolerance for errors."""
         engine = _engine(env)
         with patch("shutil.copy2", side_effect=OSError("No space left on device")):
-            result = engine.run_backup(profile)
-            # Pipeline should complete; files were "processed" even if copy failed
-            assert result.files_processed == 2
+            with pytest.raises(Exception, match="No space left"):
+                engine.run_backup(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -145,16 +144,15 @@ class TestManifestFailures:
 
 class TestVerifyFailures:
 
-    def test_verification_mismatch_does_not_crash(self, env, profile):
-        """Verification failure should not stop the pipeline."""
+    def test_verification_mismatch_fails_backup(self, env, profile):
+        """Verification failure must fail the entire backup."""
         engine = _engine(env)
         with patch(
             "src.core.backup_engine.verify_backup",
-            return_value=(False, "Mismatch: a.txt"),
+            return_value=(False, "Verification failed: 1/2 errors\n  - Mismatch: a.txt"),
         ):
-            result = engine.run_backup(profile)
-            # Pipeline completes despite verification warning
-            assert result.files_processed == 2
+            with pytest.raises(RuntimeError, match="Verification failed"):
+                engine.run_backup(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +185,8 @@ class TestEncryptFailures:
 
 class TestMirrorFailures:
 
-    def test_mirror1_fails_mirror2_succeeds(self, env, profile):
-        """Mirror failures should be isolated; one failing mirror
-        must not prevent other mirrors from succeeding."""
+    def test_mirror1_fails_both_attempted_then_raises(self, env, profile):
+        """Mirror 1 fails, Mirror 2 still attempted, then backup fails."""
         mirror1 = StorageConfig(
             storage_type=StorageType.LOCAL,
             destination_path=str(env["dest"] / "mirror1"),
@@ -200,27 +197,33 @@ class TestMirrorFailures:
         )
         profile.mirror_destinations = [mirror1, mirror2]
 
-        # Make the first backend.upload raise, second succeed
-        call_count = 0
+        upload_calls = {"count": 0}
 
         def patched_get_backend(self_engine, storage):
-            nonlocal call_count
-            # Primary backend is called first during _phase_write
             backend = MagicMock()
             backend.list_backups.return_value = []
             if storage is mirror1:
-                backend.upload.side_effect = RuntimeError("mirror1 down")
+
+                def fail_upload(*a, **kw):
+                    upload_calls["count"] += 1
+                    raise RuntimeError("mirror1 down")
+
+                backend.upload.side_effect = fail_upload
             else:
-                backend.upload.return_value = None
+
+                def ok_upload(*a, **kw):
+                    upload_calls["count"] += 1
+
+                backend.upload.side_effect = ok_upload
             return backend
 
         engine = _engine(env)
         with patch.object(BackupEngine, "_get_backend", patched_get_backend):
-            result = engine.run_backup(profile)
+            with pytest.raises(RuntimeError, match="Mirror upload failed"):
+                engine.run_backup(profile)
 
-        assert len(result.mirror_results) == 2
-        assert result.mirror_results[0][1] is False  # mirror 1 failed
-        assert result.mirror_results[1][1] is True  # mirror 2 succeeded
+        # Both mirrors were attempted
+        assert upload_calls["count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -315,15 +318,14 @@ class TestEmptyBackup:
 
 
 # ---------------------------------------------------------------------------
-# 10. Pipeline continues after non-fatal verify warning
+# 10. Verify mismatch stops the entire pipeline (no mirror, no rotate)
 # ---------------------------------------------------------------------------
 
 
-class TestNonFatalContinuation:
+class TestVerifyStopsPipeline:
 
-    def test_verify_warning_does_not_stop_pipeline(self, env, profile):
-        """A verify warning should not prevent mirror and rotate from
-        running."""
+    def test_verify_mismatch_prevents_mirror_and_rotate(self, env, profile):
+        """A verify mismatch must stop the pipeline before mirror/rotate."""
         profile.mirror_destinations = [
             StorageConfig(
                 storage_type=StorageType.LOCAL, destination_path=str(env["dest"] / "mirror")
@@ -337,7 +339,7 @@ class TestNonFatalContinuation:
         with (
             patch(
                 "src.core.backup_engine.verify_backup",
-                return_value=(False, "Mismatch: a.txt"),
+                return_value=(False, "Verification failed: 1/2 errors\n  - Mismatch: a.txt"),
             ),
             patch.object(
                 BackupEngine,
@@ -345,8 +347,8 @@ class TestNonFatalContinuation:
                 return_value=mock_backend,
             ),
         ):
-            result = engine.run_backup(profile)
+            with pytest.raises(RuntimeError, match="Verification failed"):
+                engine.run_backup(profile)
 
-        assert result.files_processed == 2
-        # Mirror phase was reached
-        assert len(result.mirror_results) == 1
+        # Mirror was NOT reached — upload never called
+        mock_backend.upload.assert_not_called()

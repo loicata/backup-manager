@@ -13,12 +13,10 @@ class RunTab(ttk.Frame):
     def __init__(self, parent, events: EventBus = None, **kwargs):
         super().__init__(parent, **kwargs)
         self._events = events or EventBus()
-        self._global_done = 0
-        self._global_total = 0
         self._phase_totals: dict[str, int] = {}
         self._phase_done: dict[str, int] = {}
         self._phase_order: list[str] = []
-        self._expected_phases = 3  # Default, updated by PHASE_COUNT event
+        self._phase_weights: dict[str, int] = {}
         self._last_pct = 0
         self._build_ui()
         self._subscribe_events()
@@ -107,13 +105,14 @@ class RunTab(ttk.Frame):
         self._events.subscribe(PHASE_CHANGED, self._on_phase)
         self._events.subscribe(PHASE_COUNT, self._on_phase_count)
 
-    def _on_phase_count(self, count=3, **kw):
-        """Receive the total number of progress-emitting phases.
+    def _on_phase_count(self, weights=None, **kw):
+        """Receive phase weights for progress bar calculation.
 
-        This is emitted by BackupEngine before the first phase starts,
-        so each phase gets an equal share: 100 / count.
+        Each phase gets a share proportional to its weight.
+        E.g. hashing=1, backup=2, upload=5 → upload gets 5/8 of the bar.
         """
-        self._expected_phases = max(count, 1)
+        if weights:
+            self._phase_weights = dict(weights)
 
     def _on_progress(self, current=0, total=0, filename="", phase="", **kw):
         if total <= 0:
@@ -128,17 +127,18 @@ class RunTab(ttk.Frame):
         # Update phase done count
         self._phase_done[phase] = min(current, self._phase_totals.get(phase, total))
 
-        # Each phase gets an equal share: 100% / expected_phases.
-        # Completed phases = 100% of their share.
-        # Current phase = proportional within its share.
-        n_phases = self._expected_phases
-        share_per_phase = 100.0 / n_phases
+        # Each phase gets a share proportional to its weight.
+        # Default weight is 1 for unknown phases.
+        total_weight = sum(self._phase_weights.get(p, 1) for p in self._phase_order)
+        if total_weight <= 0:
+            total_weight = 1
 
         pct = 0.0
-        for i, p in enumerate(self._phase_order):
+        for p in self._phase_order:
             p_total = max(self._phase_totals.get(p, 1), 1)
             p_done = self._phase_done.get(p, 0)
-            pct += (p_done / p_total) * share_per_phase
+            weight = self._phase_weights.get(p, 1)
+            pct += (p_done / p_total) * (weight / total_weight) * 100.0
 
         pct_int = min(int(pct), 99)  # Never 100% — only on success
 
@@ -204,11 +204,9 @@ class RunTab(ttk.Frame):
         self.log_text.config(state="disabled")
         self.progress_bar["value"] = 0
         self.percent_label.config(text="0%")
-        self._global_done = 0
-        self._global_total = 0
         self._phase_totals.clear()
         self._phase_done.clear()
         self._phase_order.clear()
-        self._expected_phases = 3
+        self._phase_weights.clear()
         self._last_pct = 0
         self.status_label.config(text="Waiting...", foreground=Colors.TEXT_SECONDARY)

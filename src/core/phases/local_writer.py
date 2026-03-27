@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.core.events import EventBus
+from src.core.exceptions import WriteError
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
 
@@ -44,7 +45,7 @@ def write_flat(
         try:
             shutil.copy2(file_info.source_path, target)
         except (OSError, PermissionError) as e:
-            phase_log.error(f"Error copying {file_info.relative_path}: {e}")
+            raise WriteError(file_info.relative_path, e) from e
 
         phase_log.progress(
             current=i + 1,

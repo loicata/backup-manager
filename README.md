@@ -1,4 +1,4 @@
-# Backup Manager v3.1.2
+# Backup Manager v3.1.3
 
 A reliable, secure, and user-friendly Windows backup application designed for personal and small-business use. Manage multiple backup profiles, store copies on local drives, network shares, or remote servers, and let the built-in scheduler and GFS retention policy take care of the rest.
 
@@ -67,12 +67,15 @@ Old backups are automatically deleted when the configured limits are exceeded. T
 - **Hourly, Daily, or Weekly** automatic scheduling via Windows Task Scheduler.
 - **Auto-start at logon** option for unattended operation.
 - **Retry on failure** with progressive delays: 2, 10, 30, 90, and 240 minutes.
+- **Pre-backup target check:** all configured destinations (storage + mirrors) are verified before backup starts. If any target is unreachable, the user is prompted to connect it or cancel.
 - **System tray** mode for silent background operation.
 
 ### Integrity & Verification
 
 - **SHA-256 checksum manifest** generated before each backup.
 - **Post-backup verification** re-reads and re-hashes every file to confirm integrity.
+- **Remote verification:** SHA-256 hash check via server-side `sha256sum` (SFTP), ETag/MD5 comparison (S3), or file-count validation (Proton Drive).
+- **Zero-tolerance policy:** any missing or corrupted file marks the entire backup as failed.
 - `.wbverify` manifest saved alongside each backup for future auditing.
 
 ### Recovery
@@ -172,7 +175,7 @@ pytest --cov=src --cov-report=term-missing
 pytest tests/unit/test_backup_engine.py -v
 ```
 
-**Current status:** 492 tests | 90% coverage | 0 failures
+**Current status:** 527 tests | 84% coverage | 0 failures
 
 ---
 
@@ -202,7 +205,7 @@ backup-manager/
 │       ├── theme.py               # Colors, fonts, layout constants
 │       └── tabs/                  # UI tabs (Run, General, Storage, Mirror, Encryption, Schedule, Retention, Email, Recovery, History)
 ├── tests/
-│   ├── unit/                   # Unit tests (~490 tests)
+│   ├── unit/                   # Unit tests (~527 tests)
 │   ├── integration/            # Integration tests
 │   └── fixtures/               # Shared test data
 ├── assets/                     # Icons, license, launcher, screenshots

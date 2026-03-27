@@ -1,11 +1,13 @@
-"""Tests for mirror phase failure isolation.
+"""Tests for mirror phase failure handling.
 
-Verifies that mirror_backup handles per-mirror failures independently,
-encryption flags per mirror, local backends, and edge cases.
+Verifies that mirror_backup attempts all mirrors, raises on any failure,
+handles encryption flags per mirror, local backends, and edge cases.
 """
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.core.config import StorageConfig, StorageType
 from src.core.phases.collector import FileInfo
@@ -36,8 +38,8 @@ def _local_config(dest: str = "C:/backups") -> StorageConfig:
 # -- Tests --
 
 
-def test_mirror1_fails_mirror2_succeeds(tmp_path):
-    """Mirror 1 raises ConnectionError at backend creation, Mirror 2 succeeds."""
+def test_mirror1_fails_mirror2_still_attempted(tmp_path):
+    """Mirror 1 fails but Mirror 2 is still attempted, then RuntimeError raised."""
     files = [_make_file_info(tmp_path)]
     backend_ok = MagicMock()
 
@@ -49,37 +51,37 @@ def test_mirror1_fails_mirror2_succeeds(tmp_path):
             raise ConnectionError("refused")
         return backend_ok
 
-    results = mirror_backup(
-        backup_path=tmp_path,
-        files=files,
-        mirror_configs=[_remote_config(), _remote_config()],
-        backup_name="bk",
-        get_backend=factory,
-    )
+    with pytest.raises(RuntimeError, match="Mirror upload failed"):
+        mirror_backup(
+            backup_path=tmp_path,
+            files=files,
+            mirror_configs=[_remote_config(), _remote_config()],
+            backup_name="bk",
+            get_backend=factory,
+        )
 
-    assert len(results) == 2
-    assert results[0][1] is False  # Mirror 1 failed
-    assert results[1][1] is True  # Mirror 2 succeeded
+    # Both mirrors were attempted (factory called twice)
+    assert call_count["n"] == 2
 
 
-def test_both_mirrors_fail_no_crash(tmp_path):
-    """Both mirrors fail at backend creation -- errors logged, no crash."""
+def test_both_mirrors_fail_raises(tmp_path):
+    """Both mirrors fail -- RuntimeError raised with details for both."""
     files = [_make_file_info(tmp_path)]
 
     def factory(cfg):
         raise ConnectionError("down")
 
-    results = mirror_backup(
-        backup_path=tmp_path,
-        files=files,
-        mirror_configs=[_remote_config(), _remote_config()],
-        backup_name="bk",
-        get_backend=factory,
-    )
+    with pytest.raises(RuntimeError, match="Mirror upload failed") as exc_info:
+        mirror_backup(
+            backup_path=tmp_path,
+            files=files,
+            mirror_configs=[_remote_config(), _remote_config()],
+            backup_name="bk",
+            get_backend=factory,
+        )
 
-    assert len(results) == 2
-    assert all(not r[1] for r in results)
-    assert "ConnectionError" in results[0][2]
+    assert "Mirror 1" in str(exc_info.value)
+    assert "Mirror 2" in str(exc_info.value)
 
 
 def test_local_mirror_uses_upload(tmp_path):
@@ -142,23 +144,20 @@ def test_encrypt_flags_per_mirror(mock_wr, tmp_path):
     )
 
 
-def test_invalid_backend_config_logged_gracefully(tmp_path):
-    """get_backend raises ValueError -- error logged, no crash."""
+def test_invalid_backend_config_raises(tmp_path):
+    """get_backend raises ValueError -- RuntimeError raised."""
 
     def factory(cfg):
         raise ValueError("bad config")
 
-    results = mirror_backup(
-        backup_path=tmp_path,
-        files=[],
-        mirror_configs=[_remote_config()],
-        backup_name="bk",
-        get_backend=factory,
-    )
-
-    assert len(results) == 1
-    assert results[0][1] is False
-    assert "ValueError" in results[0][2]
+    with pytest.raises(RuntimeError, match="Mirror upload failed"):
+        mirror_backup(
+            backup_path=tmp_path,
+            files=[],
+            mirror_configs=[_remote_config()],
+            backup_name="bk",
+            get_backend=factory,
+        )
 
 
 def test_single_mirror_only(tmp_path):

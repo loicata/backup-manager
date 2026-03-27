@@ -183,6 +183,36 @@ class StorageBackend(ABC):
     def get_file_size(self, remote_name: str) -> int | None:
         """Get size of a remote file in bytes, or None if unknown."""
 
+    def list_backup_files(self, backup_name: str) -> list[tuple[str, int]]:
+        """List files inside a backup with their sizes.
+
+        Used for post-upload verification on remote backends.
+
+        Args:
+            backup_name: Name of the backup directory on the remote.
+
+        Returns:
+            List of (relative_path, size_bytes) tuples.
+            Returns empty list if not supported by the backend.
+        """
+        return []
+
+    def verify_backup_files(self, backup_name: str) -> list[tuple[str, int, str]]:
+        """List files inside a backup with sizes and checksums.
+
+        Used for post-upload integrity verification. Backends that
+        support server-side hashing should override this method.
+
+        Args:
+            backup_name: Name of the backup directory on the remote.
+
+        Returns:
+            List of (relative_path, size_bytes, checksum) tuples.
+            checksum is a hex digest (sha256 or md5) or "" if unavailable.
+            Returns empty list if not supported by the backend.
+        """
+        return []
+
     @abstractmethod
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
         """Download a backup from the remote to a local directory.

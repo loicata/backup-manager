@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src.core.exceptions import WriteError
 from src.core.phases.collector import FileInfo
 
 
@@ -34,19 +35,18 @@ def _make_file_info(tmp_path: Path, name: str = "file.txt") -> FileInfo:
 class TestLocalWriterDiskFull:
     """Disk-full errors during flat copy."""
 
-    def test_copy2_enospc_logs_error_and_continues(self, tmp_path):
-        """shutil.copy2 raises ENOSPC — write_flat logs and keeps going."""
+    def test_copy2_enospc_raises_write_error(self, tmp_path):
+        """shutil.copy2 raises ENOSPC — WriteError raised immediately."""
         from src.core.phases.local_writer import write_flat
 
         fi = _make_file_info(tmp_path)
         enospc = OSError(errno.ENOSPC, "No space left on device")
 
         with patch("src.core.phases.local_writer.shutil.copy2", side_effect=enospc):
-            result = write_flat([fi], tmp_path / "dst", "bk1")
+            with pytest.raises(WriteError, match="file.txt") as exc_info:
+                write_flat([fi], tmp_path / "dst", "bk1")
 
-        # write_flat catches OSError and continues; backup dir is created
-        assert result == tmp_path / "dst" / "bk1"
-        assert result.exists()
+        assert isinstance(exc_info.value.original, OSError)
 
     def test_makedirs_enospc_propagates(self, tmp_path):
         """os.makedirs (via mkdir) raises ENOSPC — error propagates."""

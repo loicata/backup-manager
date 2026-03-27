@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from src.core.events import EventBus
+from src.core.exceptions import WriteError
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
 from src.storage.base import StorageBackend
@@ -46,7 +47,6 @@ def write_remote(
     """
     phase_log = PhaseLogger("remote_writer", events)
     total = len(files)
-    errors = 0
 
     phase_log.info(f"Uploading {total} files to remote...")
 
@@ -68,8 +68,7 @@ def write_remote(
                 else:
                     _upload_plain(backend, file_info, remote_path)
             except Exception as e:
-                errors += 1
-                phase_log.error(f"Upload error {file_info.relative_path}: {e}")
+                raise WriteError(file_info.relative_path, e) from e
 
             phase_log.progress(
                 current=i + 1,
@@ -82,7 +81,7 @@ def write_remote(
         if hasattr(backend, "disconnect"):
             backend.disconnect()
 
-    phase_log.info(f"Remote upload done: {total - errors}/{total} files, {errors} errors")
+    phase_log.info(f"Remote upload done: {total}/{total} files")
     return backup_name
 
 

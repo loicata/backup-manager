@@ -12,6 +12,7 @@ Security:
 """
 
 import logging
+import socket
 import stat
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -20,7 +21,7 @@ from src.storage.base import StorageBackend, with_retry
 
 logger = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT = 15  # Seconds for SSH/SFTP connection
+_CONNECT_TIMEOUT = 10  # Seconds for SSH/SFTP connection (LAN + internet)
 _EXEC_PROBE_TIMEOUT = 10  # Seconds for exec channel probe
 _KEEPALIVE_INTERVAL = 30  # Seconds between SSH keepalive packets
 _FAST_CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -130,13 +131,26 @@ class SFTPStorage(StorageBackend):
     def _create_transport(self):
         """Create and authenticate a new SSH transport.
 
+        Uses a pre-connected socket with explicit timeout to avoid
+        relying on the OS TCP timeout (21-30s on Windows).
         Verifies the remote host key against ~/.ssh/known_hosts.
         On first connection (TOFU), the key is saved automatically.
         Rejects connections if the host key has changed (MITM protection).
         """
         import paramiko
 
-        transport = paramiko.Transport((self._host, self._port))
+        # Create socket with explicit timeout (faster than OS default)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(_CONNECT_TIMEOUT)
+        try:
+            sock.connect((self._host, self._port))
+        except (socket.timeout, OSError) as e:
+            sock.close()
+            raise OSError(
+                f"Cannot reach {self._host}:{self._port} " f"(timeout {_CONNECT_TIMEOUT}s)"
+            ) from e
+
+        transport = paramiko.Transport(sock)
         transport.set_keepalive(_KEEPALIVE_INTERVAL)
 
         # Authenticate
@@ -623,6 +637,130 @@ class SFTPStorage(StorageBackend):
                 transport.close()
         except Exception:
             return None
+
+    def list_backup_files(self, backup_name: str) -> list[tuple[str, int]]:
+        """List files inside a backup directory on the SFTP server.
+
+        Args:
+            backup_name: Name of the backup directory.
+
+        Returns:
+            List of (relative_path, size_bytes) tuples.
+        """
+        transport = self._get_transport()
+        try:
+            sftp = self._get_sftp(transport)
+            try:
+                base = self._join_remote(backup_name)
+                files: list[tuple[str, int]] = []
+                self._list_remote_recursive(sftp, base, "", files)
+                return files
+            finally:
+                sftp.close()
+        finally:
+            if transport is not self._persistent_transport:
+                transport.close()
+
+    def _list_remote_recursive(
+        self,
+        sftp,
+        remote_dir: str,
+        prefix: str,
+        result: list[tuple[str, int]],
+    ) -> None:
+        """Recursively list files in a remote directory.
+
+        Args:
+            sftp: Open SFTP client.
+            remote_dir: Absolute remote directory path.
+            prefix: Relative path prefix for results.
+            result: Accumulator list for (relative_path, size) tuples.
+        """
+        import stat as stat_module
+
+        for entry in sftp.listdir_attr(remote_dir):
+            rel = f"{prefix}/{entry.filename}" if prefix else entry.filename
+            full = f"{remote_dir}/{entry.filename}"
+            if stat_module.S_ISDIR(entry.st_mode):
+                self._list_remote_recursive(sftp, full, rel, result)
+            else:
+                result.append((rel, entry.st_size or 0))
+
+    def verify_backup_files(self, backup_name: str) -> list[tuple[str, int, str]]:
+        """Verify backup files via sha256sum executed on the SSH server.
+
+        Runs sha256sum in batches via the exec channel, avoiding
+        the need to re-download files for local hashing.
+
+        Args:
+            backup_name: Name of the backup directory.
+
+        Returns:
+            List of (relative_path, size_bytes, sha256_hex) tuples.
+        """
+        # First get file list with sizes
+        file_list = self.list_backup_files(backup_name)
+        if not file_list:
+            return []
+
+        base = self._join_remote(backup_name)
+        transport = self._get_transport()
+        is_persistent = transport is self._persistent_transport
+
+        try:
+            # Build full remote paths for sha256sum
+            remote_paths = [f"{base}/{rel}" for rel, _ in file_list]
+
+            # Run sha256sum in batches to avoid command line length limits
+            hash_map: dict[str, str] = {}
+            batch_size = 200
+            for i in range(0, len(remote_paths), batch_size):
+                batch = remote_paths[i : i + batch_size]
+                escaped = " ".join(_shell_escape(p) for p in batch)
+                cmd = f"sha256sum {escaped}"
+
+                channel = transport.open_session()
+                try:
+                    channel.settimeout(60)
+                    channel.exec_command(cmd)  # nosec B601
+                    output = b""
+                    while True:
+                        chunk = channel.recv(65536)
+                        if not chunk:
+                            break
+                        output += chunk
+                    exit_status = channel.recv_exit_status()
+                except Exception as e:
+                    logger.warning("sha256sum batch failed: %s", e)
+                    channel.close()
+                    # Fall back to size-only verification
+                    return [(rel, size, "") for rel, size in file_list]
+                finally:
+                    channel.close()
+
+                if exit_status != 0:
+                    logger.warning("sha256sum returned exit code %d", exit_status)
+                    return [(rel, size, "") for rel, size in file_list]
+
+                # Parse output: "hash  /path/to/file\n"
+                for line in output.decode("utf-8", errors="replace").splitlines():
+                    parts = line.split("  ", 1)
+                    if len(parts) == 2:
+                        h, path = parts
+                        hash_map[path.strip()] = h.strip()
+
+            # Build result with hashes
+            result: list[tuple[str, int, str]] = []
+            for rel, size in file_list:
+                full_path = f"{base}/{rel}"
+                sha = hash_map.get(full_path, "")
+                result.append((rel, size, sha))
+
+            return result
+
+        finally:
+            if not is_persistent:
+                transport.close()
 
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
         """Download a backup from SFTP to a local directory."""

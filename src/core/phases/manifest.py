@@ -36,14 +36,11 @@ def build_integrity_manifest(
     total = len(files)
 
     for i, file_info in enumerate(files):
-        try:
-            file_hash = compute_sha256(file_info.source_path)
-            file_hashes[file_info.relative_path] = {
-                "hash": file_hash,
-                "size": file_info.size,
-            }
-        except OSError as e:
-            logger.warning("Could not hash %s: %s", file_info.relative_path, e)
+        file_hash = compute_sha256(file_info.source_path)
+        file_hashes[file_info.relative_path] = {
+            "hash": file_hash,
+            "size": file_info.size,
+        }
 
         phase_log.progress(
             current=i + 1,

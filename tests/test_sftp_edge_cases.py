@@ -281,7 +281,9 @@ class TestDeleteBackup:
             file_stat.st_mode = 0o100644  # Regular file
             mock_sftp.stat.return_value = file_stat
 
-            storage.delete_backup("old_backup.tar")
+            mock_sock = MagicMock()
+            with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
+                storage.delete_backup("old_backup.tar")
 
             mock_sftp.remove.assert_called_once_with("/backups/old_backup.tar")
         finally:
@@ -298,7 +300,9 @@ class TestDeleteBackup:
             mp.SFTPClient.from_transport.return_value = mock_sftp
             mock_sftp.stat.side_effect = FileNotFoundError
 
-            with pytest.raises(FileNotFoundError, match="not found"):
-                storage.delete_backup("ghost")
+            mock_sock = MagicMock()
+            with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
+                with pytest.raises(FileNotFoundError, match="not found"):
+                    storage.delete_backup("ghost")
         finally:
             _cleanup_paramiko()

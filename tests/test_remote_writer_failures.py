@@ -1,12 +1,15 @@
 """Tests for remote_writer failure handling.
 
-Verifies plain/encrypted uploads, error counting, temp file cleanup,
+Verifies plain/encrypted uploads, fail-fast on errors, temp file cleanup,
 progress callbacks, and edge cases.
 """
 
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from src.core.exceptions import WriteError
 from src.core.phases.collector import FileInfo
 from src.core.phases.remote_writer import write_remote
 
@@ -43,16 +46,18 @@ def test_upload_plain_all_succeed(tmp_path):
     assert backend.upload_file.call_count == 3
 
 
-def test_upload_plain_one_fails_others_continue(tmp_path):
-    """One file raises OSError -- error counted, remaining files still uploaded."""
+def test_upload_plain_one_fails_raises_write_error(tmp_path):
+    """One file raises OSError -- WriteError raised, backup stops immediately."""
     files = _make_files(tmp_path, count=3)
     backend = MagicMock()
     backend.upload_file.side_effect = [None, OSError("disk"), None]
 
-    result = write_remote(files, backend, "backup_01")
+    with pytest.raises(WriteError, match="file_1.txt") as exc_info:
+        write_remote(files, backend, "backup_01")
 
-    assert result == "backup_01"
-    assert backend.upload_file.call_count == 3
+    assert isinstance(exc_info.value.original, OSError)
+    # Only 2 calls: first succeeds, second fails, third never attempted
+    assert backend.upload_file.call_count == 2
 
 
 # -- Encrypted upload tests --
@@ -74,27 +79,29 @@ def test_upload_encrypted_success(mock_enc, tmp_path):
 
 
 @patch("src.security.encryption.encrypt_file", return_value=False)
-def test_upload_encrypted_encryption_fails_temp_cleaned(mock_enc, tmp_path):
-    """Encryption fails -- temp file cleaned up, error counted."""
+def test_upload_encrypted_encryption_fails_raises(mock_enc, tmp_path):
+    """Encryption fails -- WriteError raised, temp file cleaned up."""
     files = _make_files(tmp_path, count=1)
     backend = MagicMock()
 
-    write_remote(files, backend, "backup_01", encrypt_password="pass")
+    with pytest.raises(WriteError, match="file_0.txt"):
+        write_remote(files, backend, "backup_01", encrypt_password="pass")
 
     # upload_file should NOT have been called (encryption failed raises RuntimeError)
     backend.upload_file.assert_not_called()
 
 
 @patch("src.security.encryption.encrypt_file", return_value=True)
-def test_upload_encrypted_upload_fails_temp_cleaned(mock_enc, tmp_path):
-    """Upload fails after encryption -- temp file cleaned up."""
+def test_upload_encrypted_upload_fails_raises(mock_enc, tmp_path):
+    """Upload fails after encryption -- WriteError raised, temp file cleaned up."""
     files = _make_files(tmp_path, count=1)
     backend = MagicMock()
     backend.upload_file.side_effect = ConnectionError("timeout")
 
-    # Should not crash
-    write_remote(files, backend, "backup_01", encrypt_password="pass")
+    with pytest.raises(WriteError, match="file_0.txt") as exc_info:
+        write_remote(files, backend, "backup_01", encrypt_password="pass")
 
+    assert isinstance(exc_info.value.original, ConnectionError)
     mock_enc.assert_called_once()
     backend.upload_file.assert_called_once()
 
@@ -130,13 +137,27 @@ def test_empty_file_list_returns_immediately(tmp_path):
     backend.upload_file.assert_not_called()
 
 
-def test_network_timeout_error_counted(tmp_path):
-    """Network timeout during upload -- error counted, no crash."""
+def test_network_timeout_raises_write_error(tmp_path):
+    """Network timeout during upload -- WriteError raised immediately."""
     files = _make_files(tmp_path, count=2)
     backend = MagicMock()
     backend.upload_file.side_effect = TimeoutError("timed out")
 
-    result = write_remote(files, backend, "backup_01")
+    with pytest.raises(WriteError, match="file_0.txt") as exc_info:
+        write_remote(files, backend, "backup_01")
 
-    assert result == "backup_01"
-    assert backend.upload_file.call_count == 2
+    assert isinstance(exc_info.value.original, TimeoutError)
+    # Only first file attempted before failure
+    assert backend.upload_file.call_count == 1
+
+
+def test_disconnect_called_even_on_failure(tmp_path):
+    """Backend.disconnect() is called even when upload fails."""
+    files = _make_files(tmp_path, count=1)
+    backend = MagicMock()
+    backend.upload_file.side_effect = OSError("connection lost")
+
+    with pytest.raises(WriteError):
+        write_remote(files, backend, "backup_01")
+
+    backend.disconnect.assert_called_once()

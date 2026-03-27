@@ -239,6 +239,30 @@ class ProtonDriveStorage(StorageBackend):
         """Get free space (not available for Proton Drive)."""
         return None
 
+    def list_backup_files(self, backup_name: str) -> list[tuple[str, int]]:
+        """List files inside a backup directory on Proton Drive.
+
+        Args:
+            backup_name: Name of the backup directory.
+
+        Returns:
+            List of (relative_path, size_bytes) tuples.
+        """
+        result = self._run_rclone(
+            ["lsjson", self._remote_spec(backup_name), "--recursive", "--files-only"],
+            timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning("rclone lsjson failed: %s", result.stderr.strip())
+            return []
+
+        try:
+            entries = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return []
+
+        return [(e.get("Path", ""), e.get("Size", 0)) for e in entries]
+
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
         """Download a backup from Proton Drive via rclone."""
         local_dir.mkdir(parents=True, exist_ok=True)

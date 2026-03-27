@@ -5,7 +5,7 @@ may not be installed in the test environment.
 """
 
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -93,8 +93,12 @@ class TestSFTPStorageWithMock:
         mp = self._setup_mock_paramiko()
         try:
             storage = self._make_storage()
-            transport = storage._get_transport()
-            mp.Transport.assert_called_once_with(("192.168.1.100", 22))
+            mock_sock = MagicMock()
+            with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
+                transport = storage._get_transport()
+            mock_sock.settimeout.assert_called_once()
+            mock_sock.connect.assert_called_once_with(("192.168.1.100", 22))
+            mp.Transport.assert_called_once_with(mock_sock)
             transport.connect.assert_called_once_with(username="testuser", password="testpass")
         finally:
             self._cleanup_paramiko()
@@ -111,7 +115,9 @@ class TestSFTPStorageWithMock:
             )
             storage._verify_host_key = lambda transport: None
             mp.Ed25519Key.from_private_key_file.return_value = "mock_key"
-            transport = storage._get_transport()
+            mock_sock = MagicMock()
+            with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
+                transport = storage._get_transport()
             transport.connect.assert_called_once()
             assert "pkey" in str(transport.connect.call_args)
         finally:
@@ -187,7 +193,9 @@ class TestSFTPStorageWithMock:
             vfs.f_frsize = 4096
             mock_sftp.statvfs.return_value = vfs
 
-            ok, msg = storage.test_connection()
+            mock_sock = MagicMock()
+            with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
+                ok, msg = storage.test_connection()
             assert ok is True
             assert "SFTP connected" in msg
         finally:
@@ -204,7 +212,9 @@ class TestSFTPStorageWithMock:
             mp.SFTPClient.from_transport.return_value = mock_sftp
             mock_sftp.listdir.side_effect = FileNotFoundError
 
-            ok, msg = storage.test_connection()
+            mock_sock = MagicMock()
+            with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
+                ok, msg = storage.test_connection()
             assert ok is False
             assert "not found" in msg
         finally:

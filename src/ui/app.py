@@ -89,12 +89,16 @@ class BackupManagerApp:
         """Build the main window layout."""
         main = ttk.Frame(self.root)
         main.pack(fill="both", expand=True)
+        self._main_frame = main
 
         # Sidebar
         self._build_sidebar(main)
 
         # Notebook (tabs)
         self._build_tabs(main)
+
+        # Alert frame placeholder (shown when targets are unavailable)
+        self._alert_frame: tk.Frame | None = None
 
     def _build_sidebar(self, parent):
         """Build the left sidebar with profile list."""
@@ -405,6 +409,12 @@ class BackupManagerApp:
                 mirrors.append(m)
         profile.mirror_destinations = mirrors
 
+        # Check for duplicate destinations
+        dup_error = self._check_duplicate_destinations(storage["storage"], mirrors)
+        if dup_error:
+            messagebox.showwarning("Validation", dup_error)
+            return
+
         retention = self.tab_retention.collect_config()
         profile.retention = retention["retention"]
 
@@ -434,6 +444,53 @@ class BackupManagerApp:
 
         self._load_profiles()
         messagebox.showinfo("Saved", f"Profile '{profile.name}' saved.")
+
+    @staticmethod
+    def _check_duplicate_destinations(storage, mirrors) -> str:
+        """Check that storage and mirrors don't point to the same destination.
+
+        Args:
+            storage: Primary StorageConfig.
+            mirrors: List of mirror StorageConfig.
+
+        Returns:
+            Error message if duplicates found, empty string if OK.
+        """
+        from src.core.config import StorageType
+
+        def _destination_key(config) -> str:
+            """Build a unique key for a destination."""
+            st = config.storage_type
+            if st in (StorageType.LOCAL, StorageType.NETWORK):
+                return f"{st.value}:{config.destination_path.rstrip('/').rstrip(chr(92)).lower()}"
+            if st == StorageType.SFTP:
+                return (
+                    f"sftp:{config.sftp_host}:{config.sftp_port}"
+                    f":{config.sftp_remote_path.rstrip('/')}"
+                )
+            if st == StorageType.S3:
+                return f"s3:{config.s3_bucket}:{config.s3_prefix.strip('/')}"
+            if st == StorageType.PROTON:
+                return f"proton:{config.proton_username}" f":{config.proton_remote_path.strip('/')}"
+            return ""
+
+        targets = [("Storage", storage)]
+        for i, m in enumerate(mirrors):
+            targets.append((f"Mirror {i + 1}", m))
+
+        seen: dict[str, str] = {}
+        for name, config in targets:
+            key = _destination_key(config)
+            if not key:
+                continue
+            if key in seen:
+                return (
+                    f"{name} and {seen[key]} point to the same destination. "
+                    f"Each destination must be unique."
+                )
+            seen[key] = name
+
+        return ""
 
     def _new_profile(self):
         profile = BackupProfile()
@@ -563,10 +620,97 @@ class BackupManagerApp:
             messagebox.showwarning("Backup", "No profile selected.")
             return
 
-        self.tab_run.clear_log()
+        profile = self._current_profile
+
+        # Validate config before attempting connectivity check
+        try:
+            profile.storage.validate()
+            for mirror in profile.mirror_destinations:
+                mirror.validate()
+        except ValueError as e:
+            messagebox.showwarning("Backup", f"Invalid configuration: {e}")
+            return
+
         self.engine = BackupEngine(self.config_manager, events=self.events)
 
-        profile = self._current_profile
+        # Pre-check targets in background, then start backup if all OK
+        self._precheck_and_run(profile)
+
+    def _precheck_and_run(self, profile: BackupProfile) -> None:
+        """Run target pre-check in background thread, then start backup.
+
+        Shows a "Checking destinations..." message immediately so the user
+        knows something is happening (SFTP timeouts can take 15+ seconds).
+        Uses polling pattern (root.after) to stay thread-safe with tkinter.
+        """
+        self._show_checking_message()
+
+        result: list = [None]  # [None] = pending, [list] = done
+
+        def _do_check() -> None:
+            result[0] = self.engine.precheck_targets(profile)
+
+        def _poll() -> None:
+            if result[0] is None:
+                self.root.after(200, _poll)
+                return
+
+            self._hide_target_alert()  # Remove "Checking..." message
+
+            failures = [r for r in result[0] if not r[2]]
+            if not failures:
+                self._start_backup_thread(profile)
+            else:
+                self._show_target_alert(
+                    failures,
+                    on_retry=lambda: self._on_precheck_retry(profile),
+                    on_cancel=lambda: self._on_precheck_cancel(),
+                )
+
+        threading.Thread(target=_do_check, daemon=True, name="Precheck").start()
+        self.root.after(200, _poll)
+
+    def _show_checking_message(self) -> None:
+        """Show a 'Checking destinations...' message while precheck runs."""
+        self._hide_target_alert()
+        self.notebook.pack_forget()
+
+        frame = tk.Frame(self._main_frame, bg=Colors.CARD_BG)
+        frame.pack(fill="both", expand=True)
+        self._alert_frame = frame
+
+        content = tk.Frame(frame, bg=Colors.CARD_BG)
+        content.pack(expand=True)
+
+        tk.Label(
+            content,
+            text="Checking destinations...",
+            font=(Fonts.FAMILY, Fonts.SIZE_HEADER),
+            fg=Colors.ACCENT,
+            bg=Colors.CARD_BG,
+        ).pack(pady=(0, 10))
+
+        tk.Label(
+            content,
+            text="Verifying that all backup targets are reachable.",
+            font=(Fonts.FAMILY, Fonts.SIZE_NORMAL),
+            fg=Colors.TEXT_SECONDARY,
+            bg=Colors.CARD_BG,
+        ).pack()
+
+    def _on_precheck_retry(self, profile: BackupProfile) -> None:
+        """User clicked Retry — hide alert and re-run precheck."""
+        self._hide_target_alert()
+        self._precheck_and_run(profile)
+
+    def _on_precheck_cancel(self) -> None:
+        """User clicked Cancel — hide alert, set tray to error."""
+        self._hide_target_alert()
+        self.tray.set_state(TrayState.BACKUP_ERROR)
+
+    def _start_backup_thread(self, profile: BackupProfile) -> None:
+        """Start the actual backup in a background thread."""
+        self.tab_run.clear_log()
 
         def _backup_thread():
             try:
@@ -617,20 +761,238 @@ class BackupManagerApp:
             self.engine.cancel()
 
     def _scheduled_backup(self, profile: BackupProfile):
-        """Callback for scheduler-triggered backups."""
+        """Callback for scheduler-triggered backups.
+
+        Runs in the scheduler daemon thread. Pre-checks targets
+        and shows alert on the main thread if any are unavailable.
+
+        Raises:
+            RuntimeError: If targets are unavailable and user cancels,
+                or if the backup itself fails.
+        """
+        # Skip unconfigured profiles (default storage has empty destination)
+        try:
+            profile.storage.validate()
+            for mirror in profile.mirror_destinations:
+                mirror.validate()
+        except ValueError as e:
+            logger.warning("Skipping scheduled backup for '%s': %s", profile.name, e)
+            return
+
         self.engine = BackupEngine(self.config_manager, events=self.events)
+
+        # Pre-check targets (blocking — we're in the scheduler thread)
+        results = self.engine.precheck_targets(profile)
+        failures = [r for r in results if not r[2]]
+
+        if failures:
+            # Show alert on main thread and wait for user decision
+            user_choice = self._scheduled_precheck_prompt(failures, profile)
+            if user_choice == "cancel":
+                self.tray.set_state(TrayState.BACKUP_ERROR)
+                raise RuntimeError("Backup cancelled: destinations unavailable")
+
         try:
             self.tray.set_state(TrayState.BACKUP_RUNNING)
             stats = self.engine.run_backup(profile)
             self.tray.set_state(TrayState.BACKUP_SUCCESS)
+            self.tray.notify(
+                "Scheduled backup complete",
+                f"[{profile.name}] {stats.files_processed} files "
+                f"in {stats.duration_seconds:.0f}s",
+            )
             self.scheduler.journal.update_last(
                 status="success",
                 files_count=stats.files_processed,
                 duration_seconds=stats.duration_seconds,
             )
+
+            if profile.email.enabled:
+                from src.notifications.email_notifier import send_backup_report
+
+                send_backup_report(
+                    profile.email,
+                    profile.name,
+                    True,
+                    f"{stats.files_processed} files backed up",
+                )
+
         except Exception as e:
             self.tray.set_state(TrayState.BACKUP_ERROR)
-            self.scheduler.journal.update_last(status="failed", detail=str(e))
+            self.tray.notify(
+                "Scheduled backup failed",
+                f"[{profile.name}] {e}",
+            )
+
+            if profile.email.enabled:
+                from src.notifications.email_notifier import send_backup_report
+
+                send_backup_report(
+                    profile.email,
+                    profile.name,
+                    False,
+                    str(e),
+                )
+
+            # Re-raise so the scheduler can trigger retry logic
+            raise
+
+    def _scheduled_precheck_prompt(
+        self,
+        failures: list[tuple[str, str, bool, str]],
+        profile: BackupProfile,
+    ) -> str:
+        """Show target alert from scheduler thread, wait for user response.
+
+        Uses root.after() to show UI on the main thread and
+        threading.Event to block the scheduler thread until the
+        user makes a choice.
+
+        Args:
+            failures: Failed targets from precheck_targets().
+            profile: Backup profile (for retry precheck).
+
+        Returns:
+            "ok" if all targets eventually pass, "cancel" if user cancels.
+        """
+        decision = {"value": None}  # "retry", "cancel", or None
+        event = threading.Event()
+
+        def _show_alert():
+            self._show_target_alert(
+                failures,
+                on_retry=lambda: _on_choice("retry"),
+                on_cancel=lambda: _on_choice("cancel"),
+            )
+
+        def _on_choice(choice: str):
+            decision["value"] = choice
+            event.set()
+
+        # Show alert on main thread
+        self.root.after(0, _show_alert)
+        event.wait()  # Block scheduler thread until user clicks
+
+        if decision["value"] == "cancel":
+            self.root.after(0, self._hide_target_alert)
+            return "cancel"
+
+        # User clicked retry — hide alert and re-check
+        self.root.after(0, self._hide_target_alert)
+        results = self.engine.precheck_targets(profile)
+        new_failures = [r for r in results if not r[2]]
+
+        if not new_failures:
+            return "ok"
+
+        # Still failing — prompt again (recursive)
+        return self._scheduled_precheck_prompt(new_failures, profile)
+
+    # --- Target pre-check alert ---
+
+    def _show_target_alert(
+        self,
+        failures: list[tuple[str, str, bool, str]],
+        on_retry: callable,
+        on_cancel: callable,
+    ) -> None:
+        """Replace notebook with an alert frame listing unreachable targets.
+
+        Args:
+            failures: List of (role, action, success, detail) with success=False.
+            on_retry: Callback when user clicks Retry.
+            on_cancel: Callback when user clicks Cancel backup.
+        """
+        self._hide_target_alert()
+        self.notebook.pack_forget()
+
+        # Bring the window to the foreground so the user sees the alert
+        self._show_window()
+
+        frame = tk.Frame(self._main_frame, bg=Colors.CARD_BG)
+        frame.pack(fill="both", expand=True)
+        self._alert_frame = frame
+
+        # Centered content with constrained width
+        content = tk.Frame(frame, bg=Colors.CARD_BG)
+        content.pack(expand=True, padx=60, pady=40)
+
+        max_width = 700  # Max text width in pixels
+
+        # Warning icon + title
+        tk.Label(
+            content,
+            text="\u26a0  Destinations unavailable",
+            font=(Fonts.FAMILY, Fonts.SIZE_HEADER, "bold"),
+            fg=Colors.DANGER,
+            bg=Colors.CARD_BG,
+        ).pack(pady=(0, 20))
+
+        tk.Label(
+            content,
+            text="The following backup destinations are not reachable:",
+            font=(Fonts.FAMILY, Fonts.SIZE_LARGE),
+            fg=Colors.TEXT,
+            bg=Colors.CARD_BG,
+        ).pack(pady=(0, 15))
+
+        # List each failed target
+        for role, action, _ok, detail in failures:
+            target_frame = tk.Frame(content, bg=Colors.CARD_BG)
+            target_frame.pack(fill="x", pady=8, padx=20)
+
+            tk.Label(
+                target_frame,
+                text=f"\u25cf  {role}",
+                font=(Fonts.FAMILY, Fonts.SIZE_LARGE, "bold"),
+                fg=Colors.TEXT,
+                bg=Colors.CARD_BG,
+                anchor="w",
+            ).pack(fill="x")
+
+            tk.Label(
+                target_frame,
+                text=f"    {action}",
+                font=(Fonts.FAMILY, Fonts.SIZE_NORMAL),
+                fg=Colors.ACCENT,
+                bg=Colors.CARD_BG,
+                anchor="w",
+                wraplength=max_width,
+                justify="left",
+            ).pack(fill="x")
+
+        # Footer message
+        tk.Label(
+            content,
+            text="Please connect these destinations and click Retry.",
+            font=(Fonts.FAMILY, Fonts.SIZE_NORMAL),
+            fg=Colors.TEXT_SECONDARY,
+            bg=Colors.CARD_BG,
+        ).pack(pady=(20, 20))
+
+        # Buttons
+        btn_frame = tk.Frame(content, bg=Colors.CARD_BG)
+        btn_frame.pack()
+
+        ttk.Button(
+            btn_frame,
+            text="Retry",
+            command=on_retry,
+            style="Accent.TButton",
+        ).pack(side="left", padx=10)
+
+        ttk.Button(
+            btn_frame,
+            text="Cancel backup",
+            command=on_cancel,
+        ).pack(side="left", padx=10)
+
+    def _hide_target_alert(self) -> None:
+        """Remove the alert frame and restore the notebook."""
+        if self._alert_frame is not None:
+            self._alert_frame.destroy()
+            self._alert_frame = None
+        self.notebook.pack(fill="both", expand=True)
 
     # --- Status ---
 

@@ -1,11 +1,7 @@
 """Tests for --minimized startup flag and AutoStart VBS generation."""
 
 import sys
-import textwrap
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from src.core.scheduler import AutoStart
 
@@ -25,9 +21,7 @@ class TestStartMinimizedFlag:
 
     def test_flag_among_other_args(self):
         """--minimized should be detected even with other arguments."""
-        with patch.object(
-            sys, "argv", ["backup_manager", "--other", "--minimized", "--debug"]
-        ):
+        with patch.object(sys, "argv", ["backup_manager", "--other", "--minimized", "--debug"]):
             assert "--minimized" in sys.argv
 
 

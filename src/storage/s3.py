@@ -213,6 +213,63 @@ class S3Storage(StorageBackend):
         except Exception:
             return None
 
+    def list_backup_files(self, backup_name: str) -> list[tuple[str, int]]:
+        """List files inside a backup prefix on S3.
+
+        Args:
+            backup_name: Name of the backup (S3 prefix).
+
+        Returns:
+            List of (relative_path, size_bytes) tuples.
+        """
+        client = self._get_client()
+        prefix = self._s3_key(backup_name)
+        if not prefix.endswith("/"):
+            prefix += "/"
+
+        files: list[tuple[str, int]] = []
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                rel = key[len(prefix) :]
+                if rel:
+                    files.append((rel, obj.get("Size", 0)))
+        return files
+
+    def verify_backup_files(self, backup_name: str) -> list[tuple[str, int, str]]:
+        """Verify backup files using S3 ETags (MD5 for simple uploads).
+
+        The ETag for non-multipart uploads is the MD5 of the object.
+        Multipart ETags contain a dash and are not usable as MD5.
+
+        Args:
+            backup_name: Name of the backup (S3 prefix).
+
+        Returns:
+            List of (relative_path, size_bytes, md5_hex) tuples.
+            md5_hex is "" for multipart uploads (ETag contains "-").
+        """
+        client = self._get_client()
+        prefix = self._s3_key(backup_name)
+        if not prefix.endswith("/"):
+            prefix += "/"
+
+        files: list[tuple[str, int, str]] = []
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                rel = key[len(prefix) :]
+                if not rel:
+                    continue
+                size = obj.get("Size", 0)
+                etag = obj.get("ETag", "").strip('"')
+                # Multipart ETags contain "-" and are not MD5
+                md5 = etag if "-" not in etag else ""
+                files.append((rel, size, md5))
+        return files
+
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
         """Download a backup from S3 to a local directory."""
         local_dir.mkdir(parents=True, exist_ok=True)

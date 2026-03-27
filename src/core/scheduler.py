@@ -213,12 +213,57 @@ class InAppScheduler:
         logger.info("Scheduler stopped")
 
     def _run(self) -> None:
+        # On startup, check for missed backups (cold boot scenario)
+        try:
+            self._check_startup_missed()
+        except Exception:
+            logger.exception("Startup missed-backup check error")
+
         while self._running:
             try:
                 self._check_schedules()
             except Exception:
                 logger.exception("Scheduler error")
             time.sleep(CHECK_INTERVAL)
+
+    def _check_startup_missed(self) -> None:
+        """Check for missed backups on application startup (cold boot).
+
+        Unlike sleep/wake detection which relies on monotonic time jumps,
+        this method explicitly checks every active profile against the
+        persistent scheduler state to catch backups missed while the PC
+        was completely off.
+        """
+        now = datetime.now()
+        profiles = self._get_profiles()
+        logger.info(
+            "Startup missed-backup check: %d profiles loaded", len(profiles)
+        )
+
+        for profile in profiles:
+            if not profile.active:
+                continue
+            if not profile.schedule.enabled:
+                continue
+            if profile.schedule.frequency == ScheduleFrequency.MANUAL:
+                continue
+
+            last = self._state.get_last_trigger(profile.id)
+            last_str = last.isoformat() if last else "never"
+            logger.info(
+                "Profile '%s': schedule=%s at %s, last_trigger=%s",
+                profile.name,
+                profile.schedule.frequency.value,
+                profile.schedule.time,
+                last_str,
+            )
+
+            if self._is_due(profile, now):
+                logger.info(
+                    "Missed backup detected on startup for '%s' — triggering",
+                    profile.name,
+                )
+                self._trigger_backup(profile, now, trigger="missed_recovery")
 
     def _check_schedules(self) -> None:
         now = datetime.now()

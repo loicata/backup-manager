@@ -243,6 +243,128 @@ class TestScheduleJournalConcurrency:
         assert len(entries) == 10
 
 
+class TestStartupMissedBackup:
+    """Tests for _check_startup_missed (cold boot missed backup detection)."""
+
+    def _make_profile(self, freq=ScheduleFrequency.DAILY, time="02:00"):
+        return BackupProfile(
+            name="TestProfile",
+            schedule=ScheduleConfig(
+                enabled=True, frequency=freq, time=time
+            ),
+        )
+
+    def test_missed_daily_triggers_on_cold_boot(self, tmp_path):
+        """Daily backup missed overnight should trigger on startup."""
+        triggered = []
+        profile = self._make_profile()
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=lambda p: triggered.append(p.name),
+        )
+        # Simulate last run was yesterday
+        yesterday = datetime.now() - timedelta(days=1)
+        scheduler._state.set_last_trigger(profile.id, yesterday)
+
+        scheduler._check_startup_missed()
+
+        assert len(triggered) == 1
+        assert triggered[0] == "TestProfile"
+
+    def test_no_trigger_if_already_ran_today(self, tmp_path):
+        """Backup that already ran today should NOT trigger on startup."""
+        triggered = []
+        profile = self._make_profile(time="00:00")
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=lambda p: triggered.append(p.name),
+        )
+        # Simulate last run was earlier today
+        scheduler._state.set_last_trigger(profile.id, datetime.now())
+
+        scheduler._check_startup_missed()
+
+        assert len(triggered) == 0
+
+    def test_first_ever_run_triggers(self, tmp_path):
+        """Profile that has never run should trigger on startup."""
+        triggered = []
+        profile = self._make_profile()
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=lambda p: triggered.append(p.name),
+        )
+        # No last trigger set (first time ever)
+
+        scheduler._check_startup_missed()
+
+        assert len(triggered) == 1
+
+    def test_inactive_profile_skipped(self, tmp_path):
+        """Inactive profiles should not trigger on startup."""
+        triggered = []
+        profile = self._make_profile()
+        profile.active = False
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=lambda p: triggered.append(p.name),
+        )
+
+        scheduler._check_startup_missed()
+
+        assert len(triggered) == 0
+
+    def test_disabled_schedule_skipped(self, tmp_path):
+        """Profiles with disabled schedule should not trigger."""
+        triggered = []
+        profile = self._make_profile()
+        profile.schedule.enabled = False
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=lambda p: triggered.append(p.name),
+        )
+
+        scheduler._check_startup_missed()
+
+        assert len(triggered) == 0
+
+    def test_manual_schedule_skipped(self, tmp_path):
+        """Manual-only schedules should not trigger on startup."""
+        triggered = []
+        profile = self._make_profile(freq=ScheduleFrequency.MANUAL)
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=lambda p: triggered.append(p.name),
+        )
+
+        scheduler._check_startup_missed()
+
+        assert len(triggered) == 0
+
+    def test_trigger_logged_as_missed_recovery(self, tmp_path):
+        """Startup-triggered backups should be logged as missed_recovery."""
+        profile = self._make_profile()
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=lambda p: None,
+        )
+        yesterday = datetime.now() - timedelta(days=1)
+        scheduler._state.set_last_trigger(profile.id, yesterday)
+
+        scheduler._check_startup_missed()
+
+        entries = scheduler.journal.get_entries()
+        assert len(entries) >= 1
+        assert entries[-1]["trigger"] == "missed_recovery"
+
+
 class TestAutoStart:
     def test_is_enabled_when_no_file(self):
         assert AutoStart.is_enabled() is True or AutoStart.is_enabled() is False

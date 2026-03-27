@@ -170,6 +170,8 @@ def _crash_log(error_msg: str):
 
 def main():
     """Application main entry point."""
+    start_minimized = "--minimized" in sys.argv
+
     # Windows-specific setup
     if sys.platform == "win32":
         _setup_dpi_awareness()
@@ -180,7 +182,10 @@ def main():
 
     # Logging
     logger = _setup_logging()
-    logger.info("Backup Manager v3 starting...")
+    logger.info(
+        "Backup Manager v3 starting%s...",
+        " (minimized)" if start_minimized else "",
+    )
 
     try:
         import tkinter as tk
@@ -227,7 +232,7 @@ def main():
         if not ok:
             logger.warning("Integrity check: %s", msg)
 
-        # Launch main app — reset geometry and ensure window is visible
+        # Launch main app — reset geometry and prepare window
         logger.info("Launching main app...")
         root.withdraw()  # Ensure hidden while resetting
         root.geometry("")  # Clear off-screen geometry from wizard
@@ -240,13 +245,21 @@ def main():
         y = (screen_h - win_h) // 2
         root.geometry(f"{win_w}x{win_h}+{x}+{y}")
         root.attributes("-alpha", 1)  # Ensure fully opaque
-        root.deiconify()
-        root.update_idletasks()
+
+        if not start_minimized:
+            root.deiconify()
+            root.update_idletasks()
+
         _app = BackupManagerApp(root)
-        root.lift()
-        root.attributes("-topmost", True)
-        root.after(100, lambda: root.attributes("-topmost", False))
-        root.focus_force()
+
+        if not start_minimized:
+            root.lift()
+            root.attributes("-topmost", True)
+            root.after(100, lambda: root.attributes("-topmost", False))
+            root.focus_force()
+        else:
+            logger.info("Started minimized to tray")
+
         root.mainloop()
 
     except Exception as e:

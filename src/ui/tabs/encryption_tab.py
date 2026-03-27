@@ -78,10 +78,7 @@ class EncryptionTab(ScrollableTab):
             "PBKDF2-HMAC-SHA256 key derivation (600,000 iterations), "
             "following OWASP 2024 recommendations."
         )
-        desc_line2 = (
-            "Your backups are protected with military-grade "
-            "authenticated encryption."
-        )
+        desc_line2 = "Your backups are protected with military-grade " "authenticated encryption."
         tk.Label(
             mode_frame,
             text=desc_line1,

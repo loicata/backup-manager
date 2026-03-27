@@ -243,9 +243,7 @@ class GeneralTab(ScrollableTab):
                         if entry.is_file(follow_symlinks=False):
                             total += entry.stat(follow_symlinks=False).st_size
                         elif entry.is_dir(follow_symlinks=False):
-                            total += GeneralTab._calculate_dir_size(
-                                Path(entry.path), cancel
-                            )
+                            total += GeneralTab._calculate_dir_size(Path(entry.path), cancel)
                     except OSError:
                         continue
         except OSError as exc:

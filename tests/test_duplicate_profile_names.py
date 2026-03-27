@@ -51,10 +51,7 @@ class TestDuplicateProfileNames:
 
         # Simulate checking if renaming p2 to "Production" conflicts
         new_name = "Production"
-        conflict = any(
-            p.id != p2.id and p.name.lower() == new_name.lower()
-            for p in profiles
-        )
+        conflict = any(p.id != p2.id and p.name.lower() == new_name.lower() for p in profiles)
         assert conflict is True
 
     def test_no_conflict_when_renaming_self(self, tmp_config_dir):
@@ -67,10 +64,7 @@ class TestDuplicateProfileNames:
 
         # Renaming p1 to "Production" (same name, same profile)
         new_name = "Production"
-        conflict = any(
-            p.id != p1.id and p.name.lower() == new_name.lower()
-            for p in profiles
-        )
+        conflict = any(p.id != p1.id and p.name.lower() == new_name.lower() for p in profiles)
         assert conflict is False
 
     def test_no_conflict_with_different_names(self, tmp_config_dir):
@@ -84,8 +78,5 @@ class TestDuplicateProfileNames:
         profiles = mgr.get_all_profiles()
 
         new_name = "Development"
-        conflict = any(
-            p.id != p2.id and p.name.lower() == new_name.lower()
-            for p in profiles
-        )
+        conflict = any(p.id != p2.id and p.name.lower() == new_name.lower() for p in profiles)
         assert conflict is False

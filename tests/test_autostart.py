@@ -32,8 +32,9 @@ class TestAutoStart:
     def test_ensure_startup_creates_vbs_for_frozen(self, fake_startup_dir):
         """ensure_startup() creates VBS file when running as frozen exe."""
         fake_exe = Path(r"C:\Program Files\BackupManager\BackupManager.exe")
-        with patch.object(sys, "frozen", True, create=True), patch.object(
-            sys, "executable", str(fake_exe)
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", str(fake_exe)),
         ):
             AutoStart.ensure_startup(show_window=True)
 
@@ -46,8 +47,9 @@ class TestAutoStart:
     def test_ensure_startup_minimized_flag(self, fake_startup_dir):
         """ensure_startup(show_window=False) includes --minimized."""
         fake_exe = Path(r"C:\Program Files\BackupManager\BackupManager.exe")
-        with patch.object(sys, "frozen", True, create=True), patch.object(
-            sys, "executable", str(fake_exe)
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", str(fake_exe)),
         ):
             AutoStart.ensure_startup(show_window=False)
 
@@ -66,8 +68,9 @@ class TestAutoStart:
     def test_is_enabled_true_after_ensure(self, fake_startup_dir):
         """is_enabled() returns True after ensure_startup()."""
         fake_exe = Path(r"C:\Program Files\BackupManager\BackupManager.exe")
-        with patch.object(sys, "frozen", True, create=True), patch.object(
-            sys, "executable", str(fake_exe)
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", str(fake_exe)),
         ):
             AutoStart.ensure_startup(show_window=True)
 
@@ -114,8 +117,9 @@ class TestAutoStart:
     def test_ensure_startup_overwrites_existing(self, fake_startup_dir):
         """ensure_startup() updates existing VBS with new settings."""
         fake_exe = Path(r"C:\Program Files\BackupManager\BackupManager.exe")
-        with patch.object(sys, "frozen", True, create=True), patch.object(
-            sys, "executable", str(fake_exe)
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", str(fake_exe)),
         ):
             # First: create with show_window=True
             AutoStart.ensure_startup(show_window=True)

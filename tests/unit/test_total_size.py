@@ -1,11 +1,7 @@
 """Tests for GeneralTab total size calculation and formatting."""
 
-import os
 import threading
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from src.ui.tabs.general_tab import GeneralTab
 

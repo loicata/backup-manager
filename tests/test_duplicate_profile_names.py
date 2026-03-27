@@ -4,8 +4,6 @@ Validates that the application rejects saving a profile whose name
 matches another existing profile (case-insensitive).
 """
 
-import pytest
-
 from src.core.config import BackupProfile, ConfigManager
 
 

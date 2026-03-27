@@ -1,4 +1,4 @@
-# Backup Manager v3.1.1
+# Backup Manager v3.1.2
 
 A reliable, secure, and user-friendly Windows backup application designed for personal and small-business use. Manage multiple backup profiles, store copies on local drives, network shares, or remote servers, and let the built-in scheduler and GFS retention policy take care of the rest.
 

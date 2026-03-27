@@ -9,6 +9,7 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 
 from src.core.config import BackupProfile, BackupType
+from src.core.scheduler import AutoStart
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 
@@ -303,6 +304,10 @@ class GeneralTab(ScrollableTab):
 
         # Retry from schedule config
         self.retry_var.set(profile.schedule.retry_enabled)
+
+        # Load auto-start state from system
+        self.autostart_var.set(AutoStart.is_enabled())
+        self.minimized_var.set(not AutoStart.is_show_window())
 
         self._update_total_size()
 

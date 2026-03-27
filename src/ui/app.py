@@ -11,7 +11,7 @@ from src import __version__
 from src.core.backup_engine import BackupEngine, CancelledError
 from src.core.config import BackupProfile, ConfigManager
 from src.core.events import STATUS, EventBus
-from src.core.scheduler import InAppScheduler
+from src.core.scheduler import AutoStart, InAppScheduler
 from src.ui.tabs.email_tab import EmailTab
 from src.ui.tabs.encryption_tab import EncryptionTab
 from src.ui.tabs.general_tab import GeneralTab
@@ -377,7 +377,19 @@ class BackupManagerApp:
 
         # Collect from all tabs
         general = self.tab_general.collect_config()
-        profile.name = general["name"]
+
+        # Validate profile name uniqueness
+        new_name = general["name"]
+        for p in self._profiles:
+            if p.id != profile.id and p.name.lower() == new_name.lower():
+                messagebox.showwarning(
+                    "Validation",
+                    f"A profile named '{p.name}' already exists. "
+                    "Please choose a different name.",
+                )
+                return
+
+        profile.name = new_name
         profile.backup_type = general["backup_type"]
         profile.source_paths = general["source_paths"]
         profile.exclude_patterns = general["exclude_patterns"]
@@ -412,6 +424,14 @@ class BackupManagerApp:
         profile.email = email["email"]
 
         self.config_manager.save_profile(profile)
+
+        # Apply auto-start setting
+        if general["autostart"]:
+            show_window = not general["autostart_minimized"]
+            AutoStart.ensure_startup(show_window=show_window)
+        else:
+            AutoStart.disable()
+
         self._load_profiles()
         messagebox.showinfo("Saved", f"Profile '{profile.name}' saved.")
 

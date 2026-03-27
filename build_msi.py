@@ -23,12 +23,15 @@ WIX_BIN = Path(r"C:\Program Files (x86)\WiX Toolset v3.14\bin")
 
 
 def get_version() -> str:
-    """Read version from src/__init__.py."""
+    """Read version from src/__init__.py (fallback line with quoted string)."""
+    import re
+
     init = SRC / "__init__.py"
     for line in init.read_text(encoding="utf-8").splitlines():
-        if line.startswith("__version__"):
-            return line.split("=")[1].strip().strip('"').strip("'")
-    return "3.0"
+        m = re.search(r'__version__\s*=\s*["\'](\d+\.\d+\.\d+)["\']', line)
+        if m:
+            return m.group(1)
+    return "0.0.0"
 
 
 def run(cmd: list[str], label: str):

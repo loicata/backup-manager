@@ -21,12 +21,14 @@ logger = logging.getLogger(__name__)
 def build_integrity_manifest(
     files: list[FileInfo],
     events: EventBus | None = None,
+    cancel_check=None,
 ) -> dict:
     """Build integrity manifest with hashes of all source files.
 
     Args:
         files: Files that were backed up.
         events: Optional event bus.
+        cancel_check: Optional callable that raises CancelledError.
 
     Returns:
         Manifest dict with file hashes and total checksum.
@@ -36,6 +38,8 @@ def build_integrity_manifest(
     total = len(files)
 
     for i, file_info in enumerate(files):
+        if cancel_check is not None:
+            cancel_check()
         file_hash = compute_sha256(file_info.source_path)
         file_hashes[file_info.relative_path] = {
             "hash": file_hash,

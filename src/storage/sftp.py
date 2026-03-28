@@ -11,9 +11,11 @@ Security:
 - Password decrypted via DPAPI/AES at connection time
 """
 
+import io
 import logging
 import socket
 import stat
+import tarfile
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -21,7 +23,8 @@ from src.storage.base import StorageBackend, with_retry
 
 logger = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT = 10  # Seconds for SSH/SFTP connection (LAN + internet)
+_CONNECT_TIMEOUT = 30  # Seconds for SSH/SFTP connection (LAN + internet)
+_OPERATION_TIMEOUT = 120  # Seconds for SFTP operations (delete, list, etc.)
 _EXEC_PROBE_TIMEOUT = 10  # Seconds for exec channel probe
 _KEEPALIVE_INTERVAL = 30  # Seconds between SSH keepalive packets
 _FAST_CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -66,8 +69,48 @@ def _shell_escape(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+class _ChannelWriter(io.RawIOBase):
+    """Adapter that streams writes to an SSH channel.
+
+    Used by ``tarfile.open(mode='w|')`` to stream tar data directly
+    into an exec channel (``tar xf -``), tracking bytes for progress.
+    Supports cancel checking between writes for responsive cancellation.
+    """
+
+    def __init__(
+        self,
+        channel,
+        progress_callback=None,
+        total_bytes: int = 0,
+        cancel_check=None,
+    ):
+        self._channel = channel
+        self._progress_callback = progress_callback
+        self._total_bytes = total_bytes
+        self._bytes_sent = 0
+        self._cancel_check = cancel_check
+
+    def write(self, data: bytes | bytearray) -> int:
+        """Send *data* to the SSH channel and update progress."""
+        if self._cancel_check is not None:
+            self._cancel_check()
+        self._channel.sendall(data)
+        self._bytes_sent += len(data)
+        if self._progress_callback and self._total_bytes > 0:
+            self._progress_callback(self._bytes_sent, self._total_bytes)
+        return len(data)
+
+    def writable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return False
+
+
 class SFTPStorage(StorageBackend):
     """SFTP/SSH storage backend."""
+
+    supports_tar_stream: bool = True
 
     def __init__(
         self,
@@ -89,6 +132,7 @@ class SFTPStorage(StorageBackend):
         self._remote_path = remote_path
         self._exec_available: bool | None = None
         self._persistent_transport = None
+        self._created_dirs: set[str] = set()
 
     def connect(self) -> None:
         """Open a persistent SSH transport for batch operations.
@@ -102,6 +146,7 @@ class SFTPStorage(StorageBackend):
                     return  # Already connected
             except Exception:
                 pass
+        self._created_dirs.clear()
         self._persistent_transport = self._create_transport()
 
     def disconnect(self) -> None:
@@ -240,7 +285,7 @@ class SFTPStorage(StorageBackend):
         import paramiko
 
         sftp = paramiko.SFTPClient.from_transport(transport)
-        sftp.get_channel().settimeout(_CONNECT_TIMEOUT)
+        sftp.get_channel().settimeout(_OPERATION_TIMEOUT)
         return sftp
 
     def _check_exec_channel(self, transport) -> bool:
@@ -372,6 +417,78 @@ class SFTPStorage(StorageBackend):
         finally:
             channel.close()
 
+    def upload_tar_stream(
+        self,
+        files: list[tuple[Path, str, int]],
+        remote_dir: str,
+        progress_callback=None,
+        cancel_check=None,
+    ) -> None:
+        """Upload multiple files as a single tar stream via exec channel.
+
+        Streams a tar archive directly to ``tar xf -`` on the remote
+        server, eliminating per-file SSH channel overhead.  Falls back
+        to individual ``upload_file()`` calls when exec is unavailable.
+
+        Args:
+            files: List of (local_path, relative_path, size) tuples.
+            remote_dir: Remote directory where files are extracted.
+            progress_callback: Optional callable(bytes_sent, total_bytes).
+            cancel_check: Optional callable that raises CancelledError.
+
+        Raises:
+            OSError: If the remote tar extraction fails.
+        """
+        transport = self._get_transport()
+        full_dir = self._join_remote(remote_dir)
+
+        if not self._check_exec_channel(transport):
+            self._tar_fallback(files, remote_dir, progress_callback)
+            return
+
+        self._ensure_remote_dir_exec(transport, full_dir)
+
+        escaped_dir = _shell_escape(full_dir)
+        channel = transport.open_session()
+        try:
+            channel.exec_command(f"tar xf - -C {escaped_dir}")  # nosec B601
+
+            total_bytes = sum(size for _, _, size in files)
+            writer = _ChannelWriter(
+                channel,
+                progress_callback,
+                total_bytes,
+                cancel_check,
+            )
+
+            with tarfile.open(fileobj=writer, mode="w|") as tar:
+                for local_path, rel_path, size in files:
+                    if cancel_check is not None:
+                        cancel_check()
+                    info = tarfile.TarInfo(name=rel_path)
+                    info.size = size
+                    with open(local_path, "rb") as f:
+                        tar.addfile(info, fileobj=f)
+
+            channel.shutdown_write()
+            exit_status = channel.recv_exit_status()
+            if exit_status != 0:
+                raise OSError(f"Remote tar extraction failed (exit {exit_status})")
+        finally:
+            channel.close()
+
+    def _tar_fallback(self, files, remote_dir, progress_callback) -> None:
+        """Fallback: upload files individually when exec is unavailable."""
+        total_bytes = sum(size for _, _, size in files)
+        bytes_sent = 0
+        for local_path, rel_path, size in files:
+            remote_path = f"{remote_dir}/{rel_path}"
+            with open(local_path, "rb") as f:
+                self.upload_file(f, remote_path, size=size)
+            bytes_sent += size
+            if progress_callback:
+                progress_callback(bytes_sent, total_bytes)
+
     def _upload_directory(self, transport, local_path: Path, remote_name: str) -> None:
         """Upload an entire directory."""
         exec_ok = self._check_exec_channel(transport)
@@ -475,7 +592,13 @@ class SFTPStorage(StorageBackend):
     # --- Directory creation ---
 
     def _ensure_remote_dir_exec(self, transport, remote_dir: str) -> None:
-        """Create remote directory via exec channel."""
+        """Create remote directory via exec channel.
+
+        Skips the SSH round-trip if the directory was already created
+        during this connection (cached in self._created_dirs).
+        """
+        if remote_dir in self._created_dirs:
+            return
         escaped = _shell_escape(remote_dir)
         channel = transport.open_session()
         try:
@@ -483,13 +606,22 @@ class SFTPStorage(StorageBackend):
             channel.recv_exit_status()
         finally:
             channel.close()
+        self._created_dirs.add(remote_dir)
 
     def _ensure_remote_dir_sftp(self, sftp, remote_dir: str) -> None:
-        """Create remote directory via SFTP, creating parents as needed."""
+        """Create remote directory via SFTP, creating parents as needed.
+
+        Skips the SFTP round-trips if the directory was already created
+        during this connection (cached in self._created_dirs).
+        """
+        if remote_dir in self._created_dirs:
+            return
         parts = PurePosixPath(remote_dir).parts
         current = ""
         for part in parts:
             current = f"{current}/{part}" if current else f"/{part}"
+            if current in self._created_dirs:
+                continue
             try:
                 sftp.stat(current)
             except FileNotFoundError:
@@ -497,6 +629,8 @@ class SFTPStorage(StorageBackend):
                     sftp.mkdir(current)
                 except OSError:
                     pass  # Race condition or already exists
+            self._created_dirs.add(current)
+        self._created_dirs.add(remote_dir)
 
     # --- List / Delete / Test ---
 
@@ -638,28 +772,92 @@ class SFTPStorage(StorageBackend):
         except Exception:
             return None
 
-    def list_backup_files(self, backup_name: str) -> list[tuple[str, int]]:
+    def list_backup_files(
+        self,
+        backup_name: str,
+        progress_callback=None,
+    ) -> list[tuple[str, int]]:
         """List files inside a backup directory on the SFTP server.
+
+        Uses ``find -printf`` via exec channel when available for
+        streaming progress.  Falls back to recursive SFTP listing.
 
         Args:
             backup_name: Name of the backup directory.
+            progress_callback: Optional callable(count) called per file found.
 
         Returns:
             List of (relative_path, size_bytes) tuples.
         """
         transport = self._get_transport()
+        is_persistent = transport is self._persistent_transport
         try:
+            base = self._join_remote(backup_name)
+
+            if self._check_exec_channel(transport):
+                return self._list_files_exec(transport, base, progress_callback)
+
             sftp = self._get_sftp(transport)
             try:
-                base = self._join_remote(backup_name)
                 files: list[tuple[str, int]] = []
                 self._list_remote_recursive(sftp, base, "", files)
                 return files
             finally:
                 sftp.close()
         finally:
-            if transport is not self._persistent_transport:
+            if not is_persistent:
                 transport.close()
+
+    def _list_files_exec(
+        self,
+        transport,
+        remote_dir: str,
+        progress_callback=None,
+    ) -> list[tuple[str, int]]:
+        """List files via exec channel using find -printf.
+
+        Streams output line by line for responsive progress tracking.
+
+        Args:
+            transport: SSH transport.
+            remote_dir: Absolute remote directory path.
+            progress_callback: Optional callable(count) per file found.
+
+        Returns:
+            List of (relative_path, size_bytes) tuples.
+        """
+        escaped = _shell_escape(remote_dir)
+        channel = transport.open_session()
+        try:
+            channel.exec_command(f"find {escaped} -type f -printf '%s %P\\n'")
+
+            output = b""
+            while True:
+                chunk = channel.recv(65536)
+                if not chunk:
+                    break
+                output += chunk
+
+            channel.recv_exit_status()
+        finally:
+            channel.close()
+
+        files: list[tuple[str, int]] = []
+        for line in output.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(" ", 1)
+            if len(parts) == 2:
+                try:
+                    size = int(parts[0])
+                    rel_path = parts[1]
+                    files.append((rel_path, size))
+                    if progress_callback:
+                        progress_callback(len(files))
+                except ValueError:
+                    continue
+        return files
 
     def _list_remote_recursive(
         self,

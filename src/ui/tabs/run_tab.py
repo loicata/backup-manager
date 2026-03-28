@@ -128,8 +128,14 @@ class RunTab(ttk.Frame):
         self._phase_done[phase] = min(current, self._phase_totals.get(phase, total))
 
         # Each phase gets a share proportional to its weight.
-        # Default weight is 1 for unknown phases.
-        total_weight = sum(self._phase_weights.get(p, 1) for p in self._phase_order)
+        # Use ALL declared phases for total (not just seen ones),
+        # so early phases don't inflate their share of the bar.
+        all_phases = list(self._phase_weights.keys()) if self._phase_weights else []
+        # Add any seen phase not declared in weights (safety fallback)
+        for p in self._phase_order:
+            if p not in all_phases:
+                all_phases.append(p)
+        total_weight = sum(self._phase_weights.get(p, 1) for p in all_phases)
         if total_weight <= 0:
             total_weight = 1
 

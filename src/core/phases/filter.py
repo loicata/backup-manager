@@ -96,19 +96,28 @@ def filter_changed_files(
     return changed
 
 
-def build_updated_manifest(files: list[FileInfo]) -> dict[str, dict]:
+def build_updated_manifest(
+    files: list[FileInfo],
+    cached_hashes: dict[str, str] | None = None,
+) -> dict[str, dict]:
     """Build a manifest dict from a list of files.
 
     Args:
         files: Files that were backed up.
+        cached_hashes: Optional mapping of relative_path to SHA-256
+            from a previous phase (e.g. integrity manifest). When
+            provided, avoids re-hashing files already computed.
 
     Returns:
         Manifest dict for saving.
     """
+    cache = cached_hashes or {}
     manifest = {}
     for file_info in files:
         try:
-            file_hash = compute_sha256(file_info.source_path)
+            file_hash = cache.get(file_info.relative_path)
+            if file_hash is None:
+                file_hash = compute_sha256(file_info.source_path)
             manifest[file_info.relative_path] = {
                 "hash": file_hash,
                 "size": file_info.size,

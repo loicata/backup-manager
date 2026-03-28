@@ -24,6 +24,7 @@ from src.core.events import (
     LOG,
     PHASE_CHANGED,
     PHASE_COUNT,
+    PROGRESS,
     STATUS,
     EventBus,
 )
@@ -223,7 +224,17 @@ class BackupEngine:
         """Phase 3: Build integrity manifest (hashing)."""
         self._phase("Building integrity manifest...")
         self._check_cancel()
-        ctx.integrity_manifest = build_integrity_manifest(ctx.files, self._events)
+        ctx.integrity_manifest = build_integrity_manifest(
+            ctx.files,
+            self._events,
+            cancel_check=self._check_cancel,
+        )
+
+        # Cache file hashes for reuse in Phase 8 (delta manifest)
+        ctx.file_hashes = {
+            rel_path: info["hash"]
+            for rel_path, info in ctx.integrity_manifest.get("files", {}).items()
+        }
 
     def _phase_write(self, ctx: PipelineContext) -> None:
         """Phase 4: Write backup to primary destination."""
@@ -321,8 +332,9 @@ class BackupEngine:
         errors = []
         hash_verified = 0
         size_verified = 0
+        total = len(ctx.files)
 
-        for f in ctx.files:
+        for i, f in enumerate(ctx.files):
             if f.relative_path not in remote_map:
                 errors.append(f"Missing on remote: {f.relative_path}")
                 continue
@@ -372,10 +384,16 @@ class BackupEngine:
                     continue
                 size_verified += 1
 
+            self._events.emit(
+                PROGRESS,
+                current=i + 1,
+                total=total,
+                filename=f.relative_path,
+                phase="verification",
+            )
+
         if errors:
             self._raise_verify_error(errors, len(ctx.files))
-
-        total = len(ctx.files)
         parts = []
         if hash_verified:
             parts.append(f"{hash_verified} by checksum")
@@ -400,8 +418,9 @@ class BackupEngine:
         """
         remote_map = {path: size for path, size in remote_files}
         errors = []
+        total = len(ctx.files)
 
-        for f in ctx.files:
+        for i, f in enumerate(ctx.files):
             if f.relative_path not in remote_map:
                 errors.append(f"Missing on remote: {f.relative_path}")
             elif remote_map[f.relative_path] != f.size:
@@ -411,10 +430,16 @@ class BackupEngine:
                     f"got {remote_map[f.relative_path]})"
                 )
 
+            self._events.emit(
+                PROGRESS,
+                current=i + 1,
+                total=total,
+                filename=f.relative_path,
+                phase="verification",
+            )
+
         if errors:
             self._raise_verify_error(errors, len(ctx.files))
-
-        total = len(ctx.files)
         self._log(f"Remote verification OK: {total}/{total} files verified " f"(by size)")
 
     @staticmethod
@@ -476,7 +501,7 @@ class BackupEngine:
         """Phase 8: Update delta manifest for incremental tracking."""
         self._phase("Updating manifest...")
         manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
-        delta_manifest = build_updated_manifest(ctx.files)
+        delta_manifest = build_updated_manifest(ctx.files, ctx.file_hashes)
         save_manifest(delta_manifest, manifest_path)
 
     def _phase_mirror(self, ctx: PipelineContext) -> None:
@@ -804,16 +829,20 @@ class BackupEngine:
         - verification: 1 (local hash or remote size check)
         - upload (mirror): 5 (network upload)
         - encryption: 1 (CPU-bound, fast)
+        - rotation: 1 (delete old backups, can be slow on remote)
         """
         is_remote = ctx.profile.storage.is_remote()
-        write_weight = 5 if is_remote else 2
 
         weights = {
             "hashing": 1,
-            "backup": write_weight,  # local_writer phase name
-            "upload": write_weight,  # remote_writer phase name
             "verification": 1,
+            "rotation": 1,
         }
+
+        if is_remote:
+            weights["upload"] = 5  # remote_writer phase name
+        else:
+            weights["backup"] = 2  # local_writer phase name
 
         if ctx.profile.mirror_destinations:
             weights["mirror_upload"] = 5

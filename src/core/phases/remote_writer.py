@@ -1,6 +1,7 @@
 """Phase 3b: Stream files to remote destination (SFTP/S3/Proton).
 
-No temp files, no ZIP — each file is uploaded individually.
+No temp files, no ZIP — each file is uploaded individually,
+or as a single tar stream when the backend supports it.
 Encryption uses a temporary encrypted file to avoid loading
 the entire plaintext into memory.
 """
@@ -31,6 +32,10 @@ def write_remote(
 ) -> str:
     """Stream files one by one to a remote storage backend.
 
+    When the backend supports tar-stream upload and no per-file
+    encryption is needed, all files are sent in a single tar
+    archive for dramatically better small-file performance.
+
     Args:
         files: Files to back up.
         backend: Storage backend (SFTP, S3, Proton).
@@ -55,26 +60,22 @@ def write_remote(
         backend.connect()
 
     try:
-        for i, file_info in enumerate(files):
-            # Check cancel between each file
-            if cancel_check is not None:
-                cancel_check()
+        # Check cancel before starting
+        if cancel_check is not None:
+            cancel_check()
 
-            remote_path = f"{backup_name}/{file_info.relative_path}"
+        use_tar = not encrypt_password and getattr(backend, "supports_tar_stream", False) is True
 
-            try:
-                if encrypt_password:
-                    _upload_encrypted(backend, file_info, remote_path, encrypt_password)
-                else:
-                    _upload_plain(backend, file_info, remote_path)
-            except Exception as e:
-                raise WriteError(file_info.relative_path, e) from e
-
-            phase_log.progress(
-                current=i + 1,
-                total=total,
-                filename=file_info.relative_path,
-                phase="upload",
+        if use_tar:
+            _upload_tar_batch(backend, files, backup_name, phase_log, cancel_check)
+        else:
+            _upload_file_by_file(
+                backend,
+                files,
+                backup_name,
+                encrypt_password,
+                phase_log,
+                cancel_check,
             )
     finally:
         # Always close persistent connection
@@ -83,6 +84,95 @@ def write_remote(
 
     phase_log.info(f"Remote upload done: {total}/{total} files")
     return backup_name
+
+
+def _upload_tar_batch(
+    backend,
+    files: list[FileInfo],
+    backup_name: str,
+    phase_log: PhaseLogger,
+    cancel_check: Callable[[], None] | None = None,
+) -> None:
+    """Upload all files as a single tar stream.
+
+    Progress is tracked by bytes sent rather than file count,
+    so the bar advances smoothly during the transfer.
+
+    Args:
+        backend: Storage backend with upload_tar_stream() method.
+        files: Files to upload.
+        backup_name: Remote directory name.
+        phase_log: Phase logger for progress events.
+        cancel_check: Optional callable that raises CancelledError.
+    """
+    total_bytes = sum(f.size for f in files)
+
+    # Use bytes for smooth progress (avoids a frozen bar during transfer)
+    progress_total = max(total_bytes, 1)
+
+    def _on_progress(bytes_sent: int, _total: int) -> None:
+        phase_log.progress(
+            current=bytes_sent,
+            total=progress_total,
+            filename="",
+            phase="upload",
+        )
+
+    tar_files = [(f.source_path, f.relative_path, f.size) for f in files]
+
+    try:
+        backend.upload_tar_stream(
+            tar_files,
+            backup_name,
+            progress_callback=_on_progress,
+            cancel_check=cancel_check,
+        )
+    except Exception as e:
+        raise WriteError("tar-stream", e) from e
+
+    # Emit final progress (ensure 100% of this phase)
+    phase_log.progress(current=progress_total, total=progress_total, filename="", phase="upload")
+
+
+def _upload_file_by_file(
+    backend: StorageBackend,
+    files: list[FileInfo],
+    backup_name: str,
+    encrypt_password: str,
+    phase_log: PhaseLogger,
+    cancel_check: Callable[[], None] | None,
+) -> None:
+    """Upload files one by one (original behaviour).
+
+    Args:
+        backend: Storage backend.
+        files: Files to upload.
+        backup_name: Remote directory name.
+        encrypt_password: If set, encrypt each file before upload.
+        phase_log: Phase logger for progress events.
+        cancel_check: Callable that raises CancelledError if cancelled.
+    """
+    total = len(files)
+    for i, file_info in enumerate(files):
+        if cancel_check is not None:
+            cancel_check()
+
+        remote_path = f"{backup_name}/{file_info.relative_path}"
+
+        try:
+            if encrypt_password:
+                _upload_encrypted(backend, file_info, remote_path, encrypt_password)
+            else:
+                _upload_plain(backend, file_info, remote_path)
+        except Exception as e:
+            raise WriteError(file_info.relative_path, e) from e
+
+        phase_log.progress(
+            current=i + 1,
+            total=total,
+            filename=file_info.relative_path,
+            phase="upload",
+        )
 
 
 def _upload_plain(

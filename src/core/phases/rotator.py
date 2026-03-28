@@ -91,15 +91,24 @@ def _rotate_gfs(
         keep.add(dated_backups[0][0]["name"])
 
     # Delete backups not in keep set
+    to_delete = [b for b in backups if b["name"] not in keep]
+    total = len(to_delete)
     deleted = 0
-    for backup in backups:
-        if backup["name"] not in keep:
-            try:
-                backend.delete_backup(backup["name"])
-                deleted += 1
-                phase_log.info(f"GFS rotated: deleted {backup['name']}")
-            except Exception as e:
-                phase_log.error(f"Failed to delete {backup['name']}: {e}")
+
+    for i, backup in enumerate(to_delete):
+        try:
+            backend.delete_backup(backup["name"])
+            deleted += 1
+            phase_log.info(f"GFS rotated: deleted {backup['name']}")
+        except Exception as e:
+            phase_log.error(f"Failed to delete {backup['name']}: {e}")
+
+        phase_log.progress(
+            current=i + 1,
+            total=total,
+            filename=backup["name"],
+            phase="rotation",
+        )
 
     phase_log.info(f"GFS rotation: kept {len(keep)}, deleted {deleted}")
     return deleted

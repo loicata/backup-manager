@@ -1,4 +1,4 @@
-# Backup Manager v3.1.3
+# Backup Manager v3.1.4
 
 A reliable, secure, and user-friendly Windows backup application designed for personal and small-business use. Manage multiple backup profiles, store copies on local drives, network shares, or remote servers, and let the built-in scheduler and GFS retention policy take care of the rest.
 
@@ -175,7 +175,7 @@ pytest --cov=src --cov-report=term-missing
 pytest tests/unit/test_backup_engine.py -v
 ```
 
-**Current status:** 527 tests | 84% coverage | 0 failures
+**Current status:** 559 tests | 84% coverage | 0 failures
 
 ---
 
@@ -205,7 +205,7 @@ backup-manager/
 │       ├── theme.py               # Colors, fonts, layout constants
 │       └── tabs/                  # UI tabs (Run, General, Storage, Mirror, Encryption, Schedule, Retention, Email, Recovery, History)
 ├── tests/
-│   ├── unit/                   # Unit tests (~527 tests)
+│   ├── unit/                   # Unit tests (~559 tests)
 │   ├── integration/            # Integration tests
 │   └── fixtures/               # Shared test data
 ├── assets/                     # Icons, license, launcher, screenshots

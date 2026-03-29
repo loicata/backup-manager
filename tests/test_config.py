@@ -14,6 +14,7 @@ from src.core.config import (
     ScheduleFrequency,
     StorageConfig,
     StorageType,
+    compute_destinations_hash,
 )
 
 
@@ -366,3 +367,86 @@ class TestConfigManager:
         assert p.encrypt_primary is False
         assert p.encrypt_mirror1 is False
         assert p.encrypt_mirror2 is False
+
+
+class TestComputeDestinationsHash:
+    """Tests for compute_destinations_hash."""
+
+    def test_same_config_produces_same_hash(self):
+        """Identical profiles produce the same hash."""
+        profile = BackupProfile(
+            storage=StorageConfig(storage_type=StorageType.LOCAL, destination_path="/backups"),
+        )
+        assert compute_destinations_hash(profile) == compute_destinations_hash(profile)
+
+    def test_different_path_produces_different_hash(self):
+        """Changing destination_path changes the hash."""
+        p1 = BackupProfile(
+            storage=StorageConfig(storage_type=StorageType.LOCAL, destination_path="/backups"),
+        )
+        p2 = BackupProfile(
+            storage=StorageConfig(storage_type=StorageType.LOCAL, destination_path="/other"),
+        )
+        assert compute_destinations_hash(p1) != compute_destinations_hash(p2)
+
+    def test_adding_mirror_changes_hash(self):
+        """Adding a mirror destination changes the hash."""
+        p1 = BackupProfile(
+            storage=StorageConfig(storage_type=StorageType.LOCAL, destination_path="/backups"),
+        )
+        p2 = BackupProfile(
+            storage=StorageConfig(storage_type=StorageType.LOCAL, destination_path="/backups"),
+            mirror_destinations=[
+                StorageConfig(storage_type=StorageType.S3, s3_bucket="my-bucket"),
+            ],
+        )
+        assert compute_destinations_hash(p1) != compute_destinations_hash(p2)
+
+    def test_password_change_does_not_change_hash(self):
+        """Changing a secret (password) does not change the hash."""
+        p1 = BackupProfile(
+            storage=StorageConfig(
+                storage_type=StorageType.SFTP,
+                sftp_host="server.com",
+                sftp_password="old_pass",
+            ),
+        )
+        p2 = BackupProfile(
+            storage=StorageConfig(
+                storage_type=StorageType.SFTP,
+                sftp_host="server.com",
+                sftp_password="new_pass",
+            ),
+        )
+        assert compute_destinations_hash(p1) == compute_destinations_hash(p2)
+
+    def test_s3_provider_change_changes_hash(self):
+        """Changing S3 provider changes the hash."""
+        p1 = BackupProfile(
+            storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="bk", s3_provider="aws"),
+        )
+        p2 = BackupProfile(
+            storage=StorageConfig(
+                storage_type=StorageType.S3,
+                s3_bucket="bk",
+                s3_provider="scaleway",
+            ),
+        )
+        assert compute_destinations_hash(p1) != compute_destinations_hash(p2)
+
+    def test_hash_is_64_char_hex(self):
+        """Hash is a valid SHA-256 hex digest."""
+        profile = BackupProfile()
+        h = compute_destinations_hash(profile)
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_destinations_hash_roundtrip(self, tmp_config_dir):
+        """destinations_hash is persisted and loaded correctly."""
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="HashTest")
+        profile.destinations_hash = compute_destinations_hash(profile)
+        mgr.save_profile(profile)
+
+        loaded = mgr.get_all_profiles()[0]
+        assert loaded.destinations_hash == profile.destinations_hash

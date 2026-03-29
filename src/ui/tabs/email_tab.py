@@ -19,9 +19,7 @@ class EmailTab(ScrollableTab):
 
     def _build_ui(self):
         # Trigger mode
-        mode_frame = ttk.LabelFrame(
-            self.inner, text="Send notifications (beta)", padding=Spacing.PAD
-        )
+        mode_frame = ttk.LabelFrame(self.inner, text="Send notifications", padding=Spacing.PAD)
         mode_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
         self.trigger_var = tk.StringVar(value="disabled")
@@ -48,10 +46,11 @@ class EmailTab(ScrollableTab):
         preset_row.pack(fill="x", pady=(0, Spacing.MEDIUM))
         ttk.Label(preset_row, text="Presets:").pack(side="left")
         for name in ["Gmail", "Outlook", "ProtonMail"]:
+            key = name.lower()
             ttk.Button(
                 preset_row,
                 text=name,
-                command=lambda n=name.lower(): self._apply_preset(n),
+                command=lambda n=key: self._apply_preset(n),
             ).pack(side="left", padx=2)
 
         # Fields

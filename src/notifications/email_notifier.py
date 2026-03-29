@@ -29,6 +29,7 @@ def send_backup_report(
     success: bool,
     summary: str,
     details: str = "",
+    cancelled: bool = False,
 ) -> tuple[bool, str]:
     """Send backup report email.
 
@@ -38,6 +39,7 @@ def send_backup_report(
         success: Whether the backup succeeded.
         summary: Short summary text.
         details: Optional detailed text.
+        cancelled: Whether the backup was cancelled by the user.
 
     Returns:
         (sent, message) tuple.
@@ -45,17 +47,27 @@ def send_backup_report(
     if not config.enabled:
         return False, "Email notifications disabled"
 
-    # Check trigger conditions
-    if success and not config.send_on_success:
+    # Cancelled follows the same trigger as failure
+    if cancelled:
+        if not config.send_on_failure:
+            return False, "Failure notification disabled"
+    elif success and not config.send_on_success:
         return False, "Success notification disabled"
-    if not success and not config.send_on_failure:
+    elif not success and not config.send_on_failure:
         return False, "Failure notification disabled"
 
-    status_emoji = "✅" if success else "❌"
-    status_text = "SUCCESS" if success else "FAILED"
+    if cancelled:
+        status_emoji = "⚠️"
+        status_text = "CANCELLED"
+    elif success:
+        status_emoji = "✅"
+        status_text = "SUCCESS"
+    else:
+        status_emoji = "❌"
+        status_text = "FAILED"
 
     subject = f"{status_emoji} Backup Manager — {profile_name} — {status_text}"
-    html_body = _build_html(profile_name, success, summary, details)
+    html_body = _build_html(profile_name, success, summary, details, cancelled=cancelled)
 
     return _send_email(config, subject, html_body)
 
@@ -130,10 +142,18 @@ def _build_html(
     success: bool,
     summary: str,
     details: str = "",
+    cancelled: bool = False,
 ) -> str:
     """Build HTML email body."""
-    color = "#27ae60" if success else "#e74c3c"
-    status = "SUCCESS" if success else "FAILED"
+    if cancelled:
+        color = "#f39c12"
+        status = "CANCELLED"
+    elif success:
+        color = "#27ae60"
+        status = "SUCCESS"
+    else:
+        color = "#e74c3c"
+        status = "FAILED"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     details_section = ""

@@ -782,6 +782,20 @@ class BackupManagerApp:
 
             except CancelledError:
                 self.tray.set_state(TrayState.IDLE)
+                if profile.email.enabled:
+                    from src.notifications.email_notifier import send_backup_report
+
+                    log = ""
+                    if self.engine and self.engine._current_result:
+                        log = "\n".join(self.engine._current_result.log_lines)
+                    send_backup_report(
+                        profile.email,
+                        profile.name,
+                        False,
+                        "Backup cancelled by user",
+                        details=log,
+                        cancelled=True,
+                    )
             except Exception as e:
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 self.tray.notify("Backup failed", str(e))
@@ -861,6 +875,23 @@ class BackupManagerApp:
                     True,
                     f"{stats.files_processed} files backed up",
                     details="\n".join(stats.log_lines),
+                )
+
+        except CancelledError:
+            self.tray.set_state(TrayState.IDLE)
+            if profile.email.enabled:
+                from src.notifications.email_notifier import send_backup_report
+
+                log = ""
+                if self.engine and self.engine._current_result:
+                    log = "\n".join(self.engine._current_result.log_lines)
+                send_backup_report(
+                    profile.email,
+                    profile.name,
+                    False,
+                    "Backup cancelled by user",
+                    details=log,
+                    cancelled=True,
                 )
 
         except Exception as e:
@@ -987,7 +1018,7 @@ class BackupManagerApp:
         ).pack(pady=(0, 15))
 
         # List each failed target
-        for role, action, _ok, detail in failures:
+        for role, action, _ok, _detail in failures:
             target_frame = tk.Frame(content, bg=Colors.CARD_BG)
             target_frame.pack(fill="x", pady=8, padx=20)
 
@@ -1087,6 +1118,9 @@ class BackupManagerApp:
 
     def _quit_app(self):
         """Actually quit the application."""
+        # Hide the window immediately to avoid visual flicker during cleanup
+        self.root.withdraw()
+        self.root.update_idletasks()
         self.scheduler.stop()
         self.tray.stop()
         self.root.destroy()

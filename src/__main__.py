@@ -4,6 +4,7 @@ Handles: DPI awareness, single instance enforcement, logging setup,
 setup wizard (first launch), integrity check, and app launch.
 """
 
+import contextlib
 import ctypes
 import logging
 import os
@@ -18,20 +19,16 @@ def _setup_dpi_awareness():
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except (AttributeError, OSError):
-        try:
+        with contextlib.suppress(AttributeError, OSError):
             ctypes.windll.user32.SetProcessDPIAware()
-        except (AttributeError, OSError):
-            pass
 
 
 def _set_app_user_model_id():
     """Set AppUserModelID for proper taskbar icon grouping."""
-    try:
+    with contextlib.suppress(AttributeError, OSError):
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
             "BackupManager.BackupManager.3.0"
         )
-    except (AttributeError, OSError):
-        pass
 
 
 def _get_icon_path() -> "Path | None":
@@ -227,6 +224,14 @@ def main():
                 from_wizard = True
             else:
                 logger.info("Wizard cancelled — launching app without profile")
+
+        # Enable auto-start on first frozen launch if not already configured
+        if getattr(sys, "frozen", False):
+            from src.core.scheduler import AutoStart
+
+            if not AutoStart.is_enabled():
+                AutoStart.ensure_startup(show_window=False)
+                logger.info("Auto-start enabled (first launch)")
 
         # Integrity check (non-blocking)
         logger.info("Running integrity check...")

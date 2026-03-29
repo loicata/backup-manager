@@ -82,21 +82,25 @@ class TestLocalWriterFailFast:
 
     def test_oserror_raises(self, tmp_path):
         fi = _make_file(tmp_path)
-        with patch(
-            "src.core.phases.local_writer.shutil.copy2",
-            side_effect=OSError("I/O error"),
+        with (
+            patch(
+                "src.core.phases.local_writer.shutil.copy2",
+                side_effect=OSError("I/O error"),
+            ),
+            pytest.raises(WriteError, match="test.txt"),
         ):
-            with pytest.raises(WriteError, match="test.txt"):
-                write_flat([fi], tmp_path / "dst", "bk1")
+            write_flat([fi], tmp_path / "dst", "bk1")
 
     def test_first_file_failure_stops_pipeline(self, tmp_path):
         """When 3 files are queued and first fails, only 1 copy is attempted."""
         files = _make_files(tmp_path, count=3)
         mock_copy = MagicMock(side_effect=OSError("fail"))
 
-        with patch("src.core.phases.local_writer.shutil.copy2", mock_copy):
-            with pytest.raises(WriteError):
-                write_flat(files, tmp_path / "dst", "bk1")
+        with (
+            patch("src.core.phases.local_writer.shutil.copy2", mock_copy),
+            pytest.raises(WriteError),
+        ):
+            write_flat(files, tmp_path / "dst", "bk1")
 
         assert mock_copy.call_count == 1
 
@@ -194,9 +198,11 @@ class TestScheduledBackupNotifications:
 
         instance = self._make_instance(app)
 
-        with patch("src.ui.app.BackupEngine", return_value=mock_engine):
-            with pytest.raises(WriteError):
-                instance._scheduled_backup(profile)
+        with (
+            patch("src.ui.app.BackupEngine", return_value=mock_engine),
+            pytest.raises(WriteError),
+        ):
+            instance._scheduled_backup(profile)
 
         app.tray.notify.assert_called_once()
         call_args = app.tray.notify.call_args
@@ -217,9 +223,9 @@ class TestScheduledBackupNotifications:
         with (
             patch("src.ui.app.BackupEngine", return_value=mock_engine),
             patch("src.notifications.email_notifier.send_backup_report") as mock_email,
+            pytest.raises(RuntimeError),
         ):
-            with pytest.raises(RuntimeError):
-                instance._scheduled_backup(profile)
+            instance._scheduled_backup(profile)
 
         mock_email.assert_called_once()
         call_args = mock_email.call_args

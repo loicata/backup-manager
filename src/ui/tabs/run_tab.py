@@ -1,5 +1,6 @@
 """Run tab: backup execution with progress and log display."""
 
+import contextlib
 import tkinter as tk
 from tkinter import ttk
 
@@ -161,10 +162,8 @@ class RunTab(ttk.Frame):
             pass
 
     def _on_phase(self, phase="", **kw):
-        try:
+        with contextlib.suppress(tk.TclError):
             self.status_label.config(text=phase, foreground=Colors.ACCENT)
-        except tk.TclError:
-            pass
 
     def _on_log(self, message="", level="info", **kw):
         try:

@@ -20,6 +20,8 @@ try:
 except ImportError:
     HAS_PARAMIKO = False
 
+import contextlib
+
 from src.storage.sftp import SFTPStorage
 
 # --- Test configuration ---
@@ -76,10 +78,8 @@ def sftp_backend():
         pkey=paramiko.Ed25519Key.from_private_key_file(SFTP_KEY_PATH),
     )
     sftp = paramiko.SFTPClient.from_transport(transport)
-    try:
+    with contextlib.suppress(OSError):
         sftp.mkdir(remote_path)
-    except OSError:
-        pass
     sftp.close()
     transport.close()
 
@@ -92,10 +92,8 @@ def sftp_backend():
         pkey=paramiko.Ed25519Key.from_private_key_file(SFTP_KEY_PATH),
     )
     sftp = paramiko.SFTPClient.from_transport(transport)
-    try:
+    with contextlib.suppress(Exception):
         _recursive_rm(sftp, remote_path)
-    except Exception:
-        pass
     sftp.close()
     transport.close()
 

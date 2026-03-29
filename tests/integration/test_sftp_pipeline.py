@@ -22,6 +22,8 @@ try:
 except ImportError:
     HAS_PARAMIKO = False
 
+import contextlib
+
 from src.core.backup_engine import BackupEngine
 from src.core.config import (
     BackupProfile,
@@ -85,10 +87,8 @@ def _ensure_remote_dir(path: str) -> None:
     """Create a remote directory."""
     sftp, transport = _sftp_session()
     try:
-        try:
+        with contextlib.suppress(OSError):
             sftp.mkdir(path)
-        except OSError:
-            pass
     finally:
         sftp.close()
         transport.close()

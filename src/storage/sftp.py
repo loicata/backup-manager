@@ -11,6 +11,7 @@ Security:
 - Password decrypted via DPAPI/AES at connection time
 """
 
+import contextlib
 import io
 import logging
 import socket
@@ -152,10 +153,8 @@ class SFTPStorage(StorageBackend):
     def disconnect(self) -> None:
         """Close the persistent SSH transport."""
         if self._persistent_transport is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._persistent_transport.close()
-            except Exception:
-                pass
             self._persistent_transport = None
 
     def _get_transport(self):
@@ -189,7 +188,7 @@ class SFTPStorage(StorageBackend):
         sock.settimeout(_CONNECT_TIMEOUT)
         try:
             sock.connect((self._host, self._port))
-        except (socket.timeout, OSError) as e:
+        except (TimeoutError, OSError) as e:
             sock.close()
             raise OSError(
                 f"Cannot reach {self._host}:{self._port} " f"(timeout {_CONNECT_TIMEOUT}s)"
@@ -625,10 +624,8 @@ class SFTPStorage(StorageBackend):
             try:
                 sftp.stat(current)
             except FileNotFoundError:
-                try:
+                with contextlib.suppress(OSError):  # Race condition or already exists
                     sftp.mkdir(current)
-                except OSError:
-                    pass  # Race condition or already exists
             self._created_dirs.add(current)
         self._created_dirs.add(remote_dir)
 
@@ -675,8 +672,8 @@ class SFTPStorage(StorageBackend):
                         self._recursive_remove(sftp, full_path)
                     else:
                         sftp.remove(full_path)
-                except FileNotFoundError:
-                    raise FileNotFoundError(f"Backup not found: {remote_name}")
+                except FileNotFoundError as e:
+                    raise FileNotFoundError(f"Backup not found: {remote_name}") from e
             finally:
                 sftp.close()
         finally:

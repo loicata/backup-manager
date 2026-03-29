@@ -167,7 +167,4 @@ def _add_file(
 def _is_excluded(filepath: Path, patterns: list[str]) -> bool:
     """Check if a path matches any exclusion pattern."""
     name = filepath.name
-    for pattern in patterns:
-        if fnmatch.fnmatch(name, pattern):
-            return True
-    return False
+    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)

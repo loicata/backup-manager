@@ -104,3 +104,82 @@ class TestEmailNotifier:
         config = self._make_config(to_address="a@test.com, b@test.com")
         # Just verify it doesn't crash when building
         assert "," in config.to_address
+
+    def test_build_html_cancelled(self):
+        html = _build_html("TestProfile", False, "Cancelled", cancelled=True)
+        assert "CANCELLED" in html
+        assert "#f39c12" in html  # Orange color
+        assert "TestProfile" in html
+
+    @patch("src.notifications.email_notifier.smtplib.SMTP")
+    def test_send_cancelled_report(self, mock_smtp_class):
+        mock_smtp = MagicMock()
+        mock_smtp_class.return_value.__enter__ = lambda s: mock_smtp
+        mock_smtp_class.return_value.__exit__ = lambda s, *a: None
+
+        config = self._make_config()
+        ok, msg = send_backup_report(
+            config,
+            "Profile1",
+            False,
+            "Backup cancelled by user",
+            cancelled=True,
+        )
+        assert ok is True
+        assert "sent" in msg.lower()
+
+    @patch("src.notifications.email_notifier.smtplib.SMTP")
+    def test_cancelled_subject_contains_cancelled(self, mock_smtp_class):
+        mock_smtp = MagicMock()
+        mock_smtp_class.return_value.__enter__ = lambda s: mock_smtp
+        mock_smtp_class.return_value.__exit__ = lambda s, *a: None
+
+        config = self._make_config()
+        send_backup_report(
+            config,
+            "Profile1",
+            False,
+            "Backup cancelled by user",
+            cancelled=True,
+        )
+        # Extract the email and decode the MIME subject
+        from email import message_from_string
+        from email.header import decode_header
+
+        call_args = mock_smtp.sendmail.call_args
+        raw_msg = call_args[0][2]
+        msg = message_from_string(raw_msg)
+        decoded_parts = decode_header(msg["Subject"])
+        subject = "".join(
+            part.decode(enc or "utf-8") if isinstance(part, bytes) else part
+            for part, enc in decoded_parts
+        )
+        assert "CANCELLED" in subject
+
+    def test_cancelled_not_sent_when_failure_disabled(self):
+        config = self._make_config(send_on_failure=False)
+        ok, msg = send_backup_report(
+            config,
+            "Test",
+            False,
+            "Cancelled",
+            cancelled=True,
+        )
+        assert ok is False
+        assert "disabled" in msg.lower()
+
+    def test_cancelled_sent_when_failure_enabled(self):
+        config = self._make_config(send_on_failure=True, send_on_success=False)
+        # Should not be blocked — cancelled follows failure trigger
+        with patch("src.notifications.email_notifier.smtplib.SMTP") as mock_smtp_class:
+            mock_smtp = MagicMock()
+            mock_smtp_class.return_value.__enter__ = lambda s: mock_smtp
+            mock_smtp_class.return_value.__exit__ = lambda s, *a: None
+            ok, msg = send_backup_report(
+                config,
+                "Test",
+                False,
+                "Cancelled",
+                cancelled=True,
+            )
+            assert ok is True

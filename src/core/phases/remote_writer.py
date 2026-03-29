@@ -6,6 +6,7 @@ Encryption uses a temporary encrypted file to avoid loading
 the entire plaintext into memory.
 """
 
+import contextlib
 import logging
 import tempfile
 from collections.abc import Callable
@@ -212,7 +213,5 @@ def _upload_encrypted(
             backend.upload_file(f, encrypted_path, size=enc_size)
     finally:
         # Always clean up temp file
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink()
-        except OSError:
-            pass

@@ -10,7 +10,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ MAX_HASH_WORKERS = 4
 MANIFEST_EXTENSION = ".wbverify"
 
 
-class FileStatus(str, Enum):
+class FileStatus(StrEnum):
     OK = "ok"
     MISMATCH = "mismatch"
     MISSING_IN_BACKUP = "missing_in_backup"

@@ -4,6 +4,7 @@ Uses pystray + Pillow for icon generation.
 Status states: idle, running, success, error.
 """
 
+import contextlib
 import logging
 import threading
 from collections.abc import Callable
@@ -124,10 +125,8 @@ class BackupTray:
     def stop(self) -> None:
         """Stop and remove the tray icon."""
         if self._icon:
-            try:
+            with contextlib.suppress(Exception):
                 self._icon.stop()
-            except Exception:
-                pass
             self._icon = None
         logger.info("Tray icon stopped")
 
@@ -145,10 +144,8 @@ class BackupTray:
     def notify(self, title: str, message: str) -> None:
         """Show a system notification."""
         if self._icon:
-            try:
+            with contextlib.suppress(Exception):
                 self._icon.notify(message, title)
-            except Exception:
-                pass
 
     def _on_show(self, icon=None, item=None):
         self._show_cb()

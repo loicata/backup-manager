@@ -34,23 +34,27 @@ class TestBuildIntegrityManifestFailFast:
         """OSError during hashing propagates immediately."""
         fi = _make_file(tmp_path)
 
-        with patch(
-            "src.core.phases.manifest.compute_sha256",
-            side_effect=OSError("disk read error"),
+        with (
+            patch(
+                "src.core.phases.manifest.compute_sha256",
+                side_effect=OSError("disk read error"),
+            ),
+            pytest.raises(OSError, match="disk read error"),
         ):
-            with pytest.raises(OSError, match="disk read error"):
-                build_integrity_manifest([fi])
+            build_integrity_manifest([fi])
 
     def test_hash_permission_error_raises(self, tmp_path):
         """PermissionError during hashing propagates immediately."""
         fi = _make_file(tmp_path)
 
-        with patch(
-            "src.core.phases.manifest.compute_sha256",
-            side_effect=PermissionError("access denied"),
+        with (
+            patch(
+                "src.core.phases.manifest.compute_sha256",
+                side_effect=PermissionError("access denied"),
+            ),
+            pytest.raises(PermissionError, match="access denied"),
         ):
-            with pytest.raises(PermissionError, match="access denied"):
-                build_integrity_manifest([fi])
+            build_integrity_manifest([fi])
 
     def test_success_still_works(self, tmp_path):
         """Normal case: all files hashed successfully."""

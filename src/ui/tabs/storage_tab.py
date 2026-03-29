@@ -30,7 +30,7 @@ class StorageTab(ScrollableTab):
             (StorageType.LOCAL, "External drive / USB stick", True),
             (StorageType.NETWORK, "Network folder (UNC)", True),
             (StorageType.SFTP, "Remote server SFTP (SSH)", FEAT_SFTP in self._features),
-            (StorageType.S3, "S3 Cloud Storage (beta)", FEAT_S3 in self._features),
+            (StorageType.S3, "S3 Cloud Storage", FEAT_S3 in self._features),
             (StorageType.PROTON, "Proton Drive (beta)", True),
         ]
 

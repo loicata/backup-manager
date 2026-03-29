@@ -5,6 +5,7 @@ Sensitive fields (passwords, keys) are encrypted via DPAPI or AES-256-GCM
 before writing to disk.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -12,7 +13,7 @@ import shutil
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from src.security.encryption import retrieve_password, store_password
@@ -23,12 +24,12 @@ logger = logging.getLogger(__name__)
 # --- Enums ---
 
 
-class BackupType(str, Enum):
+class BackupType(StrEnum):
     FULL = "full"
     DIFFERENTIAL = "differential"
 
 
-class StorageType(str, Enum):
+class StorageType(StrEnum):
     LOCAL = "local"
     NETWORK = "network"
     SFTP = "sftp"
@@ -36,7 +37,7 @@ class StorageType(str, Enum):
     PROTON = "proton"
 
 
-class ScheduleFrequency(str, Enum):
+class ScheduleFrequency(StrEnum):
     MANUAL = "manual"
     HOURLY = "hourly"
     DAILY = "daily"
@@ -44,7 +45,7 @@ class ScheduleFrequency(str, Enum):
     MONTHLY = "monthly"
 
 
-class RetentionPolicy(str, Enum):
+class RetentionPolicy(StrEnum):
     GFS = "gfs"
 
 
@@ -133,9 +134,10 @@ class StorageConfig:
             if not self.s3_bucket or not self.s3_bucket.strip():
                 raise ValueError("s3_bucket is required for S3 storage")
 
-        elif st == StorageType.PROTON:
-            if not self.proton_username or not self.proton_username.strip():
-                raise ValueError("proton_username is required for Proton storage")
+        elif st == StorageType.PROTON and (
+            not self.proton_username or not self.proton_username.strip()
+        ):
+            raise ValueError("proton_username is required for Proton storage")
 
     def is_remote(self) -> bool:
         """True if this storage requires network upload (no local path)."""
@@ -217,12 +219,57 @@ class BackupProfile:
     encrypt_mirror2: bool = False
     full_backup_every: int = 7  # Force a full backup every N backups (differential)
     differential_count: int = 0  # Backups since last full (auto-managed)
+    destinations_hash: str = ""  # SHA-256 of destination configs (auto-managed)
     bandwidth_limit_kbps: int = 0
     sort_order: int = 0
     active: bool = True
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_backup: str | None = None
     last_full_backup: str | None = None
+
+
+# --- Destination fingerprint ---
+
+# Fields that identify a storage destination (excludes secrets).
+_DESTINATION_IDENTITY_FIELDS = [
+    "storage_type",
+    "destination_path",
+    "sftp_host",
+    "sftp_port",
+    "sftp_remote_path",
+    "s3_bucket",
+    "s3_prefix",
+    "s3_region",
+    "s3_provider",
+    "s3_endpoint_url",
+    "proton_username",
+    "proton_remote_path",
+]
+
+
+def compute_destinations_hash(profile: BackupProfile) -> str:
+    """Compute a SHA-256 fingerprint of all destination configurations.
+
+    Includes the primary storage and all mirror destinations.
+    Only uses identity fields (no secrets like passwords or keys)
+    so that credential rotation does not trigger a forced full backup.
+
+    Args:
+        profile: Backup profile to fingerprint.
+
+    Returns:
+        Hex digest of the SHA-256 hash.
+    """
+    parts: list[str] = []
+    configs = [profile.storage] + list(profile.mirror_destinations)
+    for config in configs:
+        for field_name in _DESTINATION_IDENTITY_FIELDS:
+            value = getattr(config, field_name, "")
+            if isinstance(value, StrEnum):
+                value = value.value
+            parts.append(f"{field_name}={value}")
+        parts.append("|")  # Separator between destinations
+    return hashlib.sha256(":".join(parts).encode("utf-8")).hexdigest()
 
 
 # --- Sensitive fields that must be encrypted before save ---

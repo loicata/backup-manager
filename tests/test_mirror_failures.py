@@ -1,7 +1,8 @@
 """Tests for mirror phase failure handling.
 
 Verifies that mirror_backup attempts all mirrors, raises on any failure,
-handles encryption flags per mirror, local backends, and edge cases.
+handles encryption flags per mirror, local backends, edge cases, and
+GFS rotation on mirror destinations.
 """
 
 from pathlib import Path
@@ -84,20 +85,30 @@ def test_both_mirrors_fail_raises(tmp_path):
     assert "Mirror 2" in str(exc_info.value)
 
 
-def test_local_mirror_uses_upload(tmp_path):
-    """Local mirror calls backend.upload (not upload_file)."""
-    backend = MagicMock()
+def test_local_mirror_copies_files(tmp_path):
+    """Local mirror copies files to destination with progress."""
+    # Create a backup directory with a file
+    backup_dir = tmp_path / "backup_src"
+    backup_dir.mkdir()
+    (backup_dir / "test.txt").write_text("hello")
+
+    mirror_dest = tmp_path / "mirror_dest"
+    mirror_dest.mkdir()
+
+    from src.storage.local import LocalStorage
+
+    backend = LocalStorage(str(mirror_dest))
 
     results = mirror_backup(
-        backup_path=tmp_path,
+        backup_path=backup_dir,
         files=[],
-        mirror_configs=[_local_config()],
+        mirror_configs=[_local_config(str(mirror_dest))],
         backup_name="bk",
         get_backend=lambda _: backend,
     )
 
-    backend.upload.assert_called_once_with(tmp_path, "bk")
     assert results[0][1] is True
+    assert (mirror_dest / "bk" / "test.txt").read_text() == "hello"
 
 
 def test_empty_file_list_no_error(tmp_path):
@@ -175,3 +186,127 @@ def test_single_mirror_only(tmp_path):
     assert len(results) == 1
     assert results[0][0] == "Mirror 1"
     assert results[0][1] is True
+
+
+# ---------------------------------------------------------------------------
+# Mirror GFS rotation tests (BackupEngine._phase_rotate)
+# ---------------------------------------------------------------------------
+
+
+class TestMirrorRotation:
+    """GFS rotation is applied to mirror destinations too."""
+
+    @pytest.fixture
+    def engine_env(self, tmp_path):
+        """Minimal env for BackupEngine with source files."""
+        from src.core.backup_engine import BackupEngine
+        from src.core.config import (
+            BackupProfile,
+            BackupType,
+            ConfigManager,
+            RetentionConfig,
+            RetentionPolicy,
+            VerificationConfig,
+        )
+        from src.core.events import EventBus
+
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "a.txt").write_text("hello")
+
+        dest = tmp_path / "backups"
+        dest.mkdir()
+
+        config_dir = tmp_path / "config"
+        for sub in ("profiles", "logs", "manifests"):
+            (config_dir / sub).mkdir(parents=True, exist_ok=True)
+
+        cm = ConfigManager(config_dir=config_dir)
+        events = EventBus()
+        engine = BackupEngine(cm, events=events)
+
+        profile = BackupProfile(
+            id="mirror_rot",
+            name="MirrorRot",
+            source_paths=[str(source)],
+            exclude_patterns=[],
+            backup_type=BackupType.FULL,
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(dest),
+            ),
+            verification=VerificationConfig(auto_verify=True),
+            retention=RetentionConfig(
+                policy=RetentionPolicy.GFS,
+                gfs_daily=1,
+                gfs_weekly=0,
+                gfs_monthly=0,
+            ),
+        )
+
+        return {
+            "engine": engine,
+            "profile": profile,
+            "dest": dest,
+        }
+
+    @patch("src.core.backup_engine.rotate_backups")
+    def test_mirror_rotation_called(self, mock_rotate, engine_env):
+        """rotate_backups is called for each mirror destination."""
+        mock_rotate.return_value = 0
+        profile = engine_env["profile"]
+        mirror_dest = engine_env["dest"] / "mirror1"
+        mirror_dest.mkdir()
+
+        profile.mirror_destinations = [
+            StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(mirror_dest),
+            ),
+        ]
+
+        engine = engine_env["engine"]
+        engine.run_backup(profile)
+
+        # Called twice: once for primary, once for mirror
+        assert mock_rotate.call_count == 2
+
+    @patch("src.core.backup_engine.rotate_backups")
+    def test_mirror_rotation_failure_does_not_fail_backup(self, mock_rotate, engine_env):
+        """Mirror rotation failure is logged but does not fail the backup."""
+        call_count = {"n": 0}
+
+        def side_effect(backend, retention, events=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return 0  # Primary rotation OK
+            raise ConnectionError("mirror unreachable")
+
+        mock_rotate.side_effect = side_effect
+
+        profile = engine_env["profile"]
+        mirror_dest = engine_env["dest"] / "mirror1"
+        mirror_dest.mkdir()
+        profile.mirror_destinations = [
+            StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(mirror_dest),
+            ),
+        ]
+
+        engine = engine_env["engine"]
+        # Should NOT raise despite mirror rotation failure
+        result = engine.run_backup(profile)
+        assert result.files_processed > 0
+
+    @patch("src.core.backup_engine.rotate_backups")
+    def test_no_mirrors_no_extra_rotation(self, mock_rotate, engine_env):
+        """Without mirrors, rotate_backups is called only once (primary)."""
+        mock_rotate.return_value = 0
+        profile = engine_env["profile"]
+        profile.mirror_destinations = []
+
+        engine = engine_env["engine"]
+        engine.run_backup(profile)
+
+        assert mock_rotate.call_count == 1

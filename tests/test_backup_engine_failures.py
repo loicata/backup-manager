@@ -112,9 +112,11 @@ class TestWriteFailures:
     def test_disk_full_during_copy(self, env, profile):
         """Write phase must raise when copy2 fails — zero tolerance for errors."""
         engine = _engine(env)
-        with patch("shutil.copy2", side_effect=OSError("No space left on device")):
-            with pytest.raises(Exception, match="No space left"):
-                engine.run_backup(profile)
+        with (
+            patch("shutil.copy2", side_effect=OSError("No space left on device")),
+            pytest.raises(Exception, match="No space left"),
+        ):
+            engine.run_backup(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -147,12 +149,14 @@ class TestVerifyFailures:
     def test_verification_mismatch_fails_backup(self, env, profile):
         """Verification failure must fail the entire backup."""
         engine = _engine(env)
-        with patch(
-            "src.core.backup_engine.verify_backup",
-            return_value=(False, "Verification failed: 1/2 errors\n  - Mismatch: a.txt"),
+        with (
+            patch(
+                "src.core.backup_engine.verify_backup",
+                return_value=(False, "Verification failed: 1/2 errors\n  - Mismatch: a.txt"),
+            ),
+            pytest.raises(RuntimeError, match="Verification failed"),
         ):
-            with pytest.raises(RuntimeError, match="Verification failed"):
-                engine.run_backup(profile)
+            engine.run_backup(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -187,43 +191,41 @@ class TestMirrorFailures:
 
     def test_mirror1_fails_both_attempted_then_raises(self, env, profile):
         """Mirror 1 fails, Mirror 2 still attempted, then backup fails."""
+        mirror1_dir = env["dest"] / "mirror1"
+        mirror2_dir = env["dest"] / "mirror2"
+        mirror1_dir.mkdir()
+        mirror2_dir.mkdir()
+
         mirror1 = StorageConfig(
             storage_type=StorageType.LOCAL,
-            destination_path=str(env["dest"] / "mirror1"),
+            destination_path=str(mirror1_dir),
         )
         mirror2 = StorageConfig(
             storage_type=StorageType.LOCAL,
-            destination_path=str(env["dest"] / "mirror2"),
+            destination_path=str(mirror2_dir),
         )
         profile.mirror_destinations = [mirror1, mirror2]
 
-        upload_calls = {"count": 0}
+        copy_calls = {"count": 0}
+        original_copy = __import__(
+            "src.core.phases.mirror", fromlist=["_copy_local_mirror"]
+        )._copy_local_mirror
 
-        def patched_get_backend(self_engine, storage):
-            backend = MagicMock()
-            backend.list_backups.return_value = []
-            if storage is mirror1:
-
-                def fail_upload(*a, **kw):
-                    upload_calls["count"] += 1
-                    raise RuntimeError("mirror1 down")
-
-                backend.upload.side_effect = fail_upload
-            else:
-
-                def ok_upload(*a, **kw):
-                    upload_calls["count"] += 1
-
-                backend.upload.side_effect = ok_upload
-            return backend
+        def patched_copy(backup_path, backend, backup_name, phase_log, cancel_check=None):
+            copy_calls["count"] += 1
+            if copy_calls["count"] == 1:
+                raise RuntimeError("mirror1 down")
+            original_copy(backup_path, backend, backup_name, phase_log, cancel_check)
 
         engine = _engine(env)
-        with patch.object(BackupEngine, "_get_backend", patched_get_backend):
-            with pytest.raises(RuntimeError, match="Mirror upload failed"):
-                engine.run_backup(profile)
+        with (
+            patch("src.core.phases.mirror._copy_local_mirror", patched_copy),
+            pytest.raises(RuntimeError, match="Mirror upload failed"),
+        ):
+            engine.run_backup(profile)
 
         # Both mirrors were attempted
-        assert upload_calls["count"] == 2
+        assert copy_calls["count"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +288,11 @@ class TestCancellation:
             engine.cancel()
             return original(ctx)
 
-        with patch.object(engine, phase_method, side_effect=cancel_then_run):
-            with pytest.raises(CancelledError):
-                engine.run_backup(profile)
+        with (
+            patch.object(engine, phase_method, side_effect=cancel_then_run),
+            pytest.raises(CancelledError),
+        ):
+            engine.run_backup(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +352,9 @@ class TestVerifyStopsPipeline:
                 "_get_backend",
                 return_value=mock_backend,
             ),
+            pytest.raises(RuntimeError, match="Verification failed"),
         ):
-            with pytest.raises(RuntimeError, match="Verification failed"):
-                engine.run_backup(profile)
+            engine.run_backup(profile)
 
         # Mirror was NOT reached — upload never called
         mock_backend.upload.assert_not_called()

@@ -9,6 +9,7 @@ for error accumulation.
 
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 from src.core.backup_result import BackupResult
@@ -17,6 +18,7 @@ from src.core.config import (
     BackupType,
     StorageConfig,
     StorageType,
+    compute_destinations_hash,
 )
 from src.core.events import (
     BACKUP_DONE,
@@ -35,6 +37,7 @@ from src.core.phases.encryptor import encrypt_backup
 from src.core.phases.filter import (
     build_updated_manifest,
     filter_changed_files,
+    load_manifest,
     save_manifest,
 )
 from src.core.phases.local_writer import generate_backup_name
@@ -140,6 +143,22 @@ class BackupEngine:
         # Generate backup name AFTER promotion so the tag is correct
         type_tag = "DIFF" if ctx.profile.backup_type == BackupType.DIFFERENTIAL else "FULL"
         ctx.backup_name = generate_backup_name(ctx.profile.name, type_tag)
+
+        # Log backup type and reference for differential
+        if ctx.profile.backup_type == BackupType.DIFFERENTIAL:
+            manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
+            manifest = load_manifest(manifest_path)
+            meta = manifest.get("__metadata__", {})
+            ref_name = meta.get("backup_name")
+            if ref_name:
+                self._log(f"Backup type: differential (reference: {ref_name})")
+            else:
+                self._log("Backup type: differential")
+        else:
+            if ctx.forced_full:
+                self._log("Backup type: full (auto-promoted)")
+            else:
+                self._log("Backup type: full")
 
         # Phase 1: Collect
         self._phase_collect(ctx)
@@ -516,11 +535,12 @@ class BackupEngine:
             )
 
     def _maybe_force_full(self, ctx: PipelineContext) -> None:
-        """Auto-promote differential to full when cycle threshold is reached.
+        """Auto-promote differential to full when needed.
 
-        When a profile is set to differential, a full backup is forced
-        every ``full_backup_every`` runs.  The first differential (no
-        manifest) is also promoted to full automatically.
+        A full backup is forced when:
+        - No manifest exists (first run or manifest deleted).
+        - The differential cycle threshold is reached.
+        - Storage destinations have changed (new mirror, different path, etc.).
 
         Sets ``ctx.forced_full`` to True when promotion happens.  The
         profile's ``backup_type`` is changed to FULL for this run only
@@ -533,11 +553,18 @@ class BackupEngine:
         manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
         no_manifest = not manifest_path.exists()
         cycle_reached = ctx.profile.differential_count >= ctx.profile.full_backup_every
+        current_hash = compute_destinations_hash(ctx.profile)
+        destinations_changed = ctx.profile.destinations_hash != current_hash
 
-        if no_manifest or cycle_reached:
+        if no_manifest or cycle_reached or destinations_changed:
             ctx.forced_full = True
             ctx.profile.backup_type = BackupType.FULL
-            reason = "no manifest" if no_manifest else "cycle reached"
+            if destinations_changed:
+                reason = "destinations changed"
+            elif no_manifest:
+                reason = "no manifest"
+            else:
+                reason = "cycle reached"
             self._log(f"Forcing full backup ({reason})")
 
     def _phase_update_delta(self, ctx: PipelineContext) -> None:
@@ -553,8 +580,13 @@ class BackupEngine:
         if ctx.profile.backup_type == BackupType.FULL:
             self._phase("Updating manifest...")
             full_manifest = build_updated_manifest(ctx.all_files, ctx.file_hashes)
+            full_manifest["__metadata__"] = {
+                "backup_name": ctx.backup_name,
+                "created_at": datetime.now().isoformat(),
+            }
             save_manifest(full_manifest, manifest_path)
             ctx.profile.differential_count = 0
+            ctx.profile.destinations_hash = compute_destinations_hash(ctx.profile)
         else:
             ctx.profile.differential_count += 1
 
@@ -722,6 +754,17 @@ class BackupEngine:
             ctx.profile.retention,
             self._events,
         )
+
+        # Rotate mirrors with the same retention policy
+        for i, config in enumerate(ctx.profile.mirror_destinations):
+            mirror_name = f"Mirror {i + 1}"
+            try:
+                backend = self._get_backend(config)
+                deleted = rotate_backups(backend, ctx.profile.retention, self._events)
+                if deleted:
+                    self._log(f"{mirror_name}: rotated {deleted} old backup(s)")
+            except Exception as e:
+                self._log(f"{mirror_name}: rotation failed — {e}")
 
     def _get_backend(self, storage: StorageConfig) -> StorageBackend:
         """Create a storage backend from config.

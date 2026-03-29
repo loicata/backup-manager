@@ -4,6 +4,7 @@ Uses observer pattern: core emits events, UI subscribes to them.
 Thread-safe for use with background backup threads.
 """
 
+import contextlib
 import logging
 import threading
 from collections import defaultdict
@@ -44,11 +45,8 @@ class EventBus:
 
     def unsubscribe(self, event_type: str, callback: Callable) -> None:
         """Remove a callback for an event type."""
-        with self._lock:
-            try:
-                self._subscribers[event_type].remove(callback)
-            except ValueError:
-                pass
+        with self._lock, contextlib.suppress(ValueError):
+            self._subscribers[event_type].remove(callback)
 
     def emit(self, event_type: str, **data: Any) -> None:
         """Fire an event, calling all registered callbacks.

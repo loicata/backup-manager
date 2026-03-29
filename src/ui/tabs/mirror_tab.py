@@ -1,5 +1,6 @@
 """Mirror tab: optional mirror destination."""
 
+import contextlib
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -45,7 +46,7 @@ class MirrorTab(ScrollableTab):
             (StorageType.LOCAL, "External drive / USB stick", True),
             (StorageType.NETWORK, "Network folder (UNC)", True),
             (StorageType.SFTP, "Remote server SFTP (SSH)", FEAT_SFTP in self._features),
-            (StorageType.S3, "S3 Cloud Storage (beta)", FEAT_S3 in self._features),
+            (StorageType.S3, "S3 Cloud Storage", FEAT_S3 in self._features),
             (StorageType.PROTON, "Proton Drive (beta)", True),
         ]
 
@@ -149,7 +150,17 @@ class MirrorTab(ScrollableTab):
         ttk.Combobox(
             f,
             textvariable=self.s3_provider_var,
-            values=["aws", "minio", "wasabi", "ovh", "other"],
+            values=[
+                "aws",
+                "minio",
+                "wasabi",
+                "ovh",
+                "scaleway",
+                "digitalocean",
+                "cloudflare",
+                "backblaze_s3",
+                "other",
+            ],
             state="readonly",
         ).pack(fill="x")
         for label, key, default in [
@@ -217,10 +228,8 @@ class MirrorTab(ScrollableTab):
     def _set_state_recursive(self, widget, state):
         if widget is self.test_label:
             return
-        try:
+        with contextlib.suppress(tk.TclError):
             widget.configure(state=state)
-        except tk.TclError:
-            pass
         for child in widget.winfo_children():
             self._set_state_recursive(child, state)
 
@@ -289,6 +298,7 @@ class MirrorTab(ScrollableTab):
                 for key, var in self._sftp_vars.items():
                     var.set(str(getattr(m, key, "")))
             if hasattr(self, "_s3_vars"):
+                self.s3_provider_var.set(getattr(m, "s3_provider", "aws"))
                 for key, var in self._s3_vars.items():
                     var.set(str(getattr(m, key, "")))
             if hasattr(self, "_proton_vars"):

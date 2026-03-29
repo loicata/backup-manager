@@ -1,5 +1,6 @@
 """Schedule tab: backup scheduling configuration."""
 
+import contextlib
 import tkinter as tk
 from tkinter import ttk
 
@@ -107,10 +108,8 @@ class ScheduleTab(ScrollableTab):
             self._set_state_recursive(child, state)
 
     def _set_state_recursive(self, widget, state):
-        try:
+        with contextlib.suppress(tk.TclError):
             widget.configure(state=state)
-        except tk.TclError:
-            pass
         for child in widget.winfo_children():
             self._set_state_recursive(child, state)
 

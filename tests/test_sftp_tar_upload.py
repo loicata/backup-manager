@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from src.core.exceptions import WriteError
 from src.core.phases.collector import FileInfo
 
 # ---------------------------------------------------------------------------
@@ -447,7 +448,7 @@ class TestTarIntegration:
         # Create files of various sizes (including empty and large)
         sizes = [0, 1, 100, 1024, 10240, 65536]
         files_info = []
-        for i, size in enumerate(sizes):
+        for _i, size in enumerate(sizes):
             p = source_dir / f"file_{size}b.bin"
             p.write_bytes(b"\x42" * size)
             files_info.append((p, f"file_{size}b.bin", size))
@@ -549,7 +550,7 @@ class TestRemoteWriterTarIntegration:
         backend.supports_tar_stream = True
         backend.upload_tar_stream.side_effect = OSError("network down")
 
-        with pytest.raises(Exception):
+        with pytest.raises(WriteError):
             write_remote(files, backend, "backup_2026")
 
         backend.disconnect.assert_called_once()

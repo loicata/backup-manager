@@ -46,7 +46,7 @@ def encrypt_backup(
 
     # Encrypt all files in directory
     files = list(backup_path.rglob("*"))
-    files = [f for f in files if f.is_file() and not f.suffix == ".wbenc"]
+    files = [f for f in files if f.is_file() and f.suffix != ".wbenc"]
     total = len(files)
 
     phase_log.info(f"Encrypting {total} files...")

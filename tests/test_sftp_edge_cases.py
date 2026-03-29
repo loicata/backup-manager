@@ -304,8 +304,10 @@ class TestDeleteBackup:
             mock_sftp.stat.side_effect = FileNotFoundError
 
             mock_sock = MagicMock()
-            with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
-                with pytest.raises(FileNotFoundError, match="not found"):
-                    storage.delete_backup("ghost")
+            with (
+                patch("src.storage.sftp.socket.socket", return_value=mock_sock),
+                pytest.raises(FileNotFoundError, match="not found"),
+            ):
+                storage.delete_backup("ghost")
         finally:
             _cleanup_paramiko()

@@ -4,6 +4,7 @@ import os
 from unittest.mock import patch
 
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from src.security.encryption import (
     KEY_SIZE,
@@ -66,7 +67,7 @@ class TestEncryptDecryptBytes:
     def test_wrong_password_raises(self):
         data = b"Secret"
         encrypted = encrypt_bytes(data, "correct")
-        with pytest.raises(Exception):
+        with pytest.raises(InvalidTag):
             decrypt_bytes(encrypted, "wrong")
 
     def test_truncated_data_raises(self):

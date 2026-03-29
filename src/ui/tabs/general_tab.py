@@ -1,6 +1,7 @@
 """General tab: profile name, backup type, source paths, exclusions,
 bandwidth limit, auto-start, and retry on failure."""
 
+import contextlib
 import logging
 import os
 import threading
@@ -305,10 +306,8 @@ class GeneralTab(ScrollableTab):
             if cancel.is_set():
                 return
             formatted = self._format_size(total)
-            try:
+            with contextlib.suppress(RuntimeError):  # Widget destroyed
                 self.after(0, lambda: self.total_size_var.set(f"Total: {formatted}"))
-            except RuntimeError:
-                pass  # Widget destroyed
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()

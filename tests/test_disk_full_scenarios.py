@@ -42,9 +42,11 @@ class TestLocalWriterDiskFull:
         fi = _make_file_info(tmp_path)
         enospc = OSError(errno.ENOSPC, "No space left on device")
 
-        with patch("src.core.phases.local_writer.shutil.copy2", side_effect=enospc):
-            with pytest.raises(WriteError, match="file.txt") as exc_info:
-                write_flat([fi], tmp_path / "dst", "bk1")
+        with (
+            patch("src.core.phases.local_writer.shutil.copy2", side_effect=enospc),
+            pytest.raises(WriteError, match="file.txt") as exc_info,
+        ):
+            write_flat([fi], tmp_path / "dst", "bk1")
 
         assert isinstance(exc_info.value.original, OSError)
 
@@ -55,9 +57,11 @@ class TestLocalWriterDiskFull:
         fi = _make_file_info(tmp_path)
         enospc = OSError(errno.ENOSPC, "No space left on device")
 
-        with patch.object(Path, "mkdir", side_effect=enospc):
-            with pytest.raises(OSError, match="No space left"):
-                write_flat([fi], tmp_path / "dst", "bk2")
+        with (
+            patch.object(Path, "mkdir", side_effect=enospc),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            write_flat([fi], tmp_path / "dst", "bk2")
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +105,11 @@ class TestManifestDiskFull:
         backup_dir.mkdir()
 
         enospc = OSError(errno.ENOSPC, "No space left on device")
-        with patch.object(Path, "write_text", side_effect=enospc):
-            with pytest.raises(OSError, match="No space left"):
-                save_integrity_manifest(manifest, backup_dir)
+        with (
+            patch.object(Path, "write_text", side_effect=enospc),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            save_integrity_manifest(manifest, backup_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +127,11 @@ class TestConfigSaveDiskFull:
         filepath = cm.profiles_dir / "test.json"
 
         enospc = OSError(errno.ENOSPC, "No space left on device")
-        with patch.object(Path, "write_text", side_effect=enospc):
-            with pytest.raises(OSError, match="No space left"):
-                cm._atomic_write(filepath, {"key": "value"})
+        with (
+            patch.object(Path, "write_text", side_effect=enospc),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            cm._atomic_write(filepath, {"key": "value"})
 
     def test_save_profile_enospc(self, tmp_path):
         from src.core.config import BackupProfile, ConfigManager
@@ -132,9 +140,11 @@ class TestConfigSaveDiskFull:
         profile = BackupProfile(name="Test")
 
         enospc = OSError(errno.ENOSPC, "No space left on device")
-        with patch.object(Path, "write_text", side_effect=enospc):
-            with pytest.raises(OSError, match="No space left"):
-                cm.save_profile(profile)
+        with (
+            patch.object(Path, "write_text", side_effect=enospc),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            cm.save_profile(profile)
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +166,11 @@ class TestLocalStorageDiskFull:
         (tmp_path / "dest").mkdir()
 
         enospc = OSError(errno.ENOSPC, "No space left on device")
-        with patch("src.storage.local.shutil.copytree", side_effect=enospc):
-            with pytest.raises(OSError, match="No space left"):
-                storage.upload(src_dir, "backup1")
+        with (
+            patch("src.storage.local.shutil.copytree", side_effect=enospc),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            storage.upload(src_dir, "backup1")
 
 
 # ---------------------------------------------------------------------------

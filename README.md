@@ -27,7 +27,7 @@ A reliable, secure, and user-friendly Windows backup application designed for pe
 | **Local / USB** | Backup to any local drive, external HDD, or USB stick |
 | **Network (UNC)** | Backup to shared network folders (`\\server\share`) |
 | **SFTP (SSH)** | Backup to any remote server with password or SSH key authentication |
-| **S3 Cloud** | Backup to Amazon S3 or any S3-compatible provider (beta) |
+| **S3 Cloud** | Backup to Amazon S3 or any S3-compatible provider |
 | **Proton Drive** | Backup to Proton Drive via rclone integration (beta) |
 
 ### Mirrors
@@ -41,8 +41,7 @@ A reliable, secure, and user-friendly Windows backup application designed for pe
 | Mode | Description |
 |------|-------------|
 | **Full** | Complete copy of all selected files every time |
-| **Incremental** | Only files changed since the last backup (beta) |
-| **Differential** | Only files changed since the last full backup (beta) |
+| **Differential** | Only files changed since the last full backup |
 
 ### Retention (GFS rotation)
 
@@ -83,8 +82,7 @@ Old backups are automatically deleted when the configured limits are exceeded. T
 - **Restore** from any local backup folder with optional decryption.
 - **Retrieve** backups stored on remote servers (SFTP, S3, Proton Drive) directly from the Recovery tab — no external tool required.
 
-### Email notifications (beta)
-
+### Email notifications
 - SMTP-based email alerts on backup success or failure.
 - Configurable recipient, subject, and server settings.
 - HTML-formatted reports with backup details.

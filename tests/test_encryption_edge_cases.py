@@ -8,6 +8,7 @@ import os
 from unittest.mock import patch
 
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from src.security.encryption import (
     KEY_SIZE,
@@ -36,7 +37,7 @@ class TestGCMAuthenticationTampering:
         tampered[ct_start + 1] ^= 0xFF
         tampered = bytes(tampered)
 
-        with pytest.raises(Exception):
+        with pytest.raises(InvalidTag):
             decrypt_bytes(tampered, "strongpass")
 
     def test_tampered_nonce_fails_decryption(self):
@@ -48,7 +49,7 @@ class TestGCMAuthenticationTampering:
         tampered[SALT_SIZE] ^= 0x01  # Flip first nonce byte
         tampered = bytes(tampered)
 
-        with pytest.raises(Exception):
+        with pytest.raises(InvalidTag):
             decrypt_bytes(tampered, "password123")
 
     def test_tampered_salt_derives_wrong_key(self):
@@ -60,7 +61,7 @@ class TestGCMAuthenticationTampering:
         tampered[0] ^= 0xFF  # Flip first salt byte
         tampered = bytes(tampered)
 
-        with pytest.raises(Exception):
+        with pytest.raises(InvalidTag):
             decrypt_bytes(tampered, "password123")
 
 

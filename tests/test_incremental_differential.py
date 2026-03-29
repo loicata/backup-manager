@@ -644,3 +644,138 @@ class TestManyFiles:
         changed = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 0
+
+
+# ===========================================================================
+# Destination change detection tests
+# ===========================================================================
+
+
+class TestDestinationChangeForcesFull:
+    """Changing destinations forces a full backup."""
+
+    @staticmethod
+    def _make_env(tmp_path):
+        """Create a minimal backup environment."""
+        from src.core.config import (
+            BackupProfile,
+            BackupType,
+            ConfigManager,
+            StorageConfig,
+            StorageType,
+        )
+
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "a.txt").write_text("hello")
+
+        dest = tmp_path / "backups"
+        dest.mkdir()
+
+        mgr = ConfigManager(config_dir=tmp_path / "config")
+        profile = BackupProfile(
+            name="DestChange",
+            source_paths=[str(source)],
+            backup_type=BackupType.DIFFERENTIAL,
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(dest),
+            ),
+        )
+
+        return mgr, profile, source, dest
+
+    def test_destination_change_forces_full(self, tmp_path):
+        """Changing the storage path forces a full backup."""
+        from src.core.backup_engine import BackupEngine
+
+        mgr, profile, source, dest = self._make_env(tmp_path)
+
+        # Run 1: first differential → auto-promoted to full (no manifest)
+        engine = BackupEngine(mgr)
+        r1 = engine.run_backup(profile)
+        assert r1.files_processed == 1
+        assert profile.destinations_hash != ""
+
+        # Run 2: no changes → skipped (differential)
+        engine2 = BackupEngine(mgr)
+        r2 = engine2.run_backup(profile)
+        assert r2.files_skipped == 1
+
+        # Change destination path
+        new_dest = tmp_path / "backups2"
+        new_dest.mkdir()
+        profile.storage.destination_path = str(new_dest)
+
+        # Run 3: destination changed → forced full
+        engine3 = BackupEngine(mgr)
+        r3 = engine3.run_backup(profile)
+        assert r3.files_processed == 1
+        assert r3.files_skipped == 0
+
+    def test_mirror_added_forces_full(self, tmp_path):
+        """Adding a mirror destination forces a full backup."""
+        from src.core.backup_engine import BackupEngine
+        from src.core.config import StorageConfig, StorageType
+
+        mgr, profile, source, dest = self._make_env(tmp_path)
+
+        # Run 1: first full
+        engine = BackupEngine(mgr)
+        engine.run_backup(profile)
+        old_hash = profile.destinations_hash
+
+        # Run 2: differential (no changes → skipped)
+        engine2 = BackupEngine(mgr)
+        r2 = engine2.run_backup(profile)
+        assert r2.files_skipped == 1
+
+        # Add a mirror
+        mirror_dest = tmp_path / "mirror"
+        mirror_dest.mkdir()
+        profile.mirror_destinations = [
+            StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(mirror_dest),
+            ),
+        ]
+
+        # Run 3: mirror added → forced full
+        engine3 = BackupEngine(mgr)
+        r3 = engine3.run_backup(profile)
+        assert r3.files_processed == 1
+        assert r3.files_skipped == 0
+        assert profile.destinations_hash != old_hash
+
+    def test_same_destinations_stays_differential(self, tmp_path):
+        """Same destinations: differential stays differential."""
+        from src.core.backup_engine import BackupEngine
+
+        mgr, profile, source, dest = self._make_env(tmp_path)
+
+        # Run 1: first full
+        engine = BackupEngine(mgr)
+        engine.run_backup(profile)
+
+        # Run 2: same config, no file changes → differential, all skipped
+        engine2 = BackupEngine(mgr)
+        r2 = engine2.run_backup(profile)
+        assert r2.files_skipped == 1
+        assert r2.files_processed == 0
+
+    def test_destinations_hash_persisted(self, tmp_path):
+        """destinations_hash is saved to profile after full backup."""
+        from src.core.config import compute_destinations_hash
+
+        mgr, profile, source, dest = self._make_env(tmp_path)
+
+        assert profile.destinations_hash == ""
+
+        from src.core.backup_engine import BackupEngine
+
+        engine = BackupEngine(mgr)
+        engine.run_backup(profile)
+
+        expected = compute_destinations_hash(profile)
+        assert profile.destinations_hash == expected
+        assert len(profile.destinations_hash) == 64

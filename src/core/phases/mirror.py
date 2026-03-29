@@ -9,6 +9,7 @@ causes the entire backup to be marked as failed.
 """
 
 import logging
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -75,6 +76,10 @@ def mirror_backup(
             should_encrypt = i < len(flags) and flags[i]
             mirror_pw = encrypt_password if should_encrypt else ""
 
+            has_local_backup = (
+                backup_path is not None and backup_path != Path(".") and backup_path.is_dir()
+            )
+
             if config.is_remote():
                 # Stream files directly to remote mirror
                 write_remote(
@@ -85,9 +90,24 @@ def mirror_backup(
                     events=events,
                     cancel_check=cancel_check,
                 )
+            elif has_local_backup:
+                # Local mirror from local backup: copy file-by-file with progress
+                _copy_local_mirror(
+                    backup_path,
+                    backend,
+                    backup_name,
+                    phase_log,
+                    cancel_check,
+                )
             else:
-                # Local/network mirror: copy the backup
-                backend.upload(backup_path, backup_name)
+                # Local mirror but primary is remote: copy source files
+                _write_source_files_to_local(
+                    files,
+                    backend,
+                    backup_name,
+                    phase_log,
+                    cancel_check,
+                )
 
             results.append((mirror_name, True, "OK"))
             phase_log.info(f"{mirror_name} ({mirror_desc}): upload complete")
@@ -104,6 +124,93 @@ def mirror_backup(
         raise RuntimeError(f"Mirror upload failed: {details}")
 
     return results
+
+
+def _copy_local_mirror(
+    backup_path: Path,
+    backend,
+    backup_name: str,
+    phase_log: PhaseLogger,
+    cancel_check: Callable[[], None] | None = None,
+) -> None:
+    """Copy a local backup to a mirror destination with file-by-file progress.
+
+    Args:
+        backup_path: Path to the local backup directory.
+        backend: Local/network storage backend.
+        backup_name: Backup name for the destination.
+        phase_log: Logger for progress events.
+        cancel_check: Callable that raises CancelledError if cancelled.
+    """
+    if not backup_path.is_dir():
+        backend.upload(backup_path, backup_name)
+        return
+
+    target = Path(backend._dest) / backup_name
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+
+    # Collect all files to copy
+    source_files = [f for f in backup_path.rglob("*") if f.is_file()]
+    total = len(source_files)
+
+    for i, src_file in enumerate(source_files):
+        if cancel_check is not None:
+            cancel_check()
+
+        rel = src_file.relative_to(backup_path)
+        dst_file = target / rel
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst_file)
+
+        phase_log.progress(
+            current=i + 1,
+            total=total,
+            filename=str(rel),
+            phase="mirror_upload",
+        )
+
+
+def _write_source_files_to_local(
+    files: list[FileInfo],
+    backend,
+    backup_name: str,
+    phase_log: PhaseLogger,
+    cancel_check: Callable[[], None] | None = None,
+) -> None:
+    """Copy source files to a local mirror when primary storage is remote.
+
+    When the primary backup is on a remote server (SFTP/S3/Proton),
+    there is no local backup directory to copy from. Instead, copy
+    the original source files directly to the mirror destination,
+    preserving relative paths.
+
+    Args:
+        files: Source files collected by the pipeline.
+        backend: Local/network storage backend.
+        backup_name: Backup name for the destination subdirectory.
+        phase_log: Logger for progress events.
+        cancel_check: Callable that raises CancelledError if cancelled.
+    """
+    target = Path(backend._dest) / backup_name
+    target.mkdir(parents=True, exist_ok=True)
+
+    total = len(files)
+    for i, f in enumerate(files):
+        if cancel_check is not None:
+            cancel_check()
+
+        dst_file = target / f.relative_path
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f.source_path, dst_file)
+
+        phase_log.progress(
+            current=i + 1,
+            total=total,
+            filename=f.relative_path,
+            phase="mirror_upload",
+        )
 
 
 def _describe_mirror(config: StorageConfig) -> str:

@@ -44,7 +44,7 @@ def _has_dpapi() -> bool:
     try:
         import ctypes
 
-        ctypes.windll.crypt32.CryptProtectData
+        _ = ctypes.windll.crypt32.CryptProtectData
         return True
     except (AttributeError, OSError):
         return False

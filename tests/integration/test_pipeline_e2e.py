@@ -235,3 +235,122 @@ class TestExcludePatterns:
 
         # Should still be 3 files (tmp excluded)
         assert stats.files_found == 3
+
+
+class TestBackupTypeLogs:
+    """Test that backup type and reference info appear in log messages."""
+
+    def test_full_backup_logs_type(self, e2e_env, full_profile):
+        """Full backup should log 'Backup type: full'."""
+        full_profile.retention = RetentionConfig(
+            policy=RetentionPolicy.GFS,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
+        )
+        engine = BackupEngine(e2e_env["config_manager"])
+        stats = engine.run_backup(full_profile)
+
+        assert any("Backup type: full" in m for m in stats.log_lines)
+
+    def test_differential_logs_reference(self, e2e_env, full_profile):
+        """Differential backup should log reference to the last full backup."""
+        full_profile.retention = RetentionConfig(
+            policy=RetentionPolicy.GFS,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
+        )
+        engine = BackupEngine(e2e_env["config_manager"])
+
+        # Run a full backup first to create the manifest with metadata
+        full_profile.backup_type = BackupType.FULL
+        stats_full = engine.run_backup(full_profile)
+        (
+            stats_full.backup_path.rsplit("\\", 1)[-1]
+            if "\\" in stats_full.backup_path
+            else stats_full.backup_path.rsplit("/", 1)[-1]
+        )
+
+        # Now run a differential
+        full_profile.backup_type = BackupType.DIFFERENTIAL
+        (e2e_env["source"] / "changed.txt").write_text("new", encoding="utf-8")
+        stats_diff = engine.run_backup(full_profile)
+
+        # Should mention backup type and reference
+        type_logs = [m for m in stats_diff.log_lines if "Backup type:" in m]
+        assert len(type_logs) == 1
+        assert "differential" in type_logs[0]
+        assert "reference:" in type_logs[0]
+        assert "_FULL_" in type_logs[0]
+
+    def test_auto_promoted_full_logs_correctly(self, e2e_env, full_profile):
+        """Auto-promoted differential should log 'full (auto-promoted)'."""
+        full_profile.retention = RetentionConfig(
+            policy=RetentionPolicy.GFS,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
+        )
+        engine = BackupEngine(e2e_env["config_manager"])
+
+        # Set to differential with no prior manifest → auto-promotes to full
+        full_profile.backup_type = BackupType.DIFFERENTIAL
+        stats = engine.run_backup(full_profile)
+
+        assert any("Backup type: full (auto-promoted)" in m for m in stats.log_lines)
+
+    def test_manifest_stores_metadata(self, e2e_env, full_profile):
+        """Full backup manifest should contain __metadata__ with backup_name."""
+        full_profile.retention = RetentionConfig(
+            policy=RetentionPolicy.GFS,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
+        )
+        engine = BackupEngine(e2e_env["config_manager"])
+
+        full_profile.backup_type = BackupType.FULL
+        engine.run_backup(full_profile)
+
+        from src.core.phases.filter import load_manifest
+
+        manifest_path = e2e_env["config_manager"].get_manifest_path(full_profile.id)
+        manifest = load_manifest(manifest_path)
+
+        assert "__metadata__" in manifest
+        assert "backup_name" in manifest["__metadata__"]
+        assert "_FULL_" in manifest["__metadata__"]["backup_name"]
+        assert "created_at" in manifest["__metadata__"]
+
+    def test_differential_without_metadata_logs_gracefully(self, e2e_env, full_profile):
+        """Differential with old manifest (no metadata) should still log type."""
+        full_profile.retention = RetentionConfig(
+            policy=RetentionPolicy.GFS,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
+        )
+        engine = BackupEngine(e2e_env["config_manager"])
+
+        # Create a manifest without metadata (simulating old format)
+        from src.core.phases.collector import collect_files
+        from src.core.phases.filter import build_updated_manifest, save_manifest
+
+        files = collect_files([str(e2e_env["source"])])
+        manifest = build_updated_manifest(files)
+        manifest_path = e2e_env["config_manager"].get_manifest_path(full_profile.id)
+        save_manifest(manifest, manifest_path)
+
+        # Run differential — set destinations_hash so it's not seen as changed
+        from src.core.config import compute_destinations_hash
+
+        full_profile.backup_type = BackupType.DIFFERENTIAL
+        full_profile.destinations_hash = compute_destinations_hash(full_profile)
+        (e2e_env["source"] / "extra.txt").write_text("extra", encoding="utf-8")
+        stats = engine.run_backup(full_profile)
+
+        type_logs = [m for m in stats.log_lines if "Backup type:" in m]
+        assert len(type_logs) == 1
+        assert "differential" in type_logs[0]
+        assert "reference:" not in type_logs[0]

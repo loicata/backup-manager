@@ -165,9 +165,11 @@ class TestUpload:
         f = tmp_path / "file.zip"
         f.write_bytes(b"data")
         result = MagicMock(returncode=1, stderr="access denied")
-        with patch.object(storage, "_run_rclone", return_value=result):
-            with pytest.raises(RuntimeError, match="rclone upload failed"):
-                storage.upload(f, "file.zip")
+        with (
+            patch.object(storage, "_run_rclone", return_value=result),
+            pytest.raises(RuntimeError, match="rclone upload failed"),
+        ):
+            storage.upload(f, "file.zip")
 
 
 # --- List backups ---
@@ -218,9 +220,11 @@ class TestDeleteBackup:
 
     def test_delete_both_fail(self, storage):
         fail = MagicMock(returncode=1, stderr="error")
-        with patch.object(storage, "_run_rclone", return_value=fail):
-            with pytest.raises(RuntimeError, match="Delete failed"):
-                storage.delete_backup("x")
+        with (
+            patch.object(storage, "_run_rclone", return_value=fail),
+            pytest.raises(RuntimeError, match="Delete failed"),
+        ):
+            storage.delete_backup("x")
 
 
 # --- Test connection ---
@@ -264,6 +268,8 @@ class TestEdgeCases:
         f = tmp_path / "f.zip"
         f.write_bytes(b"x")
         result = MagicMock(returncode=3, stderr="quota exceeded")
-        with patch.object(storage, "_run_rclone", return_value=result):
-            with pytest.raises(RuntimeError, match="quota exceeded"):
-                storage.upload(f, "f.zip")
+        with (
+            patch.object(storage, "_run_rclone", return_value=result),
+            pytest.raises(RuntimeError, match="quota exceeded"),
+        ):
+            storage.upload(f, "f.zip")

@@ -1,9 +1,7 @@
 """Tests for build_msi.py — MSI WXS generation."""
 
 import importlib
-import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -13,9 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture
 def build_msi():
     """Import build_msi module."""
-    spec = importlib.util.spec_from_file_location(
-        "build_msi", ROOT / "build_msi.py"
-    )
+    spec = importlib.util.spec_from_file_location("build_msi", ROOT / "build_msi.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

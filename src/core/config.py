@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 class BackupType(str, Enum):
     FULL = "full"
-    INCREMENTAL = "incremental"
     DIFFERENTIAL = "differential"
 
 
@@ -146,7 +145,7 @@ class StorageConfig:
 @dataclass
 class ScheduleConfig:
     frequency: ScheduleFrequency = ScheduleFrequency.DAILY
-    time: str = "02:00"
+    time: str = "10:00"
     day_of_week: int = 0
     day_of_month: int = 1
     enabled: bool = True
@@ -157,9 +156,9 @@ class ScheduleConfig:
 @dataclass
 class RetentionConfig:
     policy: RetentionPolicy = RetentionPolicy.GFS
-    gfs_daily: int = 2
-    gfs_weekly: int = 2
-    gfs_monthly: int = 2
+    gfs_daily: int = 7
+    gfs_weekly: int = 3
+    gfs_monthly: int = 5
 
 
 @dataclass
@@ -205,7 +204,7 @@ class BackupProfile:
             "node_modules",
         ]
     )
-    backup_type: BackupType = BackupType.FULL
+    backup_type: BackupType = BackupType.DIFFERENTIAL
     storage: StorageConfig = field(default_factory=StorageConfig)
     mirror_destinations: list[StorageConfig] = field(default_factory=list)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
@@ -216,6 +215,8 @@ class BackupProfile:
     encrypt_primary: bool = False
     encrypt_mirror1: bool = False
     encrypt_mirror2: bool = False
+    full_backup_every: int = 7  # Force a full backup every N backups (differential)
+    differential_count: int = 0  # Backups since last full (auto-managed)
     bandwidth_limit_kbps: int = 0
     sort_order: int = 0
     active: bool = True
@@ -319,7 +320,7 @@ class ConfigManager:
         logger.info("Deleted profile %s", profile_id)
 
     def get_manifest_path(self, profile_id: str) -> Path:
-        """Get path to incremental/differential manifest."""
+        """Get path to differential manifest (written by full backups)."""
         return self.manifest_dir / f"{profile_id}_manifest.json"
 
     def get_log_path(self, profile_id: str) -> Path:

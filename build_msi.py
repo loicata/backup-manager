@@ -91,6 +91,7 @@ def _build_wxs(version: str) -> str:
       <Directory Id="ProgramMenuFolder">
         <Directory Id="ApplicationProgramsFolder" Name="Backup Manager" />
       </Directory>
+      <Directory Id="StartupFolder" />
     </Directory>
 
     <!-- Start Menu shortcut -->
@@ -108,10 +109,34 @@ def _build_wxs(version: str) -> str:
       </Component>
     </DirectoryRef>
 
+    <!-- Clean up auto-start VBS from Windows Startup folder on uninstall -->
+    <DirectoryRef Id="StartupFolder">
+      <Component Id="C_CleanupAutoStart" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+        <RemoveFile Id="RemoveAutoStartVbs"
+                    Name="BackupManager.vbs"
+                    On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\\BackupManager"
+                       Name="CleanupAutoStart" Type="integer" Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Clean up registry keys on uninstall -->
+    <Component Id="C_CleanupRegistry" Directory="INSTALLFOLDER" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+      <RegistryValue Root="HKCU" Key="Software\\BackupManager"
+                     Name="Installed" Type="integer" Value="1"
+                     KeyPath="yes" />
+      <RemoveRegistryKey Id="RemoveRegKey" Root="HKCU"
+                         Key="Software\\BackupManager"
+                         Action="removeOnUninstall" />
+    </Component>
+
     <!-- Features -->
     <Feature Id="Complete" Title="Backup Manager" Level="1">
       <ComponentGroupRef Id="ProductFiles" />
       <ComponentRef Id="C_StartMenuShortcut" />
+      <ComponentRef Id="C_CleanupAutoStart" />
+      <ComponentRef Id="C_CleanupRegistry" />
     </Feature>
 
     <!-- UI -->
@@ -148,6 +173,15 @@ def build():
     if not BUILD_DIR.exists():
         print(f"Error: {BUILD_DIR} not found. Run build_pyinstaller.py first.")
         sys.exit(1)
+
+    # Create launch.vbs for post-install launch from MSI exit dialog
+    launch_vbs = BUILD_DIR / "launch.vbs"
+    launch_vbs.write_text(
+        'Set WshShell = CreateObject("WScript.Shell")\n'
+        'WshShell.Run """" & Replace(WScript.ScriptFullName, '
+        '"launch.vbs", "BackupManager.exe") & """", 1, False\n',
+        encoding="utf-8",
+    )
 
     heat = str(WIX_BIN / "heat.exe")
     candle = str(WIX_BIN / "candle.exe")

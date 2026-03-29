@@ -5,7 +5,7 @@ and delete operations NOT already present in test_storage_sftp.py.
 """
 
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -285,7 +285,10 @@ class TestDeleteBackup:
             with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
                 storage.delete_backup("old_backup.tar")
 
-            mock_sftp.remove.assert_called_once_with("/backups/old_backup.tar")
+            # delete_backup also tries to remove the .wbverify companion
+            calls = mock_sftp.remove.call_args_list
+            assert call("/backups/old_backup.tar") in calls
+            assert call("/backups/old_backup.tar.wbverify") in calls
         finally:
             _cleanup_paramiko()
 

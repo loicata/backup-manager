@@ -249,9 +249,7 @@ class TestStartupMissedBackup:
     def _make_profile(self, freq=ScheduleFrequency.DAILY, time="02:00"):
         return BackupProfile(
             name="TestProfile",
-            schedule=ScheduleConfig(
-                enabled=True, frequency=freq, time=time
-            ),
+            schedule=ScheduleConfig(enabled=True, frequency=freq, time=time),
         )
 
     def test_missed_daily_triggers_on_cold_boot(self, tmp_path):

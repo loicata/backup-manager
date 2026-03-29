@@ -41,14 +41,43 @@ class GeneralTab(ScrollableTab):
         type_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
         self.type_var = tk.StringVar(value=BackupType.FULL.value)
-        beta_types = {BackupType.INCREMENTAL, BackupType.DIFFERENTIAL}
         for bt in BackupType:
             label = bt.value.capitalize()
-            if bt in beta_types:
-                label += " (beta)"
             ttk.Radiobutton(type_frame, text=label, value=bt.value, variable=self.type_var).pack(
                 anchor="w", pady=2
             )
+
+        # Differential info (shown only for differential)
+        self._diff_info_frame = ttk.Frame(type_frame)
+        self._diff_info_frame.pack(fill="x", pady=(4, 0))
+
+        self._diff_info_label = ttk.Label(
+            self._diff_info_frame,
+            text="Differential applies to daily backup only.\n"
+            "Weekly and monthly retention always use full backup.",
+            foreground=Colors.TEXT_SECONDARY,
+            wraplength=400,
+            justify="left",
+        )
+        self._diff_info_label.pack(anchor="w")
+
+        # Full backup cycle
+        self._full_every_frame = ttk.Frame(self._diff_info_frame)
+        self._full_every_frame.pack(fill="x", pady=(4, 0))
+        ttk.Label(self._full_every_frame, text="Full backup every").pack(side="left")
+        self.full_every_var = tk.IntVar(value=7)
+        full_spin = ttk.Spinbox(
+            self._full_every_frame,
+            from_=1,
+            to=7,
+            width=4,
+            textvariable=self.full_every_var,
+        )
+        full_spin.pack(side="left", padx=4)
+        ttk.Label(self._full_every_frame, text="backups").pack(side="left")
+
+        self.type_var.trace_add("write", lambda *a: self._toggle_diff_info())
+        self._toggle_diff_info()
 
         # Source paths
         src_frame = ttk.LabelFrame(self.inner, text="Source paths", padding=Spacing.PAD)
@@ -284,6 +313,14 @@ class GeneralTab(ScrollableTab):
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
 
+    def _toggle_diff_info(self) -> None:
+        """Show/hide the differential info and cycle field."""
+        is_diff = self.type_var.get() == BackupType.DIFFERENTIAL.value
+        if is_diff:
+            self._diff_info_frame.pack(fill="x", pady=(4, 0))
+        else:
+            self._diff_info_frame.pack_forget()
+
     def load_profile(self, profile: BackupProfile):
         """Load profile data into UI widgets."""
         self.name_var.set(profile.name)
@@ -299,6 +336,7 @@ class GeneralTab(ScrollableTab):
 
         self.exclude_var.set(", ".join(profile.exclude_patterns))
         self.bw_var.set(profile.bandwidth_limit_kbps)
+        self.full_every_var.set(profile.full_backup_every)
 
         # Retry from schedule config
         self.retry_var.set(profile.schedule.retry_enabled)
@@ -323,6 +361,7 @@ class GeneralTab(ScrollableTab):
         return {
             "name": self.name_var.get().strip() or "Unnamed",
             "backup_type": BackupType(self.type_var.get()),
+            "full_backup_every": self.full_every_var.get(),
             "source_paths": sources,
             "exclude_patterns": excludes,
             "bandwidth_limit_kbps": self.bw_var.get(),

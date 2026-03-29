@@ -1,7 +1,7 @@
 """Phase 4: Create and update backup manifests.
 
 Two types of manifests:
-1. Delta manifest (for incremental/differential tracking)
+1. Differential manifest (reference from last full backup)
 2. Integrity manifest (.wbverify for backup verification)
 """
 

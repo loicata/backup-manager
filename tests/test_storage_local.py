@@ -78,6 +78,24 @@ class TestLocalStorage:
         storage.delete_backup("dir_backup")
         assert not (Path(storage._dest) / "dir_backup").exists()
 
+    def test_delete_also_removes_wbverify(self, storage, tmp_path):
+        src = tmp_path / "data.txt"
+        src.write_text("content", encoding="utf-8")
+        storage.upload(src, "my_backup")
+        # Create an associated .wbverify manifest
+        verify_file = Path(storage._dest) / "my_backup.wbverify"
+        verify_file.write_text("{}", encoding="utf-8")
+        storage.delete_backup("my_backup")
+        assert not (Path(storage._dest) / "my_backup").exists()
+        assert not verify_file.exists()
+
+    def test_delete_without_wbverify_no_error(self, storage, tmp_path):
+        src = tmp_path / "data.txt"
+        src.write_text("content", encoding="utf-8")
+        storage.upload(src, "solo_backup")
+        storage.delete_backup("solo_backup")
+        assert not (Path(storage._dest) / "solo_backup").exists()
+
     def test_delete_nonexistent_raises(self, storage):
         with pytest.raises(FileNotFoundError):
             storage.delete_backup("nonexistent")

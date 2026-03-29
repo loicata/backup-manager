@@ -1,4 +1,4 @@
-"""Setup wizard: 12-step guided profile creation.
+"""Setup wizard: 3-step guided profile creation.
 
 Shown on first launch when no profiles exist.
 Creates a complete BackupProfile through a multi-step flow.
@@ -13,27 +13,21 @@ from tkinter import filedialog, ttk
 
 from src.core.config import (
     BackupProfile,
-    BackupType,
-    EmailConfig,
-    EncryptionConfig,
-    RetentionConfig,
-    RetentionPolicy,
     ScheduleConfig,
     ScheduleFrequency,
     StorageConfig,
     StorageType,
 )
 from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
-from src.notifications.email_notifier import SMTP_PRESETS, send_test_email
 from src.ui.theme import Colors, Fonts, Spacing
 
 logger = logging.getLogger(__name__)
 
 
 class SetupWizard:
-    """12-step setup wizard for creating a backup profile."""
+    """3-step setup wizard for creating a backup profile."""
 
-    TOTAL_STEPS = 12
+    TOTAL_STEPS = 3
 
     def __init__(self, parent: tk.Tk = None):
         self.result_profile: BackupProfile | None = None
@@ -49,27 +43,6 @@ class SetupWizard:
                 "type": StorageType.LOCAL.value,
                 "vars": {},
             },
-            "mirror1": {
-                "enabled": False,
-                "type": StorageType.LOCAL.value,
-                "vars": {},
-            },
-            "mirror2": {
-                "enabled": False,
-                "type": StorageType.LOCAL.value,
-                "vars": {},
-            },
-            "backup_type": BackupType.FULL,
-            "retention_policy": RetentionPolicy.GFS,
-            "encrypt_primary": False,
-            "encrypt_mirror1": False,
-            "encrypt_mirror2": False,
-            "encryption_password": "",
-            "schedule_enabled": True,
-            "schedule_freq": ScheduleFrequency.DAILY,
-            "schedule_time": "02:00",
-            "email_enabled": False,
-            "email_config": {},
         }
 
         self._build_window()
@@ -226,24 +199,12 @@ class SetupWizard:
         self._progress["value"] = self._step
         self._back_btn.state(["!disabled"] if self._step > 1 else ["disabled"])
 
-        if self._step == self.TOTAL_STEPS:
-            self._next_btn.config(text="\u2713 Create profile")
-        else:
-            self._next_btn.config(text="Next \u2192")
+        self._next_btn.config(text="Next \u2192")
 
         step_builders = {
-            1: self._step_welcome,
-            2: self._step_name,
-            3: self._step_sources,
-            4: self._step_storage,
-            5: self._step_mirror1,
-            6: self._step_mirror2,
-            7: self._step_backup_type,
-            8: self._step_encryption,
-            9: self._step_schedule,
-            10: self._step_retention,
-            11: self._step_email,
-            12: self._step_summary,
+            1: self._step_name,
+            2: self._step_sources,
+            3: self._step_storage,
         }
 
         builder = step_builders.get(self._step, lambda: None)
@@ -256,12 +217,52 @@ class SetupWizard:
 
     def _go_next(self) -> None:
         """Advance to the next step, or create the profile on the last step."""
+        # Validate current step before advancing or creating
+        error = self._validate_current_step()
+        if error:
+            from tkinter import messagebox
+
+            messagebox.showwarning("Validation", error, parent=self._win)
+            return
+
         if self._step == self.TOTAL_STEPS:
             self._create_profile()
             return
+
         self._collect_current_step()
         self._step = min(self._step + 1, self.TOTAL_STEPS)
         self._show_step()
+
+    def _validate_current_step(self) -> str | None:
+        """Validate the current step. Returns error message or None."""
+        if self._step == 1:
+            name = self._data.get("name", "").strip()
+            if not name:
+                return "Please enter a profile name."
+        elif self._step == 2:
+            if not self._data.get("sources"):
+                return "Please add at least one source folder."
+        elif self._step == 3:
+            storage = self._data.get("storage", {})
+            svars = storage.get("vars", {})
+            stype = storage.get("type", "")
+            if stype in (StorageType.LOCAL.value, StorageType.NETWORK.value):
+                path = svars.get("destination_path", "")
+                if not path:
+                    return "Please select a destination folder."
+            elif stype == StorageType.SFTP.value:
+                host = svars.get("sftp_host", "")
+                if not host:
+                    return "Please enter a SFTP host."
+            elif stype == StorageType.S3.value:
+                bucket = svars.get("s3_bucket", "")
+                if not bucket:
+                    return "Please enter an S3 bucket name."
+            elif stype == StorageType.PROTON.value:
+                path = svars.get("proton_remote_path", "")
+                if not path:
+                    return "Please enter a Proton Drive path."
+        return None
 
     def _go_back(self) -> None:
         """Go back to the previous step."""
@@ -881,655 +882,32 @@ class SetupWizard:
         self._build_storage_config_ui(self._content, "storage")
 
     # ------------------------------------------------------------------
-    # Step 5: Mirror 1
+    # Profile creation
     # ------------------------------------------------------------------
-
-    def _step_mirror1(self) -> None:
-        """Display the Mirror 1 configuration step."""
-        self._build_mirror_step("mirror1", 1)
-
-    # ------------------------------------------------------------------
-    # Step 6: Mirror 2
-    # ------------------------------------------------------------------
-
-    def _step_mirror2(self) -> None:
-        """Display the Mirror 2 configuration step."""
-        self._build_mirror_step("mirror2", 2)
-
-    def _build_mirror_step(self, storage_key: str, label_num: int) -> None:
-        """Build a mirror configuration step.
-
-        Args:
-            storage_key: Key in self._data ("mirror1" or "mirror2").
-            label_num: Mirror number for display (1 or 2).
-        """
-        self._set_header(f"Mirror {label_num} (optional)")
-
-        md = self._data[storage_key]
-
-        # Enable checkbox
-        enable_var = tk.BooleanVar(value=md.get("enabled", False))
-        ttk.Checkbutton(
-            self._content,
-            text=f"Enable Mirror {label_num} (beta)",
-            variable=enable_var,
-        ).pack(anchor="w", pady=(0, Spacing.SMALL))
-
-        # Content frame (enable/disable based on checkbox)
-        content = ttk.Frame(self._content)
-        content.pack(fill="both", expand=True)
-
-        _refs = self._build_storage_config_ui(content, storage_key)
-
-        # Toggle content enable/disable
-        def _toggle(*_args: object) -> None:
-            md["enabled"] = enable_var.get()
-            state = "normal" if enable_var.get() else "disabled"
-            _set_children_state(content, state)
-
-        def _set_children_state(widget: tk.Widget, state: str) -> None:
-            try:
-                widget.configure(state=state)
-            except tk.TclError:
-                pass
-            for child in widget.winfo_children():
-                _set_children_state(child, state)
-
-        enable_var.trace_add("write", _toggle)
-        _toggle()
-
-    # ------------------------------------------------------------------
-    # Step 7: Backup type
-    # ------------------------------------------------------------------
-
-    def _step_backup_type(self) -> None:
-        """Display the backup type selection step."""
-        self._set_header("Backup type")
-        self._btype_var = tk.StringVar(value=self._data["backup_type"].value)
-        for bt, desc in [
-            (BackupType.FULL, "Full \u2014 backs up everything every time"),
-            (
-                BackupType.INCREMENTAL,
-                "Incremental \u2014 only changed files since last backup (beta)",
-            ),
-            (
-                BackupType.DIFFERENTIAL,
-                "Differential \u2014 only changed since last full backup (beta)",
-            ),
-        ]:
-            ttk.Radiobutton(
-                self._content,
-                text=desc,
-                value=bt.value,
-                variable=self._btype_var,
-            ).pack(anchor="w", pady=4)
-
-        self._btype_var.trace_add(
-            "write",
-            lambda *a: self._data.update(
-                backup_type=BackupType(self._btype_var.get()),
-            ),
-        )
-
-    # ------------------------------------------------------------------
-    # Step 8: Retention policy
-    # ------------------------------------------------------------------
-
-    def _step_retention(self) -> None:
-        """Display the retention policy step."""
-        self._set_header("Retention policy")
-
-        gfs_frame = ttk.LabelFrame(
-            self._content,
-            text="GFS Retention (Grandfather-Father-Son)",
-            padding=4,
-        )
-        gfs_frame.pack(fill="x", pady=(8, 0))
-
-        self._ret_gfs_vars: dict[str, tk.IntVar] = {}
-        for label, key, default in [
-            ("Days of history:", "gfs_daily", 1),
-            ("Weeks of history:", "gfs_weekly", 1),
-            ("Months of history:", "gfs_monthly", 1),
-        ]:
-            row = ttk.Frame(gfs_frame)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=label).pack(side="left")
-            var = tk.IntVar(value=self._data.get(key, default))
-            self._ret_gfs_vars[key] = var
-            ttk.Spinbox(
-                row,
-                textvariable=var,
-                from_=0,
-                to=998,
-                width=8,
-            ).pack(side="right")
-
-        # Summary label
-        self._ret_summary_label = tk.Label(
-            gfs_frame,
-            text="",
-            justify="left",
-            anchor="w",
-            fg="#444444",
-        )
-        self._ret_summary_label.pack(fill="x", pady=(10, 0))
-
-        for key, var in self._ret_gfs_vars.items():
-            var.trace_add(
-                "write",
-                lambda *a, k=key, v=var: (
-                    self._data.update({k: v.get()}),
-                    self._update_ret_summary(),
-                ),
-            )
-
-        self._update_ret_summary()
-
-    def _update_ret_summary(self) -> None:
-        """Update the retention summary text in the wizard."""
-        try:
-            user_daily = self._ret_gfs_vars["gfs_daily"].get()
-            user_weekly = self._ret_gfs_vars["gfs_weekly"].get()
-            user_monthly = self._ret_gfs_vars["gfs_monthly"].get()
-        except (tk.TclError, ValueError):
-            return
-
-        real_daily = user_daily + 1
-        real_weekly = user_weekly + 1
-        real_monthly = user_monthly + 1
-
-        lines = ["Retention summary:"]
-
-        if user_daily == 0:
-            lines.append("  • Today only (no history)")
-        elif user_daily == 1:
-            lines.append("  • Today + yesterday")
-        else:
-            lines.append(f"  • Today + {user_daily} days of history")
-
-        if user_weekly == 0:
-            lines.append("  • No weekly history")
-        elif user_weekly == 1:
-            lines.append("  • 1 week of history (1 weekly backup)")
-        else:
-            lines.append(f"  • {user_weekly} weeks of history ({user_weekly} weekly backups)")
-
-        if user_monthly == 0:
-            lines.append("  • No monthly history")
-        elif user_monthly == 1:
-            lines.append("  • 1 month of history (1 monthly backup)")
-        else:
-            lines.append(f"  • {user_monthly} months of history ({user_monthly} monthly backups)")
-
-        total = real_daily + max(real_weekly - 1, 0) + max(real_monthly - 1, 0)
-        lines.append(f"Backups kept: {total}")
-
-        self._ret_summary_label.config(text="\n".join(lines))
-
-    # ------------------------------------------------------------------
-    # Step 9: Encryption
-    # ------------------------------------------------------------------
-
-    def _step_encryption(self) -> None:
-        """Display the encryption configuration step."""
-        self._set_header("Encryption mode")
-        self._enc_updating = False
-
-        # No encryption checkbox
-        any_enc = (
-            self._data["encrypt_primary"]
-            or self._data["encrypt_mirror1"]
-            or self._data["encrypt_mirror2"]
-        )
-        self._enc_no_var = tk.BooleanVar(value=not any_enc)
-        self._enc_no_cb = ttk.Checkbutton(
-            self._content,
-            text="No encryption",
-            variable=self._enc_no_var,
-            command=self._on_enc_no_toggled,
-        )
-        self._enc_no_cb.pack(anchor="w", pady=2)
-
-        ttk.Separator(self._content, orient="horizontal").pack(fill="x", pady=4)
-
-        # Encrypt Primary
-        self._enc_primary_var = tk.BooleanVar(value=self._data["encrypt_primary"])
-        self._enc_primary_cb = ttk.Checkbutton(
-            self._content,
-            text="Encrypt Primary",
-            variable=self._enc_primary_var,
-            command=self._on_enc_option_toggled,
-        )
-        self._enc_primary_cb.pack(anchor="w", pady=2)
-
-        # Encrypt Mirror 1
-        self._enc_mirror1_var = tk.BooleanVar(value=self._data["encrypt_mirror1"])
-        self._enc_mirror1_cb = ttk.Checkbutton(
-            self._content,
-            text="Encrypt Mirror 1",
-            variable=self._enc_mirror1_var,
-            command=self._on_enc_option_toggled,
-        )
-        self._enc_mirror1_cb.pack(anchor="w", pady=2)
-
-        # Encrypt Mirror 2
-        self._enc_mirror2_var = tk.BooleanVar(value=self._data["encrypt_mirror2"])
-        self._enc_mirror2_cb = ttk.Checkbutton(
-            self._content,
-            text="Encrypt Mirror 2",
-            variable=self._enc_mirror2_var,
-            command=self._on_enc_option_toggled,
-        )
-        self._enc_mirror2_cb.pack(anchor="w", pady=2)
-
-        # Password frame
-        self._enc_pw_frame = ttk.Frame(self._content)
-        ttk.Label(
-            self._enc_pw_frame,
-            text="Password:",
-        ).pack(anchor="w", pady=(8, 0))
-        self._enc_pw_var = tk.StringVar(value=self._data["encryption_password"])
-        ttk.Entry(
-            self._enc_pw_frame,
-            textvariable=self._enc_pw_var,
-            show="\u25cf",
-            width=30,
-        ).pack(anchor="w")
-        ttk.Label(
-            self._enc_pw_frame,
-            text="Confirm password:",
-        ).pack(anchor="w", pady=(8, 0))
-        self._enc_pw_confirm_var = tk.StringVar()
-        ttk.Entry(
-            self._enc_pw_frame,
-            textvariable=self._enc_pw_confirm_var,
-            show="\u25cf",
-            width=30,
-        ).pack(anchor="w")
-        self._enc_pw_var.trace_add(
-            "write",
-            lambda *a: self._data.update(
-                encryption_password=self._enc_pw_var.get(),
-            ),
-        )
-
-        self._update_enc_ui_state()
-
-    def _on_enc_no_toggled(self) -> None:
-        """Handle 'No encryption' toggled in wizard."""
-        if self._enc_updating:
-            return
-        self._enc_updating = True
-        if self._enc_no_var.get():
-            self._enc_primary_var.set(False)
-            self._enc_mirror1_var.set(False)
-            self._enc_mirror2_var.set(False)
-        self._sync_enc_data()
-        self._update_enc_ui_state()
-        self._enc_updating = False
-
-    def _on_enc_option_toggled(self) -> None:
-        """Handle any encrypt checkbox toggled in wizard."""
-        if self._enc_updating:
-            return
-        self._enc_updating = True
-        any_enc = (
-            self._enc_primary_var.get()
-            or self._enc_mirror1_var.get()
-            or self._enc_mirror2_var.get()
-        )
-        self._enc_no_var.set(not any_enc)
-        self._sync_enc_data()
-        self._update_enc_ui_state()
-        self._enc_updating = False
-
-    def _sync_enc_data(self) -> None:
-        """Sync wizard _data dict from checkbox variables."""
-        self._data["encrypt_primary"] = self._enc_primary_var.get()
-        self._data["encrypt_mirror1"] = self._enc_mirror1_var.get()
-        self._data["encrypt_mirror2"] = self._enc_mirror2_var.get()
-
-    def _update_enc_ui_state(self) -> None:
-        """Update password frame visibility."""
-        any_enc = (
-            self._enc_primary_var.get()
-            or self._enc_mirror1_var.get()
-            or self._enc_mirror2_var.get()
-        )
-        if any_enc:
-            self._enc_pw_frame.pack(anchor="w", fill="x")
-        else:
-            self._enc_pw_frame.pack_forget()
-
-    # ------------------------------------------------------------------
-    # Step 10: Schedule
-    # ------------------------------------------------------------------
-
-    def _step_schedule(self) -> None:
-        """Display the schedule configuration step."""
-        self._set_header("Schedule")
-        self._sched_var = tk.BooleanVar(value=self._data["schedule_enabled"])
-        ttk.Checkbutton(
-            self._content,
-            text="Enable automatic scheduling",
-            variable=self._sched_var,
-        ).pack(anchor="w")
-
-        ttk.Label(self._content, text="\nFrequency:").pack(anchor="w")
-        self._freq_var = tk.StringVar(value=self._data["schedule_freq"].value)
-        for f in [
-            ScheduleFrequency.DAILY,
-            ScheduleFrequency.WEEKLY,
-            ScheduleFrequency.MONTHLY,
-        ]:
-            ttk.Radiobutton(
-                self._content,
-                text=f.value.capitalize(),
-                value=f.value,
-                variable=self._freq_var,
-            ).pack(anchor="w")
-
-        ttk.Label(self._content, text="\nTime (HH:MM):").pack(anchor="w")
-        self._time_var = tk.StringVar(value=self._data["schedule_time"])
-        ttk.Entry(
-            self._content,
-            textvariable=self._time_var,
-            width=8,
-        ).pack(anchor="w")
-
-        self._sched_var.trace_add(
-            "write",
-            lambda *a: self._data.update(
-                schedule_enabled=self._sched_var.get(),
-            ),
-        )
-        self._freq_var.trace_add(
-            "write",
-            lambda *a: self._data.update(
-                schedule_freq=ScheduleFrequency(self._freq_var.get()),
-            ),
-        )
-        self._time_var.trace_add(
-            "write",
-            lambda *a: self._data.update(schedule_time=self._time_var.get()),
-        )
-
-    # ------------------------------------------------------------------
-    # Step 11: Email notifications
-    # ------------------------------------------------------------------
-
-    def _step_email(self) -> None:
-        """Display the email notification step."""
-        self._set_header("Send notification (beta)")
-
-        # Trigger mode
-        ttk.Label(self._content, text="Send notifications:").pack(anchor="w")
-        self._email_trigger_var = tk.StringVar(
-            value=self._data["email_config"].get("trigger", "disabled"),
-        )
-        for val, label in [
-            ("disabled", "Disabled"),
-            ("failure", "On failure only"),
-            ("success", "On success only"),
-            ("always", "Always (success + failure)"),
-        ]:
-            ttk.Radiobutton(
-                self._content,
-                text=label,
-                value=val,
-                variable=self._email_trigger_var,
-            ).pack(anchor="w", pady=2)
-
-        self._email_trigger_var.trace_add("write", self._on_email_trigger_changed)
-
-        # SMTP config frame
-        self._email_smtp_frame = ttk.LabelFrame(
-            self._content,
-            text="SMTP server",
-            padding=4,
-        )
-
-        # Presets
-        preset_row = ttk.Frame(self._email_smtp_frame)
-        preset_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(preset_row, text="Presets:").pack(side="left")
-        for name in ["Gmail", "Outlook", "ProtonMail"]:
-            ttk.Button(
-                preset_row,
-                text=name,
-                command=lambda n=name.lower(): self._apply_email_preset(n),
-            ).pack(side="left", padx=2)
-
-        # Fields
-        fields = [
-            ("SMTP Host:", "host", ""),
-            ("Port:", "port", "587"),
-            ("Username:", "username", ""),
-            ("Password:", "password", ""),
-            ("From address:", "from_addr", ""),
-            ("To address:", "to_addr", ""),
-        ]
-
-        sc = self._data["email_config"]
-        self._email_vars: dict[str, tk.StringVar] = {}
-        for label, key, default in fields:
-            row = ttk.Frame(self._email_smtp_frame)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=label, width=15).pack(side="left")
-            var = tk.StringVar(value=sc.get(key, default))
-            self._email_vars[key] = var
-            if key == "password":
-                ttk.Entry(
-                    row,
-                    textvariable=var,
-                    show="\u25cf",
-                ).pack(side="left", fill="x", expand=True)
-            elif key == "port":
-                ttk.Spinbox(
-                    row,
-                    textvariable=var,
-                    from_=1,
-                    to=65535,
-                    width=8,
-                ).pack(side="left")
-            else:
-                ttk.Entry(row, textvariable=var).pack(
-                    side="left",
-                    fill="x",
-                    expand=True,
-                )
-
-        # TLS
-        self._email_tls_var = tk.BooleanVar(value=sc.get("tls", True))
-        ttk.Checkbutton(
-            self._email_smtp_frame,
-            text="Use TLS (STARTTLS)",
-            variable=self._email_tls_var,
-        ).pack(anchor="w", pady=(2, 0))
-
-        ttk.Label(
-            self._email_smtp_frame,
-            text="For multiple recipients, separate with commas",
-            foreground=Colors.TEXT_SECONDARY,
-            font=Fonts.small(),
-        ).pack(anchor="w", pady=(2, 0))
-
-        # Test button
-        test_row = ttk.Frame(self._email_smtp_frame)
-        test_row.pack(fill="x", pady=(4, 0))
-        self._email_test_btn = ttk.Button(
-            test_row,
-            text="Send test email",
-            command=self._test_wizard_email,
-        )
-        self._email_test_btn.pack(side="left")
-        self._email_test_lbl = ttk.Label(
-            test_row,
-            text="",
-            foreground=Colors.TEXT_SECONDARY,
-        )
-        self._email_test_lbl.pack(side="left", padx=8)
-
-        # Show/hide based on initial trigger
-        self._on_email_trigger_changed()
-
-    def _on_email_trigger_changed(self, *args: object) -> None:
-        """Show or hide SMTP config based on trigger mode."""
-        trigger = self._email_trigger_var.get()
-        enabled = trigger != "disabled"
-        self._data["email_enabled"] = enabled
-        self._data["email_config"]["trigger"] = trigger
-        if enabled:
-            self._email_smtp_frame.pack(fill="x", pady=(8, 0))
-        else:
-            self._email_smtp_frame.pack_forget()
-
-    def _apply_email_preset(self, name: str) -> None:
-        """Apply an SMTP preset.
-
-        Args:
-            name: Preset name (e.g. "gmail", "outlook", "protonmail").
-        """
-        preset = SMTP_PRESETS.get(name, {})
-        self._email_vars["host"].set(preset.get("host", ""))
-        self._email_vars["port"].set(str(preset.get("port", 587)))
-        self._email_tls_var.set(preset.get("tls", True))
-
-    def _test_wizard_email(self) -> None:
-        """Send a test email from the wizard."""
-        self._email_test_lbl.config(text="Sending...", foreground=Colors.WARNING)
-        self._email_test_btn.state(["disabled"])
-
-        config = self._build_wizard_email_config()
-        result: list = [None]
-
-        def _send() -> None:
-            try:
-                ok, msg = send_test_email(config)
-            except Exception as e:
-                ok, msg = False, str(e)
-            result[0] = (ok, msg)
-
-        def _poll() -> None:
-            if result[0] is not None:
-                ok, msg = result[0]
-                self._email_test_btn.state(["!disabled"])
-                color = Colors.SUCCESS if ok else Colors.DANGER
-                self._email_test_lbl.config(text=msg, foreground=color)
-            else:
-                self._win.after(200, _poll)
-
-        threading.Thread(target=_send, daemon=True).start()
-        self._win.after(200, _poll)
-
-    def _build_wizard_email_config(self) -> EmailConfig:
-        """Build EmailConfig from wizard state.
-
-        Returns:
-            Configured EmailConfig instance.
-        """
-        trigger = self._email_trigger_var.get()
-        return EmailConfig(
-            enabled=trigger != "disabled",
-            smtp_host=self._email_vars["host"].get(),
-            smtp_port=int(self._email_vars["port"].get() or 587),
-            use_tls=self._email_tls_var.get(),
-            username=self._email_vars["username"].get(),
-            password=self._email_vars["password"].get(),
-            from_address=self._email_vars["from_addr"].get(),
-            to_address=self._email_vars["to_addr"].get(),
-            send_on_success=trigger in ("success", "always"),
-            send_on_failure=trigger in ("failure", "always"),
-        )
-
-    # ------------------------------------------------------------------
-    # Step 12: Summary
-    # ------------------------------------------------------------------
-
-    def _step_summary(self) -> None:
-        """Display the summary of all collected settings."""
-        self._set_header("Summary")
-        d = self._data
-
-        storage_type = d["storage"].get("type", "local")
-        enc_parts = []
-        if d["encrypt_primary"]:
-            enc_parts.append("Primary")
-        if d["encrypt_mirror1"]:
-            enc_parts.append("Mirror1")
-        if d["encrypt_mirror2"]:
-            enc_parts.append("Mirror2")
-        enc_text = " ".join(enc_parts) if enc_parts else "None"
-
-        summary = (
-            f"Profile: {d['name']}\n"
-            f"Sources: {len(d['sources'])} items\n"
-            f"Destination: {storage_type}\n"
-            f"Backup type: {d['backup_type'].value}\n"
-            f"Retention: GFS (daily {d.get('gfs_daily', 1) + 1}, "
-            f"weekly {d.get('gfs_weekly', 1) + 1}, "
-            f"monthly {d.get('gfs_monthly', 1) + 1})\n"
-            f"Encryption: {enc_text}\n"
-            f"Schedule: {'Enabled' if d['schedule_enabled'] else 'Manual'}\n"
-            f"Email: {d['email_config'].get('trigger', 'disabled').capitalize()}\n"
-        )
-        ttk.Label(
-            self._content,
-            text=summary,
-            font=Fonts.normal(),
-            justify="left",
-        ).pack(anchor="w")
 
     # ------------------------------------------------------------------
     # Profile creation
     # ------------------------------------------------------------------
 
     def _create_profile(self) -> None:
-        """Build the BackupProfile from all collected data and close the wizard."""
+        """Build the BackupProfile from collected data and close the wizard.
+
+        Uses defaults for all settings not configured in the wizard
+        (backup type, retention, encryption, mirrors, email).
+        """
         d = self._data
 
-        # Primary storage
         storage = self._build_storage_config_from_key("storage")
-
-        # Mirror destinations
-        mirrors: list[StorageConfig] = []
-        for mk in ("mirror1", "mirror2"):
-            md = d[mk]
-            if md.get("enabled", False):
-                mirrors.append(self._build_storage_config_from_key(mk))
-
-        # Email config
-        if hasattr(self, "_email_vars"):
-            email = self._build_wizard_email_config()
-        else:
-            email = EmailConfig(enabled=d["email_enabled"])
 
         profile = BackupProfile(
             name=d["name"],
             source_paths=d["sources"],
-            backup_type=d["backup_type"],
             storage=storage,
-            mirror_destinations=mirrors,
-            retention=RetentionConfig(
-                policy=RetentionPolicy.GFS,
-                gfs_daily=d.get("gfs_daily", 1) + 1,
-                gfs_weekly=d.get("gfs_weekly", 1) + 1,
-                gfs_monthly=d.get("gfs_monthly", 1) + 1,
-            ),
-            encrypt_primary=d["encrypt_primary"],
-            encrypt_mirror1=d["encrypt_mirror1"],
-            encrypt_mirror2=d["encrypt_mirror2"],
-            encryption=EncryptionConfig(
-                enabled=(d["encrypt_primary"] or d["encrypt_mirror1"] or d["encrypt_mirror2"]),
-                stored_password=d["encryption_password"],
-            ),
             schedule=ScheduleConfig(
-                enabled=d["schedule_enabled"],
-                frequency=d["schedule_freq"],
-                time=d["schedule_time"],
+                enabled=True,
+                frequency=ScheduleFrequency.DAILY,
+                time="10:00",
             ),
-            email=email,
         )
 
         self.result_profile = profile

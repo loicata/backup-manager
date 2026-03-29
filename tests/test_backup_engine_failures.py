@@ -307,11 +307,13 @@ class TestEmptyBackup:
         assert result.files_found == 0
         assert result.files_processed == 0
 
-    def test_incremental_no_changes(self, env, profile):
-        """Second incremental run with no changes should succeed."""
-        profile.backup_type = BackupType.INCREMENTAL
+    def test_differential_no_changes(self, env, profile):
+        """Full then differential with no changes should skip all."""
+        profile.backup_type = BackupType.FULL
         engine = _engine(env)
-        engine.run_backup(profile)
+        engine.run_backup(profile)  # Full writes the manifest
+
+        profile.backup_type = BackupType.DIFFERENTIAL
         result = engine.run_backup(profile)
         assert result.files_processed == 0
         assert result.files_skipped == 2

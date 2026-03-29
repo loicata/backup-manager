@@ -193,6 +193,7 @@ class InAppScheduler:
         self._thread: threading.Thread | None = None
         self._running = False
         self._last_check_time = time.monotonic()
+        self.skip_startup_check = False
 
     @property
     def journal(self) -> ScheduleJournal:
@@ -214,10 +215,14 @@ class InAppScheduler:
 
     def _run(self) -> None:
         # On startup, check for missed backups (cold boot scenario)
-        try:
-            self._check_startup_missed()
-        except Exception:
-            logger.exception("Startup missed-backup check error")
+        if self.skip_startup_check:
+            logger.info("Skipping startup missed-backup check (first launch)")
+            self.skip_startup_check = False
+        else:
+            try:
+                self._check_startup_missed()
+            except Exception:
+                logger.exception("Startup missed-backup check error")
 
         while self._running:
             try:
@@ -311,7 +316,10 @@ class InAppScheduler:
             return now >= target_today and (now - last).days >= 1
 
         elif sched.frequency == ScheduleFrequency.MONTHLY:
-            day = min(sched.day_of_month, 28)
+            import calendar
+
+            max_day = calendar.monthrange(now.year, now.month)[1]
+            day = min(sched.day_of_month, max_day)
             if now.day != day:
                 return False
             return now >= target_today and (now - last).days >= 1

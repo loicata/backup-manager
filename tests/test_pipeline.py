@@ -302,7 +302,7 @@ class TestBackupEngine:
         with pytest.raises(CancelledError):
             engine.run_backup(profile)
 
-    def test_incremental_skips_unchanged(self, sample_files, tmp_config_dir, tmp_path):
+    def test_differential_skips_unchanged(self, sample_files, tmp_config_dir, tmp_path):
         from src.core.backup_engine import BackupEngine
         from src.core.config import (
             BackupProfile,
@@ -316,9 +316,9 @@ class TestBackupEngine:
         dest.mkdir()
 
         profile = BackupProfile(
-            name="Incremental",
+            name="Differential",
             source_paths=[str(sample_files)],
-            backup_type=BackupType.INCREMENTAL,
+            backup_type=BackupType.FULL,
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -328,11 +328,12 @@ class TestBackupEngine:
         mgr = ConfigManager(config_dir=tmp_config_dir)
         engine = BackupEngine(mgr)
 
-        # First backup: all files
+        # First backup: full (writes the manifest)
         stats1 = engine.run_backup(profile)
         assert stats1.files_processed == 3
 
-        # Second backup: no changes
+        # Switch to differential, no changes
+        profile.backup_type = BackupType.DIFFERENTIAL
         engine2 = BackupEngine(mgr)
         stats2 = engine2.run_backup(profile)
         assert stats2.files_skipped == 3

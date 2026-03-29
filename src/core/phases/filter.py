@@ -1,4 +1,4 @@
-"""Phase 2: Filter files for incremental/differential backup.
+"""Phase 2: Filter files for differential backup.
 
 Compares file hashes against a stored manifest to determine
 which files have changed and need to be backed up.

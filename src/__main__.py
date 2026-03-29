@@ -209,6 +209,7 @@ def main():
         profiles = config_mgr.get_all_profiles()
         logger.info("Found %d profiles", len(profiles))
 
+        from_wizard = False
         if not profiles:
             # Show setup wizard — keep root hidden but move it
             # off-screen so the transient wizard Toplevel is visible.
@@ -223,6 +224,7 @@ def main():
             if profile:
                 config_mgr.save_profile(profile)
                 logger.info("Wizard completed — profile saved")
+                from_wizard = True
             else:
                 logger.info("Wizard cancelled — launching app without profile")
 
@@ -244,15 +246,15 @@ def main():
         x = (screen_w - win_w) // 2
         y = (screen_h - win_h) // 2
         root.geometry(f"{win_w}x{win_h}+{x}+{y}")
-        root.attributes("-alpha", 1)  # Ensure fully opaque
 
+        # Build UI while window is still hidden to avoid flicker
+        _app = BackupManagerApp(root, from_wizard=from_wizard)
+        root.update_idletasks()
+
+        # Now reveal the fully-built window
+        root.attributes("-alpha", 1)
         if not start_minimized:
             root.deiconify()
-            root.update_idletasks()
-
-        _app = BackupManagerApp(root)
-
-        if not start_minimized:
             root.lift()
             root.attributes("-topmost", True)
             root.after(100, lambda: root.attributes("-topmost", False))

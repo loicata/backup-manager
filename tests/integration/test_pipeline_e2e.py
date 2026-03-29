@@ -129,37 +129,59 @@ class TestFullBackupE2E:
         assert any("Collecting" in m for m in log_messages)
         assert any("complete" in m.lower() for m in log_messages)
 
+    def test_log_lines_capture_phase_messages(self, e2e_env, full_profile):
+        """BackupResult.log_lines must include messages from all phases."""
+        full_profile.retention = RetentionConfig(
+            policy=RetentionPolicy.GFS,
+            gfs_daily=99,
+            gfs_weekly=99,
+            gfs_monthly=99,
+        )
+        engine = BackupEngine(e2e_env["config_manager"])
+        stats = engine.run_backup(full_profile)
 
-class TestIncrementalBackupE2E:
-    """Test incremental backup pipeline."""
+        logs = stats.log_lines
+        # Engine messages
+        assert any("Collecting" in m for m in logs)
+        # Phase messages (from PhaseLogger, not engine._log)
+        assert any("Collected" in m for m in logs)
+        assert any("Manifest created" in m for m in logs)
+        assert any("Verification OK" in m for m in logs)
+        assert any("Backup complete" in m for m in logs)
 
-    def test_incremental_skips_unchanged(self, e2e_env, full_profile):
-        """Second incremental run should detect no changes."""
-        full_profile.backup_type = BackupType.INCREMENTAL
+
+class TestDifferentialBackupE2E:
+    """Test differential backup pipeline."""
+
+    def test_differential_skips_unchanged(self, e2e_env, full_profile):
+        """Full then differential with no changes should skip all."""
         engine = BackupEngine(e2e_env["config_manager"])
 
-        # First run: all files
+        # Full backup first (writes the manifest)
+        full_profile.backup_type = BackupType.FULL
         stats1 = engine.run_backup(full_profile)
         assert stats1.files_processed == 3
 
-        # Second run: no changes
+        # Differential: no changes
+        full_profile.backup_type = BackupType.DIFFERENTIAL
         stats2 = engine.run_backup(full_profile)
         assert stats2.files_skipped == 3
         assert stats2.files_processed == 0
 
-    def test_incremental_detects_new_file(self, e2e_env, full_profile):
-        """Incremental should detect newly added files."""
-        full_profile.backup_type = BackupType.INCREMENTAL
+    def test_differential_detects_new_file(self, e2e_env, full_profile):
+        """Differential should detect newly added files."""
         engine = BackupEngine(e2e_env["config_manager"])
 
-        # First run
+        # Full backup first (writes the manifest)
+        full_profile.backup_type = BackupType.FULL
         engine.run_backup(full_profile)
 
         # Add new file
         new_file = e2e_env["source"] / "new_file.txt"
         new_file.write_text("New content", encoding="utf-8")
 
-        # Second run should detect the new file
+        # Differential should detect the new file
+        full_profile.backup_type = BackupType.DIFFERENTIAL
         stats2 = engine.run_backup(full_profile)
         assert stats2.files_processed >= 1
 

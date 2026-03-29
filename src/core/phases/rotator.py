@@ -37,13 +37,23 @@ def rotate_backups(
     return _rotate_gfs(backend, backups, retention, events)
 
 
+def _is_full_backup(name: str) -> bool:
+    """Check if a backup name contains the FULL marker."""
+    return "_FULL_" in name
+
+
 def _rotate_gfs(
     backend: StorageBackend,
     backups: list[dict],
     retention: RetentionConfig,
     events: EventBus | None = None,
 ) -> int:
-    """GFS rotation: keep daily/weekly/monthly backups."""
+    """GFS rotation: keep daily/weekly/monthly backups.
+
+    For weekly and monthly slots, only FULL backups are eligible.
+    This ensures that retained long-term backups are always
+    self-contained and restorable without a chain.
+    """
     phase_log = PhaseLogger("rotator", events)
     now = datetime.now()
     keep = set()
@@ -58,7 +68,7 @@ def _rotate_gfs(
 
     dated_backups.sort(key=lambda x: x[1], reverse=True)
 
-    # Keep daily backups (last N days)
+    # Keep daily backups (last N days) — any type (full or diff)
     daily_dates = set()
     for backup, dt in dated_backups:
         if (now - dt).days < retention.gfs_daily:
@@ -67,18 +77,22 @@ def _rotate_gfs(
                 daily_dates.add(date_key)
                 keep.add(backup["name"])
 
-    # Keep weekly backups (last N weeks)
+    # Keep weekly backups (last N weeks) — FULL only
     weekly_dates = set()
     for backup, dt in dated_backups:
+        if not _is_full_backup(backup["name"]):
+            continue
         if (now - dt).days < retention.gfs_weekly * 7:
             week_key = dt.strftime("%Y-W%W")
             if week_key not in weekly_dates:
                 weekly_dates.add(week_key)
                 keep.add(backup["name"])
 
-    # Keep monthly backups (last N months)
+    # Keep monthly backups (last N months) — FULL only
     monthly_dates = set()
     for backup, dt in dated_backups:
+        if not _is_full_backup(backup["name"]):
+            continue
         months_ago = (now.year - dt.year) * 12 + (now.month - dt.month)
         if months_ago < retention.gfs_monthly:
             month_key = dt.strftime("%Y-%m")

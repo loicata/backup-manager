@@ -42,7 +42,7 @@ class BackupResult:
     Args:
         files_found: Total files found by the collector.
         files_processed: Files actually written to the destination.
-        files_skipped: Files skipped (unchanged in incremental mode).
+        files_skipped: Files skipped (unchanged in differential mode).
         bytes_source: Total bytes of source files.
         duration_seconds: Wall-clock time for the backup run.
         backup_path: Path or remote name of the created backup.
@@ -60,6 +60,7 @@ class BackupResult:
     mirror_results: list[tuple[str, bool, str]] = field(default_factory=list)
     rotated_count: int = 0
     phase_errors: list[PhaseError] = field(default_factory=list)
+    log_lines: list[str] = field(default_factory=list)
 
     @property
     def errors(self) -> int:

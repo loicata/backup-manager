@@ -88,7 +88,7 @@ class LocalStorage(StorageBackend):
         return sorted(backups, key=lambda b: b["modified"], reverse=True)
 
     def delete_backup(self, remote_name: str) -> None:
-        """Delete a backup from the destination."""
+        """Delete a backup and its associated .wbverify manifest."""
         target = self._dest / remote_name
         if target.is_dir():
             shutil.rmtree(target)
@@ -97,6 +97,12 @@ class LocalStorage(StorageBackend):
         else:
             raise FileNotFoundError(f"Backup not found: {remote_name}")
         logger.info("Deleted backup: %s", remote_name)
+
+        # Remove associated integrity manifest if present
+        verify_file = self._dest / f"{remote_name}.wbverify"
+        if verify_file.exists():
+            verify_file.unlink()
+            logger.info("Deleted manifest: %s.wbverify", remote_name)
 
     def test_connection(self) -> tuple[bool, str]:
         """Check if the destination is accessible and writable."""

@@ -9,7 +9,7 @@ from tkinter import messagebox, ttk
 
 from src import __version__
 from src.core.backup_engine import BackupEngine, CancelledError
-from src.core.config import BackupProfile, ConfigManager
+from src.core.config import BackupProfile, BackupType, ConfigManager
 from src.core.events import STATUS, EventBus
 from src.core.scheduler import AutoStart, InAppScheduler
 from src.ui.tabs.email_tab import EmailTab
@@ -39,8 +39,9 @@ logger = logging.getLogger(__name__)
 class BackupManagerApp:
     """Main application with sidebar profile list and tabbed configuration."""
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, from_wizard: bool = False):
         self.root = root
+        self._from_wizard = from_wizard
         self.root.title(f"{APP_TITLE} v{__version__}")
         self.root.geometry(WINDOW_SIZE)
         self.root.minsize(*MIN_SIZE)
@@ -71,6 +72,16 @@ class BackupManagerApp:
         # Build UI
         self._build_ui()
         self._load_profiles()
+
+        # After wizard: switch to Run tab, mark new profiles as
+        # already triggered so the scheduler won't auto-run them
+        if self._from_wizard:
+            self.notebook.select(self.tab_run)
+            self.scheduler.skip_startup_check = True
+            from datetime import datetime
+
+            for p in self.config_manager.get_all_profiles():
+                self.scheduler._state.set_last_trigger(p.id, datetime.now())
 
         # Start services
         self.scheduler.start()
@@ -366,16 +377,23 @@ class BackupManagerApp:
         )
         self.tab_run.clear_log()
 
-    def _save_profile(self):
-        """Collect config from all tabs and save."""
+    def _save_profile(self, silent: bool = False) -> bool:
+        """Collect config from all tabs and save.
+
+        Args:
+            silent: If True, suppress the "Saved" confirmation dialog.
+
+        Returns:
+            True if the profile was saved successfully, False otherwise.
+        """
         if not self._current_profile:
-            return
+            return False
 
         # Validate encryption
         enc_error = self.tab_encryption.validate()
         if enc_error:
             messagebox.showwarning("Validation", enc_error)
-            return
+            return False
 
         profile = self._current_profile
 
@@ -391,10 +409,11 @@ class BackupManagerApp:
                     f"A profile named '{p.name}' already exists. "
                     "Please choose a different name.",
                 )
-                return
+                return False
 
         profile.name = new_name
         profile.backup_type = general["backup_type"]
+        profile.full_backup_every = general["full_backup_every"]
         profile.source_paths = general["source_paths"]
         profile.exclude_patterns = general["exclude_patterns"]
         profile.bandwidth_limit_kbps = general["bandwidth_limit_kbps"]
@@ -413,10 +432,25 @@ class BackupManagerApp:
         dup_error = self._check_duplicate_destinations(storage["storage"], mirrors)
         if dup_error:
             messagebox.showwarning("Validation", dup_error)
-            return
+            return False
 
         retention = self.tab_retention.collect_config()
         profile.retention = retention["retention"]
+
+        # Validate differential full-backup cycle
+        if general["backup_type"] == BackupType.DIFFERENTIAL:
+            cycle = general["full_backup_every"]
+            gfs_d = profile.retention.gfs_daily
+
+            if cycle > gfs_d:
+                messagebox.showwarning(
+                    "Validation",
+                    f"Full backup cycle ({cycle}) must not exceed "
+                    f"daily retention ({gfs_d}).\n\n"
+                    f"Otherwise the daily rotation could delete the "
+                    f"full backup before the next one is created.",
+                )
+                return False
 
         encryption = self.tab_encryption.collect_config()
         profile.encrypt_primary = encryption["encrypt_primary"]
@@ -443,7 +477,9 @@ class BackupManagerApp:
             AutoStart.disable()
 
         self._load_profiles()
-        messagebox.showinfo("Saved", f"Profile '{profile.name}' saved.")
+        if not silent:
+            messagebox.showinfo("Saved", f"Profile '{profile.name}' saved.")
+        return True
 
     @staticmethod
     def _check_duplicate_destinations(storage, mirrors) -> str:
@@ -620,6 +656,10 @@ class BackupManagerApp:
             messagebox.showwarning("Backup", "No profile selected.")
             return
 
+        # Save current UI state before running (validates config)
+        if not self._save_profile(silent=True):
+            return
+
         profile = self._current_profile
 
         # Validate config before attempting connectivity check
@@ -737,6 +777,7 @@ class BackupManagerApp:
                         profile.name,
                         True,
                         f"{stats.files_processed} files backed up",
+                        details="\n".join(stats.log_lines),
                     )
 
             except CancelledError:
@@ -747,11 +788,15 @@ class BackupManagerApp:
                 if profile.email.enabled:
                     from src.notifications.email_notifier import send_backup_report
 
+                    log = ""
+                    if self.engine and self.engine._current_result:
+                        log = "\n".join(self.engine._current_result.log_lines)
                     send_backup_report(
                         profile.email,
                         profile.name,
                         False,
                         str(e),
+                        details=log,
                     )
 
         threading.Thread(target=_backup_thread, daemon=True, name="Backup").start()
@@ -815,6 +860,7 @@ class BackupManagerApp:
                     profile.name,
                     True,
                     f"{stats.files_processed} files backed up",
+                    details="\n".join(stats.log_lines),
                 )
 
         except Exception as e:
@@ -827,11 +873,15 @@ class BackupManagerApp:
             if profile.email.enabled:
                 from src.notifications.email_notifier import send_backup_report
 
+                log = ""
+                if self.engine and self.engine._current_result:
+                    log = "\n".join(self.engine._current_result.log_lines)
                 send_backup_report(
                     profile.email,
                     profile.name,
                     False,
                     str(e),
+                    details=log,
                 )
 
             # Re-raise so the scheduler can trigger retry logic

@@ -60,8 +60,8 @@ class TestRotatorEdgeCases:
     def test_month_boundary_dec_to_jan(self):
         """Year transition: Dec 31 and Jan 1 are in different months."""
         backups = [
-            _backup("dec31", datetime(2025, 12, 31, 23, 0)),
-            _backup("jan01", datetime(2026, 1, 1, 1, 0)),
+            _backup("profile_FULL_dec31", datetime(2025, 12, 31, 23, 0)),
+            _backup("profile_FULL_jan01", datetime(2026, 1, 1, 1, 0)),
         ]
         backend = _make_backend(backups)
         retention = RetentionConfig(gfs_daily=0, gfs_weekly=0, gfs_monthly=2)
@@ -96,8 +96,8 @@ class TestRotatorEdgeCases:
         """gfs_daily=0 disables daily retention; weekly/monthly still work."""
         now = datetime(2026, 3, 15, 12, 0)
         backups = [
-            _backup("today", now),
-            _backup("last_week", datetime(2026, 3, 8, 12, 0)),
+            _backup("profile_FULL_today", now),
+            _backup("profile_FULL_last_week", datetime(2026, 3, 8, 12, 0)),
         ]
         backend = _make_backend(backups)
         retention = RetentionConfig(gfs_daily=0, gfs_weekly=2, gfs_monthly=0)
@@ -151,13 +151,13 @@ class TestRotatorEdgeCases:
         assert deleted == 1
 
     def test_multiple_months_monthly_picks_correct(self):
-        """Monthly retention picks one backup per month (most recent)."""
+        """Monthly retention picks one FULL backup per month (most recent)."""
         now = datetime(2026, 3, 15, 12, 0)
         backups = [
-            _backup("mar_latest", now),
-            _backup("feb_early", datetime(2026, 2, 5, 8, 0)),
-            _backup("feb_late", datetime(2026, 2, 25, 18, 0)),
-            _backup("jan", datetime(2026, 1, 10, 12, 0)),
+            _backup("profile_FULL_mar_latest", now),
+            _backup("profile_FULL_feb_early", datetime(2026, 2, 5, 8, 0)),
+            _backup("profile_FULL_feb_late", datetime(2026, 2, 25, 18, 0)),
+            _backup("profile_FULL_jan", datetime(2026, 1, 10, 12, 0)),
         ]
         backend = _make_backend(backups)
         retention = RetentionConfig(gfs_daily=0, gfs_weekly=0, gfs_monthly=3)
@@ -169,8 +169,8 @@ class TestRotatorEdgeCases:
 
         deleted_names = {c.args[0] for c in backend.delete_backup.call_args_list}
         # feb_early should be pruned (feb_late is the first seen for that month)
-        assert "feb_early" in deleted_names
-        assert "mar_latest" not in deleted_names
+        assert "profile_FULL_feb_early" in deleted_names
+        assert "profile_FULL_mar_latest" not in deleted_names
 
     def test_very_old_backups_cleaned(self):
         """Backups older than retention window are deleted."""
@@ -189,6 +189,30 @@ class TestRotatorEdgeCases:
 
         assert deleted == 1
         backend.delete_backup.assert_called_once_with("ancient")
+
+    def test_weekly_monthly_only_keeps_full_backups(self):
+        """DIFF backups should not be retained for weekly/monthly slots."""
+        now = datetime(2026, 3, 15, 12, 0)
+        backups = [
+            _backup("profile_FULL_recent", now),
+            _backup("profile_DIFF_last_week", datetime(2026, 3, 8, 12, 0)),
+            _backup("profile_FULL_two_weeks", datetime(2026, 3, 1, 12, 0)),
+        ]
+        backend = _make_backend(backups)
+        # daily=0 so only weekly applies
+        retention = RetentionConfig(gfs_daily=0, gfs_weekly=3, gfs_monthly=0)
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            rotate_backups(backend, retention)
+
+        deleted_names = {c.args[0] for c in backend.delete_backup.call_args_list}
+        # DIFF should be deleted (not eligible for weekly)
+        assert "profile_DIFF_last_week" in deleted_names
+        # FULL should be kept
+        assert "profile_FULL_two_weeks" not in deleted_names
+        assert "profile_FULL_recent" not in deleted_names
 
     def test_most_recent_always_preserved(self):
         """Most recent backup survives even with zero retention settings."""

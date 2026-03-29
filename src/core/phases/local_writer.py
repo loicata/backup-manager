@@ -58,14 +58,19 @@ def write_flat(
     return backup_dir
 
 
-def generate_backup_name(profile_name: str) -> str:
-    """Generate a timestamped backup name.
+def generate_backup_name(profile_name: str, backup_type: str = "FULL") -> str:
+    """Generate a timestamped backup name with type marker.
+
+    Args:
+        profile_name: Human-readable profile name.
+        backup_type: "FULL" or "DIFF" marker in the name.
 
     Returns:
-        Name like "ProfileName_2026-03-17_143000"
+        Name like "ProfileName_FULL_2026-03-17_143000"
     """
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     # Sanitize profile name for filesystem
     safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in profile_name)
     safe_name = safe_name.strip().replace(" ", "_")
-    return f"{safe_name}_{ts}"
+    tag = "FULL" if backup_type != "DIFF" else "DIFF"
+    return f"{safe_name}_{tag}_{ts}"

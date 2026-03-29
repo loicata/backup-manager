@@ -38,6 +38,7 @@ class PipelineContext:
 
     # Populated by phases as pipeline progresses
     files: list = field(default_factory=list)
+    all_files: list = field(default_factory=list)  # All collected files (pre-filter)
     backup_name: str = ""
     backup_path: Path | None = None
     backup_remote_name: str = ""

@@ -67,6 +67,8 @@ class BackupEngine:
         self._config = config_manager
         self._events = events or EventBus()
         self._cancelled = False
+        self._current_result: BackupResult | None = None
+        self._events.subscribe(LOG, self._capture_log)
 
     def cancel(self) -> None:
         """Request cancellation of the current backup."""
@@ -92,6 +94,7 @@ class BackupEngine:
             events=self._events,
             result=BackupResult(),
         )
+        self._current_result = ctx.result
         start_time = time.monotonic()
 
         try:
@@ -131,7 +134,12 @@ class BackupEngine:
 
     def _run_pipeline(self, ctx: PipelineContext) -> None:
         """Execute all pipeline phases sequentially."""
-        ctx.backup_name = generate_backup_name(ctx.profile.name)
+        # Auto-promote differential to full when the cycle threshold is reached
+        self._maybe_force_full(ctx)
+
+        # Generate backup name AFTER promotion so the tag is correct
+        type_tag = "DIFF" if ctx.profile.backup_type == BackupType.DIFFERENTIAL else "FULL"
+        ctx.backup_name = generate_backup_name(ctx.profile.name, type_tag)
 
         # Phase 1: Collect
         self._phase_collect(ctx)
@@ -139,7 +147,7 @@ class BackupEngine:
             self._emit_status("success")
             return
 
-        # Phase 2: Filter (incremental/differential)
+        # Phase 2: Filter (differential only)
         self._phase_filter(ctx)
         if not ctx.files:
             self._emit_status("success")
@@ -182,6 +190,10 @@ class BackupEngine:
         # Phase 11: Cleanup temp artifacts
         self._phase_cleanup(ctx)
 
+        # Restore profile type if it was temporarily promoted to full
+        if getattr(ctx, "forced_full", False):
+            ctx.profile.backup_type = BackupType.DIFFERENTIAL
+
     def _phase_cleanup(self, ctx: PipelineContext) -> None:
         """Phase 11: Remove temporary artifacts from backup directory."""
         if ctx.backup_path and ctx.backup_path.exists() and ctx.backup_path.is_dir():
@@ -204,16 +216,22 @@ class BackupEngine:
             ctx.profile.exclude_patterns,
             self._events,
         )
+        ctx.all_files = list(ctx.files)  # Preserve full list for manifest
         ctx.result.files_found = len(ctx.files)
         ctx.result.bytes_source = sum(f.size for f in ctx.files)
         if not ctx.files:
             self._log("No files to back up")
 
     def _phase_filter(self, ctx: PipelineContext) -> None:
-        """Phase 2: Filter changed files for incremental/differential."""
+        """Phase 2: Filter changed files for differential backup.
+
+        Differential compares against the manifest written by the last
+        full backup.  If no manifest exists, all files are included
+        (equivalent to a full backup).
+        """
         self._phase("Filtering changed files...")
         self._check_cancel()
-        if ctx.profile.backup_type in (BackupType.INCREMENTAL, BackupType.DIFFERENTIAL):
+        if ctx.profile.backup_type == BackupType.DIFFERENTIAL:
             manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
             ctx.files = filter_changed_files(ctx.files, manifest_path, self._events)
             ctx.result.files_skipped = ctx.result.files_found - len(ctx.files)
@@ -497,12 +515,48 @@ class BackupEngine:
                 self._events,
             )
 
-    def _phase_update_delta(self, ctx: PipelineContext) -> None:
-        """Phase 8: Update delta manifest for incremental tracking."""
-        self._phase("Updating manifest...")
+    def _maybe_force_full(self, ctx: PipelineContext) -> None:
+        """Auto-promote differential to full when cycle threshold is reached.
+
+        When a profile is set to differential, a full backup is forced
+        every ``full_backup_every`` runs.  The first differential (no
+        manifest) is also promoted to full automatically.
+
+        Sets ``ctx.forced_full`` to True when promotion happens.  The
+        profile's ``backup_type`` is changed to FULL for this run only
+        and restored after the pipeline completes.
+        """
+        ctx.forced_full = False
+        if ctx.profile.backup_type != BackupType.DIFFERENTIAL:
+            return
+
         manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
-        delta_manifest = build_updated_manifest(ctx.files, ctx.file_hashes)
-        save_manifest(delta_manifest, manifest_path)
+        no_manifest = not manifest_path.exists()
+        cycle_reached = ctx.profile.differential_count >= ctx.profile.full_backup_every
+
+        if no_manifest or cycle_reached:
+            ctx.forced_full = True
+            ctx.profile.backup_type = BackupType.FULL
+            reason = "no manifest" if no_manifest else "cycle reached"
+            self._log(f"Forcing full backup ({reason})")
+
+    def _phase_update_delta(self, ctx: PipelineContext) -> None:
+        """Phase 8: Update manifest for differential tracking.
+
+        After a full backup: writes the manifest and resets the
+        differential counter.  After a differential backup:
+        increments the counter.  The manifest is never overwritten
+        by a differential, so it always reflects the last full.
+        """
+        manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
+
+        if ctx.profile.backup_type == BackupType.FULL:
+            self._phase("Updating manifest...")
+            full_manifest = build_updated_manifest(ctx.all_files, ctx.file_hashes)
+            save_manifest(full_manifest, manifest_path)
+            ctx.profile.differential_count = 0
+        else:
+            ctx.profile.differential_count += 1
 
     def _phase_mirror(self, ctx: PipelineContext) -> None:
         """Phase 9: Mirror upload to secondary destinations."""
@@ -816,6 +870,11 @@ class BackupEngine:
     def _log(self, message: str) -> None:
         logger.info(message)
         self._events.emit(LOG, message=message, level="info")
+
+    def _capture_log(self, message: str, **_kwargs) -> None:
+        """Capture all LOG events (engine + phases) into BackupResult."""
+        if self._current_result is not None:
+            self._current_result.log_lines.append(message)
 
     def _emit_status(self, state: str) -> None:
         self._events.emit(STATUS, state=state)

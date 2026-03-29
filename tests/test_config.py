@@ -122,7 +122,7 @@ class TestBackupProfile:
 
     def test_default_backup_type(self):
         p = BackupProfile()
-        assert p.backup_type == BackupType.FULL
+        assert p.backup_type == BackupType.DIFFERENTIAL
 
 
 class TestConfigManager:
@@ -200,7 +200,7 @@ class TestConfigManager:
         mgr = ConfigManager(config_dir=tmp_config_dir)
         profile = BackupProfile(
             name="Enum Test",
-            backup_type=BackupType.INCREMENTAL,
+            backup_type=BackupType.DIFFERENTIAL,
             storage=StorageConfig(storage_type=StorageType.SFTP, sftp_host="example.com"),
             schedule=ScheduleConfig(frequency=ScheduleFrequency.WEEKLY),
             retention=RetentionConfig(policy=RetentionPolicy.GFS),
@@ -208,7 +208,7 @@ class TestConfigManager:
         mgr.save_profile(profile)
 
         loaded = mgr.get_all_profiles()[0]
-        assert loaded.backup_type == BackupType.INCREMENTAL
+        assert loaded.backup_type == BackupType.DIFFERENTIAL
         assert loaded.storage.storage_type == StorageType.SFTP
         assert loaded.schedule.frequency == ScheduleFrequency.WEEKLY
         assert loaded.retention.policy == RetentionPolicy.GFS

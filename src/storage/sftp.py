@@ -684,6 +684,21 @@ class SFTPStorage(StorageBackend):
 
         logger.info("Deleted remote backup: %s", remote_name)
 
+        # Remove associated .wbverify manifest if present
+        verify_path = self._join_remote(f"{remote_name}.wbverify")
+        transport2 = self._get_transport()
+        try:
+            sftp2 = self._get_sftp(transport2)
+            try:
+                sftp2.remove(verify_path)
+                logger.info("Deleted remote manifest: %s.wbverify", remote_name)
+            except FileNotFoundError:
+                pass
+            finally:
+                sftp2.close()
+        finally:
+            transport2.close()
+
     def _recursive_remove(self, sftp, path: str) -> None:
         """Recursively remove a remote directory."""
         for entry in sftp.listdir_attr(path):

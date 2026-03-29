@@ -245,18 +245,18 @@ class TestSFTPAsPrimaryStorage:
         assert any("Uploading" in m for m in log_msgs)
         assert any("complete" in m.lower() for m in log_msgs)
 
-    def test_incremental_backup_to_sftp(
+    def test_differential_backup_to_sftp(
         self,
         source_files,
         config_manager,
         remote_storage_path,
     ):
-        """Incremental backup should skip unchanged files."""
+        """Differential backup should skip unchanged files."""
         profile = BackupProfile(
-            id="sftp_incr",
-            name="SFTP Incremental",
+            id="sftp_diff",
+            name="SFTP Differential",
             source_paths=[str(source_files)],
-            backup_type=BackupType.INCREMENTAL,
+            backup_type=BackupType.DIFFERENTIAL,
             storage=_make_sftp_storage_config(remote_storage_path),
             retention=RetentionConfig(
                 policy=RetentionPolicy.GFS,

@@ -117,15 +117,37 @@ python -m src
 
 ## Quick Start
 
-1. **Launch** Backup Manager — the Setup Wizard appears on first run.
-2. **Name** your backup profile (e.g. "My Documents", "Work Projects").
-3. **Select sources** — add folders or individual files to back up.
-4. **Choose destination** — local drive, network share, or remote server.
-5. **Configure mirrors** (optional) — add up to 2 additional destinations.
-6. **Set encryption** (optional) — protect sensitive data with AES-256-GCM.
-7. **Set schedule** — choose frequency (daily is recommended).
-8. **Configure retention** — set how many daily, weekly, and monthly backups to keep.
-9. **Click Finish** — your first backup is ready to run.
+### Setup Wizard (first run)
+
+On first launch, a 3-step wizard guides you through the essential configuration:
+
+1. **Profile name** — give your backup a meaningful name (e.g. "My Documents", "Work Projects").
+2. **What to back up?** — add one or more source folders to include in the backup.
+3. **Where to store?** — choose a primary storage destination:
+   - External drive / USB stick
+   - Network folder (UNC path)
+   - Remote server via SFTP (SSH)
+   - S3 Cloud Storage (AWS, Scaleway, Wasabi, OVH, DigitalOcean, Cloudflare, Backblaze)
+
+Click **Finish** — the wizard creates your profile with a daily schedule enabled by default.
+
+### Main interface
+
+After the wizard, you land on the main interface. Before launching your first backup, you can fine-tune every aspect of the configuration through the following tabs:
+
+| Tab | Description |
+|-----|-------------|
+| **Run** | Launch a backup manually, view real-time progress and logs |
+| **General** | Profile name, backup type (Full / Differential), source folders, full backup cycle |
+| **Storage** | Primary storage destination and connection settings |
+| **Mirror 1** | First optional mirror destination (local, network, SFTP, or S3) |
+| **Mirror 2** | Second optional mirror destination |
+| **Encryption** | AES-256-GCM encryption per destination (primary, mirror 1, mirror 2) |
+| **Schedule** | Backup frequency (manual, hourly, daily, weekly, monthly) and time |
+| **Retention** | GFS rotation policy — how many daily, weekly, and monthly backups to keep |
+| **Email** | Email notifications on backup success or failure (SMTP configuration) |
+| **Recovery** | Restore a local backup or retrieve files from a remote destination |
+| **History** | View past backup results and logs |
 
 Click **Start backup** on the Run tab to perform an immediate backup, or let the scheduler handle it automatically.
 

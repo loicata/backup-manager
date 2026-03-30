@@ -1,6 +1,6 @@
 """Feature detection for optional dependencies.
 
-Checks if optional packages (paramiko, boto3, pyotp) are installed
+Checks if optional packages (paramiko, boto3) are installed
 and provides graceful degradation when they're missing.
 """
 
@@ -12,13 +12,10 @@ logger = logging.getLogger(__name__)
 FEAT_ENCRYPTION = "encryption"
 FEAT_S3 = "s3"
 FEAT_SFTP = "sftp"
-FEAT_PROTON = "proton"
-
 _FEATURE_DEPS = {
     FEAT_ENCRYPTION: ["cryptography"],
     FEAT_S3: ["boto3", "botocore"],
     FEAT_SFTP: ["paramiko"],
-    FEAT_PROTON: [],  # rclone is external, checked at runtime
 }
 
 

@@ -158,10 +158,6 @@ class TestRetrieveAutoFillS3:
 
     def test_find_profile_config_priority(self, recovery_tab):
         """Main storage is preferred over mirrors when both match."""
-        s3_main = StorageConfig(
-            storage_type=StorageType.S3,
-            s3_bucket="main-bucket",
-        )
         s3_mirror = StorageConfig(
             storage_type=StorageType.S3,
             s3_bucket="mirror-bucket",

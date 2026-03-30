@@ -82,7 +82,7 @@ class EncryptionTab(ScrollableTab):
         tk.Label(
             mode_frame,
             text=desc_line1,
-            fg="#cc7700",
+            fg=Colors.ACCENT,
             wraplength=900,
             justify="left",
             anchor="w",
@@ -90,7 +90,7 @@ class EncryptionTab(ScrollableTab):
         tk.Label(
             mode_frame,
             text=desc_line2,
-            fg="#cc7700",
+            fg=Colors.ACCENT,
             wraplength=900,
             justify="left",
             anchor="w",
@@ -106,13 +106,13 @@ class EncryptionTab(ScrollableTab):
         tk.Label(
             mode_frame,
             text=warning_line1,
-            fg="#cc7700",
+            fg=Colors.ACCENT,
             anchor="w",
         ).pack(fill="x", pady=(12, 0))
         tk.Label(
             mode_frame,
             text=warning_line2,
-            fg="#cc7700",
+            fg=Colors.ACCENT,
             wraplength=900,
             justify="left",
             anchor="w",

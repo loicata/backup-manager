@@ -1,11 +1,13 @@
 """Tests for src.storage.local — LocalStorage."""
 
 import io
+import os
+import stat
 from pathlib import Path
 
 import pytest
 
-from src.storage.local import LocalStorage
+from src.storage.local import SYSTEM_FOLDERS, LocalStorage, _force_remove_readonly
 
 
 class TestLocalStorage:
@@ -146,3 +148,50 @@ class TestLocalStorage:
         names = [b["name"] for b in backups]
         assert "visible.txt" in names
         assert ".hidden" not in names
+
+    def test_system_folders_excluded_from_list(self, storage):
+        """Windows system folders must never appear as backups."""
+        for folder in SYSTEM_FOLDERS:
+            (Path(storage._dest) / folder).mkdir(exist_ok=True)
+        (Path(storage._dest) / "real_backup").mkdir()
+        (Path(storage._dest) / "real_backup" / "file.txt").write_text("ok", encoding="utf-8")
+
+        backups = storage.list_backups()
+        names = [b["name"] for b in backups]
+        assert "real_backup" in names
+        for folder in SYSTEM_FOLDERS:
+            assert folder not in names
+
+    def test_dollar_prefixed_folders_excluded_from_list(self, storage):
+        """Folders starting with $ (e.g. $RECYCLE.BIN) must be excluded."""
+        (Path(storage._dest) / "$SomeSystemDir").mkdir()
+        (Path(storage._dest) / "valid_backup").mkdir()
+        backups = storage.list_backups()
+        names = [b["name"] for b in backups]
+        assert "valid_backup" in names
+        assert "$SomeSystemDir" not in names
+
+    def test_delete_readonly_file_in_directory(self, storage, tmp_path):
+        """delete_backup must handle read-only files inside backup dirs."""
+        src_dir = tmp_path / "readonly_backup"
+        src_dir.mkdir()
+        locked_file = src_dir / "locked.scr"
+        locked_file.write_text("screensaver", encoding="utf-8")
+        storage.upload(src_dir, "readonly_backup")
+
+        # Set file as read-only inside the destination
+        target_file = Path(storage._dest) / "readonly_backup" / "locked.scr"
+        target_file.chmod(stat.S_IREAD)
+
+        # delete_backup should succeed despite read-only file
+        storage.delete_backup("readonly_backup")
+        assert not (Path(storage._dest) / "readonly_backup").exists()
+
+    def test_force_remove_readonly_non_permission_error(self, tmp_path):
+        """_force_remove_readonly logs warning for non-PermissionError."""
+        # Should not raise — just log
+        _force_remove_readonly(
+            os.remove,
+            str(tmp_path / "nonexistent"),
+            (FileNotFoundError, FileNotFoundError("not found"), None),
+        )

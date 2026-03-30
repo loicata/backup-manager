@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from src.core.config import BackupProfile, EmailConfig
-from src.notifications.email_notifier import SMTP_PRESETS, send_test_email
+from src.notifications.email_notifier import SMTP_AUTH_HINTS, SMTP_PRESETS, send_test_email
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 
@@ -77,6 +77,16 @@ class EmailTab(ScrollableTab):
             else:
                 ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
 
+        # Password auth hint (shown below password field)
+        self._auth_hint_label = ttk.Label(
+            smtp_frame,
+            text="",
+            foreground=Colors.ACCENT,
+            font=Fonts.small(),
+            justify="left",
+        )
+        self._auth_hint_label.pack(anchor="w", padx=(0, 0))
+
         # TLS
         self.tls_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(smtp_frame, text="Use TLS (STARTTLS)", variable=self.tls_var).pack(
@@ -109,6 +119,12 @@ class EmailTab(ScrollableTab):
         self._vars["host"].set(preset.get("host", ""))
         self._vars["port"].set(str(preset.get("port", 587)))
         self.tls_var.set(preset.get("tls", True))
+        self._update_auth_hint(name)
+
+    def _update_auth_hint(self, provider: str) -> None:
+        """Show provider-specific authentication instructions."""
+        hint = SMTP_AUTH_HINTS.get(provider, "")
+        self._auth_hint_label.config(text=hint)
 
     def _test_email(self):
         self.test_label.config(text="Sending...", foreground=Colors.WARNING)

@@ -295,6 +295,7 @@ class TestConfigManager:
         assert profiles[0].name == "Old Profile"
         assert not hasattr(profiles[0], "compress") or "compress" not in vars(profiles[0])
 
+
 class TestComputeDestinationsHash:
     """Tests for compute_destinations_hash."""
 

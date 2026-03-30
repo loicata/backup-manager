@@ -37,7 +37,6 @@ APP_FILES = [
     "storage/local.py",
     "storage/sftp.py",
     "storage/s3.py",
-    "storage/proton.py",
     "notifications/email_notifier.py",
     "installer.py",
 ]

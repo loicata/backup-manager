@@ -112,7 +112,9 @@ class TestFilter:
         files = collect_files([str(sample_files)])
         result = filter_changed_files(files, manifest_path)
         assert len(result) >= 1
-        assert any(f.relative_path.endswith("/file1.txt") or f.relative_path == "file1.txt" for f in result)
+        assert any(
+            f.relative_path.endswith("/file1.txt") or f.relative_path == "file1.txt" for f in result
+        )
 
     def test_new_file_included(self, sample_files, tmp_path):
         files = collect_files([str(sample_files)])
@@ -123,7 +125,10 @@ class TestFilter:
         (sample_files / "new_file.txt").write_text("new", encoding="utf-8")
         files = collect_files([str(sample_files)])
         result = filter_changed_files(files, manifest_path)
-        assert any(f.relative_path.endswith("/new_file.txt") or f.relative_path == "new_file.txt" for f in result)
+        assert any(
+            f.relative_path.endswith("/new_file.txt") or f.relative_path == "new_file.txt"
+            for f in result
+        )
 
 
 # --- LocalWriter tests ---

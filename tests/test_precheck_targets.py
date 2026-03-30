@@ -253,12 +253,3 @@ class TestDescribeTarget:
         assert "S3 bucket" in msg
         assert "my-bucket" in msg
         assert "aws" in msg
-
-    def test_proton(self):
-        config = StorageConfig(
-            storage_type=StorageType.PROTON,
-            proton_username="user@proton.me",
-        )
-        msg = BackupEngine._describe_target(config)
-        assert "Proton Drive" in msg
-        assert "user@proton.me" in msg

@@ -1,4 +1,4 @@
-"""Phase 3b: Stream files to remote destination (SFTP/S3/Proton).
+"""Phase 3b: Stream files to remote destination (SFTP/S3).
 
 No temp files, no ZIP — each file is uploaded individually,
 or as a single tar stream when the backend supports it.
@@ -39,7 +39,7 @@ def write_remote(
 
     Args:
         files: Files to back up.
-        backend: Storage backend (SFTP, S3, Proton).
+        backend: Storage backend (SFTP, S3).
         backup_name: Name for this backup (remote directory).
         encrypt_password: If set, encrypt each file before upload.
         events: Optional event bus.

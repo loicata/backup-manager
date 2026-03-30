@@ -4,7 +4,9 @@ Supports flat directory copy and file-by-file streaming.
 """
 
 import logging
+import os
 import shutil
+import stat
 import threading
 from pathlib import Path
 from typing import BinaryIO
@@ -14,6 +16,39 @@ from src.storage.base import StorageBackend
 logger = logging.getLogger(__name__)
 
 CONNECTION_TIMEOUT = 10  # seconds
+
+# Windows system folders that must never be treated as backups
+SYSTEM_FOLDERS = frozenset(
+    {
+        "System Volume Information",
+        "$RECYCLE.BIN",
+        "RECYCLER",
+        "Recovery",
+        "found.000",
+    }
+)
+
+
+def _force_remove_readonly(func, path: str, exc_info) -> None:
+    """Handle read-only files during shutil.rmtree.
+
+    On Windows, files like .scr or system-protected files may have the
+    read-only attribute set, causing PermissionError on deletion.
+    This callback clears the read-only flag and retries.
+
+    Args:
+        func: The function that raised the exception (os.remove, etc.).
+        path: The path that caused the error.
+        exc_info: Exception info tuple (type, value, traceback).
+    """
+    if isinstance(exc_info[1], PermissionError):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception as retry_err:
+            logger.warning("Could not force-remove %s: %s", path, retry_err)
+    else:
+        logger.warning("rmtree error on %s: %s", path, exc_info[1])
 
 
 class LocalStorage(StorageBackend):
@@ -68,7 +103,11 @@ class LocalStorage(StorageBackend):
         for entry in self._dest.iterdir():
             if entry.name.startswith("."):
                 continue
+            if entry.name.startswith("$"):
+                continue
             if entry.suffix == ".wbverify":
+                continue
+            if entry.name in SYSTEM_FOLDERS:
                 continue
             stat = entry.stat()
             if entry.is_dir():
@@ -91,7 +130,7 @@ class LocalStorage(StorageBackend):
         """Delete a backup and its associated .wbverify manifest."""
         target = self._dest / remote_name
         if target.is_dir():
-            shutil.rmtree(target)
+            shutil.rmtree(target, onerror=_force_remove_readonly)
         elif target.exists():
             target.unlink()
         else:

@@ -181,7 +181,7 @@ def _write_source_files_to_local(
 ) -> None:
     """Copy source files to a local mirror when primary storage is remote.
 
-    When the primary backup is on a remote server (SFTP/S3/Proton),
+    When the primary backup is on a remote server (SFTP/S3),
     there is no local backup directory to copy from. Instead, copy
     the original source files directly to the mirror destination,
     preserving relative paths.
@@ -224,6 +224,4 @@ def _describe_mirror(config: StorageConfig) -> str:
         return f"SSH {config.sftp_username}@{config.sftp_host}:{config.sftp_port}"
     if st == StorageType.S3:
         return f"S3 {config.s3_bucket}"
-    if st == StorageType.PROTON:
-        return f"Proton Drive ({config.proton_username})"
     return config.storage_type.value

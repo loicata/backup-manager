@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 from src.core.config import EmailConfig
 from src.notifications.email_notifier import (
+    SMTP_AUTH_HINTS,
+    SMTP_PRESETS,
     _build_html,
     send_backup_report,
     send_test_email,
@@ -183,3 +185,17 @@ class TestEmailNotifier:
                 cancelled=True,
             )
             assert ok is True
+
+    def test_auth_hints_exist_for_all_presets(self):
+        """Every SMTP preset must have a corresponding auth hint."""
+        for provider in SMTP_PRESETS:
+            assert provider in SMTP_AUTH_HINTS, f"Missing auth hint for {provider}"
+            assert len(SMTP_AUTH_HINTS[provider]) > 0
+
+    def test_gmail_hint_mentions_app_password(self):
+        """Gmail hint must mention App Password."""
+        assert "App Password" in SMTP_AUTH_HINTS["gmail"]
+
+    def test_protonmail_hint_mentions_bridge(self):
+        """ProtonMail hint must mention Bridge."""
+        assert "Bridge" in SMTP_AUTH_HINTS["protonmail"]

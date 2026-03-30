@@ -35,15 +35,10 @@ class TestStorageConfig:
         cfg = StorageConfig(storage_type=StorageType.S3, s3_bucket="my-bucket")
         assert cfg.is_remote() is True
 
-    def test_proton_is_remote(self):
-        cfg = StorageConfig(storage_type=StorageType.PROTON, proton_username="user@proton.me")
-        assert cfg.is_remote() is True
-
     def test_default_values(self):
         cfg = StorageConfig()
         assert cfg.sftp_port == 22
         assert cfg.s3_region == "eu-west-1"
-        assert cfg.proton_remote_path == "/Backups"
 
     # --- __post_init__ validation tests ---
 
@@ -73,10 +68,6 @@ class TestStorageConfig:
         with pytest.raises(ValueError, match="s3_bucket is required"):
             StorageConfig(storage_type=StorageType.S3, s3_bucket="")
 
-    def test_proton_empty_username_raises(self):
-        with pytest.raises(ValueError, match="proton_username is required"):
-            StorageConfig(storage_type=StorageType.PROTON, proton_username="")
-
     def test_local_valid_destination_ok(self):
         cfg = StorageConfig(storage_type=StorageType.LOCAL, destination_path="/tmp/backup")
         assert cfg.destination_path == "/tmp/backup"
@@ -88,10 +79,6 @@ class TestStorageConfig:
     def test_s3_valid_bucket_ok(self):
         cfg = StorageConfig(storage_type=StorageType.S3, s3_bucket="my-backup-bucket")
         assert cfg.s3_bucket == "my-backup-bucket"
-
-    def test_proton_valid_username_ok(self):
-        cfg = StorageConfig(storage_type=StorageType.PROTON, proton_username="user@proton.me")
-        assert cfg.proton_username == "user@proton.me"
 
     def test_default_storage_config_no_validation(self):
         """Default StorageConfig() should not raise — allows empty defaults."""
@@ -295,7 +282,7 @@ class TestConfigManager:
             "compress": True,  # Removed field — must be ignored
             "storage": {"storage_type": "local", "destination_path": "/tmp"},
             "schedule": {"frequency": "manual"},
-            "retention": {"policy": "simple", "max_backups": 5},
+            "retention": {"policy": "gfs", "max_backups": 5},
             "encryption": {"enabled": False, "stored_password": ""},
             "verification": {"auto_verify": True, "alert_on_failure": True},
             "email": {"enabled": False},
@@ -307,67 +294,6 @@ class TestConfigManager:
         assert len(profiles) == 1
         assert profiles[0].name == "Old Profile"
         assert not hasattr(profiles[0], "compress") or "compress" not in vars(profiles[0])
-
-    def test_migrate_encryption_mode_all(self, tmp_config_dir):
-        """Old 'encryption_mode: all' migrates to 3 boolean flags."""
-        mgr = ConfigManager(config_dir=tmp_config_dir)
-        old_data = {
-            "id": "encall1",
-            "name": "Enc All",
-            "backup_type": "full",
-            "encryption_mode": "all",
-            "storage": {"storage_type": "local", "destination_path": "/tmp"},
-            "encryption": {"enabled": True, "stored_password": "secret"},
-        }
-        filepath = tmp_config_dir / "profiles" / "encall1.json"
-        filepath.write_text(json.dumps(old_data), encoding="utf-8")
-
-        profiles = mgr.get_all_profiles()
-        assert len(profiles) == 1
-        p = profiles[0]
-        assert p.encrypt_primary is True
-        assert p.encrypt_mirror1 is True
-        assert p.encrypt_mirror2 is True
-
-    def test_migrate_encryption_mode_mirror1(self, tmp_config_dir):
-        """Old 'encryption_mode: mirror1_only' migrates correctly."""
-        mgr = ConfigManager(config_dir=tmp_config_dir)
-        old_data = {
-            "id": "encm1",
-            "name": "Mirror1 Enc",
-            "backup_type": "full",
-            "encryption_mode": "mirror1_only",
-            "storage": {"storage_type": "local", "destination_path": "/tmp"},
-            "encryption": {"enabled": True, "stored_password": "pw"},
-        }
-        filepath = tmp_config_dir / "profiles" / "encm1.json"
-        filepath.write_text(json.dumps(old_data), encoding="utf-8")
-
-        profiles = mgr.get_all_profiles()
-        p = profiles[0]
-        assert p.encrypt_primary is False
-        assert p.encrypt_mirror1 is True
-        assert p.encrypt_mirror2 is False
-
-    def test_migrate_encryption_mode_none(self, tmp_config_dir):
-        """Old 'encryption_mode: none' results in all flags False."""
-        mgr = ConfigManager(config_dir=tmp_config_dir)
-        old_data = {
-            "id": "encnone",
-            "name": "No Enc",
-            "backup_type": "full",
-            "encryption_mode": "none",
-            "storage": {"storage_type": "local", "destination_path": "/tmp"},
-        }
-        filepath = tmp_config_dir / "profiles" / "encnone.json"
-        filepath.write_text(json.dumps(old_data), encoding="utf-8")
-
-        profiles = mgr.get_all_profiles()
-        p = profiles[0]
-        assert p.encrypt_primary is False
-        assert p.encrypt_mirror1 is False
-        assert p.encrypt_mirror2 is False
-
 
 class TestComputeDestinationsHash:
     """Tests for compute_destinations_hash."""

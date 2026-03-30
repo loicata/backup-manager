@@ -9,13 +9,12 @@ import logging
 from pathlib import Path
 from typing import BinaryIO
 
-from src.storage.base import StorageBackend, with_retry
+from src.storage.base import StorageBackend, long_path_mkdir, long_path_str, with_retry
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_ENDPOINTS = {
     "aws": None,  # Default AWS endpoint
-    "minio": "https://localhost:9000",
     "wasabi": "https://s3.{region}.wasabisys.com",
     "ovh": "https://s3.{region}.cloud.ovh.net",
     "scaleway": "https://s3.{region}.scw.cloud",
@@ -23,6 +22,28 @@ PROVIDER_ENDPOINTS = {
     "cloudflare": "https://{account_id}.r2.cloudflarestorage.com",
     "backblaze_s3": "https://s3.{region}.backblazeb2.com",
     "other": None,
+}
+
+# Regions per provider — first entry is the default for new configurations
+PROVIDER_REGIONS: dict[str, list[str]] = {
+    "aws": [
+        "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1", "eu-central-2",
+        "eu-north-1", "eu-south-1", "eu-south-2",
+        "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+        "ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "ap-northeast-2",
+        "ap-south-1", "ca-central-1", "sa-east-1", "me-south-1", "af-south-1",
+    ],
+    "wasabi": [
+        "eu-central-1", "eu-central-2", "eu-west-1", "eu-west-2",
+        "us-east-1", "us-east-2", "us-central-1", "us-west-1",
+        "ap-northeast-1", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2",
+    ],
+    "ovh": ["gra", "sbg", "bhs", "de", "uk", "waw"],
+    "scaleway": ["fr-par", "nl-ams", "pl-waw"],
+    "digitalocean": ["nyc3", "sfo3", "ams3", "sgp1", "fra1", "blr1", "syd1"],
+    "cloudflare": ["auto"],
+    "backblaze_s3": ["us-west-002", "us-west-004", "eu-central-003"],
+    "other": [],
 }
 
 
@@ -124,6 +145,10 @@ class S3Storage(StorageBackend):
         """List top-level backups in the S3 prefix."""
         client = self._get_client()
         prefix = f"{self._prefix}/" if self._prefix else ""
+        logger.info(
+            "list_backups: bucket=%s prefix=%r endpoint=%s",
+            self._bucket, prefix, self._endpoint_url,
+        )
         backups = []
 
         # Use delimiter to get top-level "folders" and files
@@ -131,14 +156,17 @@ class S3Storage(StorageBackend):
         pages = paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/")
 
         for page in pages:
-            # Common prefixes (directories)
+            # Common prefixes (directories) — no LastModified from S3 API.
             for cp in page.get("CommonPrefixes", []):
-                name = cp["Prefix"].rstrip("/").rsplit("/", 1)[-1]
+                dir_prefix = cp["Prefix"]
+                name = dir_prefix.rstrip("/").rsplit("/", 1)[-1]
+                # Fetch the newest object inside this prefix to get a date.
+                mtime = self._get_prefix_mtime(client, dir_prefix)
                 backups.append(
                     {
                         "name": name,
                         "size": 0,
-                        "modified": 0,
+                        "modified": mtime,
                         "is_dir": True,
                     }
                 )
@@ -148,16 +176,48 @@ class S3Storage(StorageBackend):
                 key = obj["Key"]
                 name = key.rsplit("/", 1)[-1]
                 if name and key != prefix:
+                    last_mod = obj.get("LastModified", 0)
+                    if hasattr(last_mod, "timestamp"):
+                        last_mod = last_mod.timestamp()
                     backups.append(
                         {
                             "name": name,
                             "size": obj.get("Size", 0),
-                            "modified": obj.get("LastModified", 0),
+                            "modified": last_mod,
                             "is_dir": False,
                         }
                     )
 
         return backups
+
+    def _get_prefix_mtime(self, client, dir_prefix: str) -> float:
+        """Get the modification time of the newest object under a prefix.
+
+        S3 CommonPrefixes (virtual directories) have no LastModified.
+        This method fetches one object from the prefix to approximate
+        the backup date.
+
+        Args:
+            client: boto3 S3 client.
+            dir_prefix: The S3 prefix ending with '/'.
+
+        Returns:
+            Unix timestamp of the newest object, or 0 if empty.
+        """
+        try:
+            resp = client.list_objects_v2(
+                Bucket=self._bucket,
+                Prefix=dir_prefix,
+                MaxKeys=1,
+            )
+            for obj in resp.get("Contents", []):
+                last_mod = obj.get("LastModified", 0)
+                if hasattr(last_mod, "timestamp"):
+                    return last_mod.timestamp()
+                return float(last_mod) if last_mod else 0.0
+        except Exception:
+            logger.warning("Failed to get mtime for prefix %s", dir_prefix)
+        return 0.0
 
     @with_retry(max_retries=3, base_delay=2.0)
     def delete_backup(self, remote_name: str) -> None:
@@ -272,9 +332,9 @@ class S3Storage(StorageBackend):
 
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
         """Download a backup from S3 to a local directory."""
-        local_dir.mkdir(parents=True, exist_ok=True)
+        long_path_mkdir(local_dir)
         dst = local_dir / remote_name
-        dst.mkdir(parents=True, exist_ok=True)
+        long_path_mkdir(dst)
 
         client = self._get_client()
         prefix = self._s3_key(remote_name)
@@ -289,8 +349,8 @@ class S3Storage(StorageBackend):
                 if not rel:
                     continue
                 local_file = dst / rel
-                local_file.parent.mkdir(parents=True, exist_ok=True)
-                client.download_file(self._bucket, key, str(local_file))
+                long_path_mkdir(local_file.parent)
+                client.download_file(self._bucket, key, long_path_str(local_file))
         return dst
 
     def _make_progress_cb(self, total: int):

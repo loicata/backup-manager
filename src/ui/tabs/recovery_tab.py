@@ -33,6 +33,7 @@ class RecoveryTab(ScrollableTab):
         self._profile: BackupProfile | None = None
         self._features = get_available_features()
         self._retrieve_config_frames: dict[str, ttk.Frame] = {}
+        self._filling_retrieve = False
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -89,7 +90,7 @@ class RecoveryTab(ScrollableTab):
         ttk.Label(
             pw_frame,
             text=("We recommend always typing your password manually " "to verify it is correct."),
-            foreground=Colors.WARNING,
+            foreground=Colors.ACCENT,
             font=Fonts.small(),
             wraplength=1200,
             justify="left",
@@ -149,7 +150,6 @@ class RecoveryTab(ScrollableTab):
         type_options = [
             (StorageType.SFTP, "Remote server", FEAT_SFTP in self._features),
             (StorageType.S3, "S3 cloud", FEAT_S3 in self._features),
-            (StorageType.PROTON, "Proton Drive", True),
         ]
 
         for stype, label, available in type_options:
@@ -170,7 +170,6 @@ class RecoveryTab(ScrollableTab):
         self._build_retrieve_network_config()
         self._build_retrieve_sftp_config()
         self._build_retrieve_s3_config()
-        self._build_retrieve_proton_config()
 
         # --- Retrieve destination ---
         dest_frame = ttk.LabelFrame(
@@ -288,21 +287,21 @@ class RecoveryTab(ScrollableTab):
         self._ret_s3_provider_var = tk.StringVar(value="aws")
         providers = [
             "aws",
-            "minio",
+            "scaleway",
             "wasabi",
             "ovh",
-            "scaleway",
             "digitalocean",
             "cloudflare",
             "backblaze_s3",
             "other",
         ]
-        ttk.Combobox(
+        self._ret_s3_provider_cb = ttk.Combobox(
             frame,
             textvariable=self._ret_s3_provider_var,
             values=providers,
             state="readonly",
-        ).pack(fill="x")
+        )
+        self._ret_s3_provider_cb.pack(fill="x")
 
         fields = [
             ("Bucket", "s3_bucket", ""),
@@ -310,7 +309,7 @@ class RecoveryTab(ScrollableTab):
             ("Region", "s3_region", "eu-west-1"),
             ("Access Key", "s3_access_key", ""),
             ("Secret Key", "s3_secret_key", ""),
-            ("Endpoint URL (for S3-compatible)", "s3_endpoint_url", ""),
+            ("Endpoint URL (optional — auto-detected from provider)", "s3_endpoint_url", ""),
         ]
 
         self._ret_s3_vars: dict[str, tk.StringVar] = {}
@@ -319,29 +318,6 @@ class RecoveryTab(ScrollableTab):
             var = tk.StringVar(value=default)
             self._ret_s3_vars[key] = var
             if "secret" in key:
-                ttk.Entry(frame, textvariable=var, show="●").pack(fill="x")
-            else:
-                ttk.Entry(frame, textvariable=var).pack(fill="x")
-
-    def _build_retrieve_proton_config(self) -> None:
-        """Build config fields for Proton Drive."""
-        frame = ttk.Frame(self._retrieve_config_container)
-        self._retrieve_config_frames["proton"] = frame
-
-        fields = [
-            ("Proton username", "proton_username", ""),
-            ("Proton password", "proton_password", ""),
-            ("2FA seed (optional)", "proton_2fa", ""),
-            ("Remote path", "proton_remote_path", "/Backups"),
-            ("rclone path (optional)", "proton_rclone_path", ""),
-        ]
-
-        self._ret_proton_vars: dict[str, tk.StringVar] = {}
-        for label, key, default in fields:
-            ttk.Label(frame, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
-            var = tk.StringVar(value=default)
-            self._ret_proton_vars[key] = var
-            if "password" in key or "2fa" in key:
                 ttk.Entry(frame, textvariable=var, show="●").pack(fill="x")
             else:
                 ttk.Entry(frame, textvariable=var).pack(fill="x")
@@ -358,7 +334,8 @@ class RecoveryTab(ScrollableTab):
         self._fill_retrieve_from_config(config)
 
     def _on_retrieve_type_changed(self, *_args) -> None:
-        """Show config fields for the selected storage type."""
+        """Show config fields for the selected storage type and auto-fill."""
+        # Always switch visible frame, even during programmatic fill.
         for frame in self._retrieve_config_frames.values():
             frame.pack_forget()
 
@@ -366,6 +343,39 @@ class RecoveryTab(ScrollableTab):
         frame = self._retrieve_config_frames.get(stype)
         if frame:
             frame.pack(fill="x")
+
+        # Skip auto-fill when called from _fill_retrieve_from_config
+        # to avoid overwriting the values it is about to set.
+        if self._filling_retrieve:
+            return
+
+        # Auto-fill from profile: find a config matching the selected type.
+        self._filling_retrieve = True
+        try:
+            config = self._find_profile_config_by_type(StorageType(stype))
+            if config:
+                self._fill_retrieve_fields(config)
+        finally:
+            self._filling_retrieve = False
+
+    def _find_profile_config_by_type(self, stype: StorageType) -> StorageConfig | None:
+        """Search all profile storage configs for one matching the given type.
+
+        Checks main storage first, then mirrors in order.
+
+        Args:
+            stype: The storage type to look for.
+
+        Returns:
+            First matching StorageConfig, or None.
+        """
+        if not self._profile:
+            return None
+        configs = [self._profile.storage] + list(self._profile.mirror_destinations)
+        for cfg in configs:
+            if cfg.storage_type == stype:
+                return cfg
+        return None
 
     def _get_source_storage_config(self) -> StorageConfig | None:
         """Get storage config from profile based on selected source.
@@ -386,35 +396,44 @@ class RecoveryTab(ScrollableTab):
             return mirrors[1] if len(mirrors) > 1 else None
         return None
 
-    def _fill_retrieve_from_config(self, config: StorageConfig) -> None:
-        """Pre-fill retrieve fields from a StorageConfig.
+    def _fill_retrieve_fields(self, config: StorageConfig) -> None:
+        """Fill retrieve field values from a StorageConfig without changing type.
 
         Args:
             config: Storage configuration to read from.
         """
-        self.retrieve_type_var.set(config.storage_type.value)
+        stype = config.storage_type
 
-        # Local
-        self._ret_local_path_var.set(config.destination_path or "")
+        if stype in (StorageType.LOCAL, StorageType.NETWORK):
+            self._ret_local_path_var.set(config.destination_path or "")
+            self._ret_network_path_var.set(config.destination_path or "")
 
-        # Network
-        self._ret_network_path_var.set(config.destination_path or "")
+        elif stype == StorageType.SFTP:
+            for key, var in self._ret_sftp_vars.items():
+                val = getattr(config, key, "")
+                var.set(str(val) if val else "")
 
-        # SFTP
-        for key, var in self._ret_sftp_vars.items():
-            val = getattr(config, key, "")
-            var.set(str(val) if val else "")
+        elif stype == StorageType.S3:
+            for key, var in self._ret_s3_vars.items():
+                val = getattr(config, key, "")
+                var.set(str(val) if val else "")
+            # Set provider last and force Combobox sync.
+            provider = config.s3_provider or "aws"
+            self._ret_s3_provider_var.set(provider)
+            self._ret_s3_provider_cb.set(provider)
 
-        # S3
-        self._ret_s3_provider_var.set(config.s3_provider or "aws")
-        for key, var in self._ret_s3_vars.items():
-            val = getattr(config, key, "")
-            var.set(str(val) if val else "")
+    def _fill_retrieve_from_config(self, config: StorageConfig) -> None:
+        """Pre-fill retrieve fields from a StorageConfig (sets type + fields).
 
-        # Proton
-        for key, var in self._ret_proton_vars.items():
-            val = getattr(config, key, "")
-            var.set(str(val) if val else "")
+        Args:
+            config: Storage configuration to read from.
+        """
+        self._filling_retrieve = True
+        try:
+            self.retrieve_type_var.set(config.storage_type.value)
+            self._fill_retrieve_fields(config)
+        finally:
+            self._filling_retrieve = False
 
     def _build_retrieve_storage_config(self) -> StorageConfig:
         """Build a StorageConfig from the retrieve UI fields.
@@ -440,10 +459,6 @@ class RecoveryTab(ScrollableTab):
             config.s3_provider = self._ret_s3_provider_var.get()
             for key, var in self._ret_s3_vars.items():
                 setattr(config, key, var.get())
-        elif stype == StorageType.PROTON:
-            for key, var in self._ret_proton_vars.items():
-                setattr(config, key, var.get())
-
         config.storage_type = stype
         return config
 
@@ -469,27 +484,19 @@ class RecoveryTab(ScrollableTab):
 
                 engine = BackupEngine.__new__(BackupEngine)
                 backend = engine._get_backend(config)
-                local_path = backend.download_all(dest)
-                self.after(0, lambda: self._on_retrieve_done(str(local_path)))
-            except AttributeError:
-                # Fallback: download each backup individually
-                try:
-                    backups = backend.list_backups()
-                    if not backups:
-                        self.after(
-                            0,
-                            lambda: self._on_retrieve_error("No files found on remote."),
-                        )
-                        return
-                    for b in backups:
-                        backend.download_backup(b["name"], dest)
+                logger.info("Retrieve: listing backups on %s", config.storage_type.value)
+                backups = backend.list_backups()
+                logger.info("Retrieve: found %d backup(s)", len(backups))
+                if not backups:
                     self.after(
                         0,
-                        lambda: self._on_retrieve_done(str(dest)),
+                        lambda: self._on_retrieve_error("No files found on remote."),
                     )
-                except Exception as e2:
-                    logger.error("Failed to retrieve backups: %s", e2)
-                    self.after(0, lambda _e=e2: self._on_retrieve_error(str(_e)))
+                    return
+                for b in backups:
+                    logger.info("Retrieve: downloading %s", b["name"])
+                    backend.download_backup(b["name"], dest)
+                self.after(0, lambda: self._on_retrieve_done(str(dest)))
             except Exception as e:
                 logger.error("Failed to retrieve: %s", e)
                 self.after(0, lambda _e=e: self._on_retrieve_error(str(_e)))

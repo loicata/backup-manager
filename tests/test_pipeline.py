@@ -25,8 +25,8 @@ class TestCollector:
         files = collect_files([str(sample_files)])
         assert len(files) == 3
         names = {f.relative_path for f in files}
-        assert "file1.txt" in names
-        assert "subdir/file3.txt" in names
+        assert any(n.endswith("/file1.txt") or n == "file1.txt" for n in names)
+        assert any(n.endswith("/subdir/file3.txt") or n == "subdir/file3.txt" for n in names)
 
     def test_collect_single_file(self, tmp_path):
         f = tmp_path / "single.txt"
@@ -46,7 +46,7 @@ class TestCollector:
 
         files = collect_files([str(tmp_path)], exclude_patterns=["*.tmp", "*.log"])
         assert len(files) == 1
-        assert files[0].relative_path == "keep.txt"
+        assert files[0].relative_path.endswith("/keep.txt") or files[0].relative_path == "keep.txt"
 
     def test_collect_skips_symlinks(self, tmp_path):
         real = tmp_path / "real.txt"
@@ -59,8 +59,8 @@ class TestCollector:
 
         files = collect_files([str(tmp_path)])
         names = [f.relative_path for f in files]
-        assert "real.txt" in names
-        assert "link.txt" not in names
+        assert any(n.endswith("/real.txt") or n == "real.txt" for n in names)
+        assert not any(n.endswith("/link.txt") or n == "link.txt" for n in names)
 
     def test_collect_deduplicates(self, tmp_path):
         f = tmp_path / "file.txt"
@@ -112,7 +112,7 @@ class TestFilter:
         files = collect_files([str(sample_files)])
         result = filter_changed_files(files, manifest_path)
         assert len(result) >= 1
-        assert any(f.relative_path == "file1.txt" for f in result)
+        assert any(f.relative_path.endswith("/file1.txt") or f.relative_path == "file1.txt" for f in result)
 
     def test_new_file_included(self, sample_files, tmp_path):
         files = collect_files([str(sample_files)])
@@ -123,7 +123,7 @@ class TestFilter:
         (sample_files / "new_file.txt").write_text("new", encoding="utf-8")
         files = collect_files([str(sample_files)])
         result = filter_changed_files(files, manifest_path)
-        assert any(f.relative_path == "new_file.txt" for f in result)
+        assert any(f.relative_path.endswith("/new_file.txt") or f.relative_path == "new_file.txt" for f in result)
 
 
 # --- LocalWriter tests ---
@@ -136,8 +136,10 @@ class TestLocalWriter:
         dest.mkdir()
         backup_path = write_flat(files, dest, "test_backup")
         assert backup_path.exists()
-        assert (backup_path / "file1.txt").exists()
-        assert (backup_path / "subdir" / "file3.txt").exists()
+        # relative_path now includes source dir prefix, so check recursively
+        all_files = [p.name for p in backup_path.rglob("*") if p.is_file()]
+        assert "file1.txt" in all_files
+        assert "file3.txt" in all_files
 
     def test_generate_backup_name(self):
         name = generate_backup_name("My Profile")

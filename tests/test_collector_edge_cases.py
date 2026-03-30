@@ -28,7 +28,8 @@ class TestPermissionDenied:
             files = collect_files([str(tmp_path)])
 
         names = [f.relative_path for f in files]
-        assert "ok.txt" in names
+        # relative_path is prefixed with source directory name
+        assert any(n.endswith("/ok.txt") for n in names)
         assert not any("secret" in n for n in names)
 
 
@@ -50,8 +51,8 @@ class TestRaceConditions:
             files = collect_files([str(tmp_path)])
 
         names = [f.relative_path for f in files]
-        assert "stable.txt" in names
-        assert "ephemeral.txt" not in names
+        assert any(n.endswith("/stable.txt") for n in names)
+        assert not any(n.endswith("/ephemeral.txt") for n in names)
 
 
 class TestDeepDirectory:
@@ -66,7 +67,7 @@ class TestDeepDirectory:
 
         files = collect_files([str(tmp_path)])
         names = [f.relative_path for f in files]
-        assert "top.txt" in names
+        assert any(n.endswith("/top.txt") for n in names)
         assert any("deep.txt" in n for n in names)
         assert len(files) == 2
 
@@ -91,8 +92,8 @@ class TestMixedSources:
 
         files = collect_files([str(d), str(single)])
         names = {f.relative_path for f in files}
-        assert "a.txt" in names
-        assert "solo.txt" in names
+        assert any(n.endswith("/a.txt") for n in names)
+        assert any(n.endswith("/solo.txt") for n in names)
         assert len(files) == 2
 
 
@@ -118,8 +119,8 @@ class TestExcludePatterns:
             exclude_patterns=["*.log", "temp_*"],
         )
         names = [f.relative_path for f in files]
-        assert "keep.txt" in names
-        assert "app.log" not in names
+        assert any(n.endswith("/keep.txt") for n in names)
+        assert not any(n.endswith("/app.log") for n in names)
         assert not any("data.bin" in n for n in names)
 
 
@@ -139,7 +140,7 @@ class TestSpecialCharPaths:
 
         files = collect_files([str(tmp_path)])
         assert len(files) == 1
-        assert "file with spaces.txt" in files[0].relative_path
+        assert files[0].relative_path.endswith("/file with spaces.txt")
 
 
 class TestSymlinksAndJunctions:
@@ -154,5 +155,5 @@ class TestSymlinksAndJunctions:
 
         files = collect_files([str(tmp_path)])
         names = [f.relative_path for f in files]
-        assert "real.txt" in names
-        assert "link.txt" not in names
+        assert any(n.endswith("/real.txt") for n in names)
+        assert not any(n.endswith("/link.txt") for n in names)

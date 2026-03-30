@@ -5,6 +5,7 @@ from tkinter import filedialog, ttk
 
 from src.core.config import BackupProfile, StorageConfig, StorageType
 from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
+from src.storage.s3 import PROVIDER_REGIONS
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 
@@ -31,7 +32,6 @@ class StorageTab(ScrollableTab):
             (StorageType.NETWORK, "Network folder (UNC)", True),
             (StorageType.SFTP, "Remote server SFTP (SSH)", FEAT_SFTP in self._features),
             (StorageType.S3, "S3 Cloud Storage", FEAT_S3 in self._features),
-            (StorageType.PROTON, "Proton Drive (beta)", True),
         ]
 
         for stype, label, available in options:
@@ -59,7 +59,6 @@ class StorageTab(ScrollableTab):
         self._build_network_config()
         self._build_sftp_config()
         self._build_s3_config()
-        self._build_proton_config()
 
         # Test connection button
         btn_frame = ttk.Frame(self.inner)
@@ -164,29 +163,39 @@ class StorageTab(ScrollableTab):
         self.s3_provider_var = tk.StringVar(value="aws")
         providers = [
             "aws",
-            "minio",
+            "scaleway",
             "wasabi",
             "ovh",
-            "scaleway",
             "digitalocean",
             "cloudflare",
             "backblaze_s3",
             "other",
         ]
-        ttk.Combobox(
+        provider_cb = ttk.Combobox(
             frame, textvariable=self.s3_provider_var, values=providers, state="readonly"
-        ).pack(fill="x")
+        )
+        provider_cb.pack(fill="x")
 
         fields = [
             ("Bucket", "s3_bucket", ""),
             ("Prefix (optional)", "s3_prefix", ""),
-            ("Region", "s3_region", "eu-west-1"),
             ("Access Key", "s3_access_key", ""),
             ("Secret Key", "s3_secret_key", ""),
-            ("Endpoint URL (for S3-compatible)", "s3_endpoint_url", ""),
+            ("Endpoint URL (optional — auto-detected from provider)", "s3_endpoint_url", ""),
         ]
 
         self._s3_vars = {}
+
+        # Region — Combobox with provider-specific values
+        ttk.Label(frame, text="Region:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        default_regions = PROVIDER_REGIONS.get("aws", [])
+        region_var = tk.StringVar(value=default_regions[0] if default_regions else "")
+        self._s3_vars["s3_region"] = region_var
+        self._s3_region_cb = ttk.Combobox(frame, textvariable=region_var, values=default_regions)
+        self._s3_region_cb.pack(fill="x")
+
+        self.s3_provider_var.trace_add("write", self._on_s3_provider_changed)
+
         for label, key, default in fields:
             ttk.Label(frame, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
             var = tk.StringVar(value=default)
@@ -196,99 +205,14 @@ class StorageTab(ScrollableTab):
             else:
                 ttk.Entry(frame, textvariable=var).pack(fill="x")
 
-    def _build_proton_config(self):
-        frame = ttk.Frame(self._config_container)
-        self._config_frames["proton"] = frame
-
-        fields = [
-            ("Proton username", "proton_username", ""),
-            ("Proton password", "proton_password", ""),
-            ("2FA seed (optional)", "proton_2fa", ""),
-            ("Remote path", "proton_remote_path", "/Backups"),
-            ("rclone path (optional)", "proton_rclone_path", ""),
-        ]
-
-        self._proton_vars = {}
-        for label, key, default in fields:
-            ttk.Label(frame, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
-            var = tk.StringVar(value=default)
-            self._proton_vars[key] = var
-            if "password" in key or "2fa" in key:
-                ttk.Entry(frame, textvariable=var, show="●").pack(fill="x")
-            else:
-                ttk.Entry(frame, textvariable=var).pack(fill="x")
-
-        self._add_proton_guide(frame)
-
-    @staticmethod
-    def _add_proton_guide(parent: ttk.Frame) -> None:
-        """Add a step-by-step setup guide for Proton Drive."""
-        guide_frame = ttk.LabelFrame(parent, text="Setup guide")
-        guide_frame.pack(fill="x", pady=(8, 4))
-
-        steps = [
-            (
-                "1.",
-                "Install rclone",
-                "Download from https://rclone.org/downloads/\n"
-                "Extract the .zip and place rclone.exe in\n"
-                "C:\\Program Files\\rclone\\ or add it to your PATH.",
-            ),
-            (
-                "2.",
-                "Find your Proton credentials",
-                "Use your Proton Mail / Proton account email\n"
-                "as username, and your account password.",
-            ),
-            (
-                "3.",
-                "2FA seed (optional)",
-                "If you have 2FA enabled on your Proton account:\n"
-                "Open your authenticator app settings, find the\n"
-                "secret key (base32 string) and paste it here.\n"
-                "Backup Manager will generate TOTP codes\n"
-                "automatically.",
-            ),
-            (
-                "4.",
-                "Remote path",
-                "The folder on Proton Drive where backups will\n"
-                "be stored. Default: /Backups\n"
-                "The folder is created automatically if needed.",
-            ),
-            (
-                "5.",
-                "Test your connection",
-                "Click 'Test connection' above to verify that\n"
-                "rclone can reach your Proton Drive account.",
-            ),
-        ]
-
-        for num, title, detail in steps:
-            step_frame = ttk.Frame(guide_frame)
-            step_frame.pack(fill="x", padx=6, pady=2)
-
-            header = ttk.Frame(step_frame)
-            header.pack(fill="x")
-            ttk.Label(
-                header,
-                text=num,
-                foreground=Colors.ACCENT,
-                font=("Segoe UI", 9, "bold"),
-            ).pack(side="left")
-            ttk.Label(
-                header,
-                text=title,
-                font=("Segoe UI", 9, "bold"),
-            ).pack(side="left", padx=(4, 0))
-
-            ttk.Label(
-                step_frame,
-                text=detail,
-                foreground=Colors.TEXT_SECONDARY,
-                font=("Segoe UI", 8),
-                justify="left",
-            ).pack(anchor="w", padx=(18, 0))
+    def _on_s3_provider_changed(self, *args):
+        """Update region combobox when the S3 provider changes."""
+        provider = self.s3_provider_var.get()
+        regions = PROVIDER_REGIONS.get(provider, [])
+        self._s3_region_cb["values"] = regions
+        current = self._s3_vars["s3_region"].get()
+        if current not in regions:
+            self._s3_vars["s3_region"].set(regions[0] if regions else "")
 
     def _on_type_changed(self, *args):
         """Show config fields for selected storage type."""
@@ -362,10 +286,6 @@ class StorageTab(ScrollableTab):
             config.s3_provider = self.s3_provider_var.get()
             for key, var in self._s3_vars.items():
                 setattr(config, key, var.get())
-        elif stype == StorageType.PROTON:
-            for key, var in self._proton_vars.items():
-                setattr(config, key, var.get())
-
         config.storage_type = stype
         return config
 
@@ -384,10 +304,10 @@ class StorageTab(ScrollableTab):
             self.s3_provider_var.set(s.s3_provider)
             for key, var in self._s3_vars.items():
                 var.set(str(getattr(s, key, "")))
-
-        if hasattr(self, "_proton_vars"):
-            for key, var in self._proton_vars.items():
-                var.set(str(getattr(s, key, "")))
+            # Re-apply region: the provider trace may have reset it.
+            saved_region = str(getattr(s, "s3_region", ""))
+            if saved_region:
+                self._s3_vars["s3_region"].set(saved_region)
 
     def collect_config(self) -> dict:
         return {

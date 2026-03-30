@@ -258,10 +258,6 @@ class SetupWizard:
                 bucket = svars.get("s3_bucket", "")
                 if not bucket:
                     return "Please enter an S3 bucket name."
-            elif stype == StorageType.PROTON.value:
-                path = svars.get("proton_remote_path", "")
-                if not path:
-                    return "Please enter a Proton Drive path."
         return None
 
     def _go_back(self) -> None:
@@ -392,7 +388,7 @@ class SetupWizard:
             Dict with references to created widgets:
                 "type_var", "config_frames", "local_path_var",
                 "network_path_var", "sftp_vars", "s3_vars",
-                "s3_provider_var", "proton_vars",
+                "s3_provider_var",
                 "test_btn", "test_label".
         """
         sd = self._data[storage_key]
@@ -408,7 +404,6 @@ class SetupWizard:
             (StorageType.NETWORK, "Network folder (UNC)", True),
             (StorageType.SFTP, "Remote server SFTP (SSH)", FEAT_SFTP in self._features),
             (StorageType.S3, "S3 Cloud Storage", FEAT_S3 in self._features),
-            (StorageType.PROTON, "Proton Drive (beta)", True),
         ]
 
         for stype, label, available in options:
@@ -539,10 +534,9 @@ class SetupWizard:
         s3_provider_var = tk.StringVar(value=saved.get("s3_provider", "aws"))
         providers = [
             "aws",
-            "minio",
+            "scaleway",
             "wasabi",
             "ovh",
-            "scaleway",
             "digitalocean",
             "cloudflare",
             "backblaze_s3",
@@ -572,29 +566,6 @@ class SetupWizard:
                 ttk.Entry(f, textvariable=var, show="\u25cf").pack(fill="x")
             else:
                 ttk.Entry(f, textvariable=var).pack(fill="x")
-
-        # --- Proton config ---
-        f = ttk.Frame(config_container)
-        config_frames["proton"] = f
-
-        proton_fields = [
-            ("Proton username", "proton_username", ""),
-            ("Proton password", "proton_password", ""),
-            ("2FA seed (optional)", "proton_2fa", ""),
-            ("Remote path", "proton_remote_path", "/Backups"),
-            ("rclone path (optional)", "proton_rclone_path", ""),
-        ]
-        proton_vars: dict[str, tk.StringVar] = {}
-        for label, key, default in proton_fields:
-            ttk.Label(f, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
-            var = tk.StringVar(value=saved.get(key, default))
-            proton_vars[key] = var
-            if "password" in key or "2fa" in key:
-                ttk.Entry(f, textvariable=var, show="\u25cf").pack(fill="x")
-            else:
-                ttk.Entry(f, textvariable=var).pack(fill="x")
-
-        self._add_proton_guide(f)
 
         # --- Test connection button ---
         btn_frame = ttk.Frame(parent)
@@ -642,9 +613,6 @@ class SetupWizard:
                 vd["s3_provider"] = s3_provider_var.get()
                 for k, v in s3_vars.items():
                     vd[k] = v.get()
-            elif stype == "proton":
-                for k, v in proton_vars.items():
-                    vd[k] = v.get()
             sd["vars"] = vd
 
         type_var.trace_add("write", _save)
@@ -655,9 +623,6 @@ class SetupWizard:
         s3_provider_var.trace_add("write", _save)
         for v in s3_vars.values():
             v.trace_add("write", _save)
-        for v in proton_vars.values():
-            v.trace_add("write", _save)
-
         # Initial save
         _save()
 
@@ -669,7 +634,6 @@ class SetupWizard:
             "sftp_vars": sftp_vars,
             "s3_vars": s3_vars,
             "s3_provider_var": s3_provider_var,
-            "proton_vars": proton_vars,
             "test_btn": test_btn,
             "test_label": test_label,
         }
@@ -708,10 +672,6 @@ class SetupWizard:
             for key, val in vd.items():
                 if key != "s3_provider":
                     setattr(config, key, val)
-        elif stype == StorageType.PROTON:
-            for key, val in vd.items():
-                setattr(config, key, val)
-
         config.storage_type = stype
         return config
 
@@ -788,84 +748,6 @@ class SetupWizard:
         btn.state(["!disabled"])
         color = Colors.SUCCESS if ok else Colors.DANGER
         lbl.config(text=msg, foreground=color)
-
-    # ------------------------------------------------------------------
-    # Proton Drive setup guide
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _add_proton_guide(parent: ttk.Frame) -> None:
-        """Add a step-by-step setup guide for Proton Drive.
-
-        Args:
-            parent: Parent frame to add the guide to.
-        """
-        guide_frame = ttk.LabelFrame(parent, text="Setup guide")
-        guide_frame.pack(fill="x", pady=(8, 4))
-
-        steps = [
-            (
-                "1.",
-                "Install rclone",
-                "Download from https://rclone.org/downloads/\n"
-                "Extract the .zip and place rclone.exe in\n"
-                "C:\\Program Files\\rclone\\ or add it to your PATH.",
-            ),
-            (
-                "2.",
-                "Find your Proton credentials",
-                "Use your Proton Mail / Proton account email\n"
-                "as username, and your account password.",
-            ),
-            (
-                "3.",
-                "2FA seed (optional)",
-                "If you have 2FA enabled on your Proton account:\n"
-                "Open your authenticator app settings, find the\n"
-                "secret key (base32 string) and paste it here.\n"
-                "Backup Manager will generate TOTP codes\n"
-                "automatically.",
-            ),
-            (
-                "4.",
-                "Remote path",
-                "The folder on Proton Drive where backups will\n"
-                "be stored. Default: /Backups\n"
-                "The folder is created automatically if needed.",
-            ),
-            (
-                "5.",
-                "Test your connection",
-                "Click 'Test connection' below to verify that\n"
-                "rclone can reach your Proton Drive account.",
-            ),
-        ]
-
-        for num, title, detail in steps:
-            step_frame = ttk.Frame(guide_frame)
-            step_frame.pack(fill="x", padx=6, pady=2)
-
-            header = ttk.Frame(step_frame)
-            header.pack(fill="x")
-            ttk.Label(
-                header,
-                text=num,
-                foreground=Colors.ACCENT,
-                font=("Segoe UI", 9, "bold"),
-            ).pack(side="left")
-            ttk.Label(
-                header,
-                text=title,
-                font=("Segoe UI", 9, "bold"),
-            ).pack(side="left", padx=(4, 0))
-
-            ttk.Label(
-                step_frame,
-                text=detail,
-                foreground=Colors.TEXT_SECONDARY,
-                font=("Segoe UI", 8),
-                justify="left",
-            ).pack(anchor="w", padx=(18, 0))
 
     # ------------------------------------------------------------------
     # Step 4: Primary storage

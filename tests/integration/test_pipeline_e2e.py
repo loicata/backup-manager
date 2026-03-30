@@ -342,9 +342,14 @@ class TestBackupTypeLogs:
         manifest_path = e2e_env["config_manager"].get_manifest_path(full_profile.id)
         save_manifest(manifest, manifest_path)
 
-        # Run differential — set destinations_hash so it's not seen as changed
+        # Run a full backup first so the destination is not empty.
         from src.core.config import compute_destinations_hash
 
+        full_profile.backup_type = BackupType.FULL
+        full_profile.destinations_hash = compute_destinations_hash(full_profile)
+        engine.run_backup(full_profile)
+
+        # Now run differential — destination has a backup, manifest exists.
         full_profile.backup_type = BackupType.DIFFERENTIAL
         full_profile.destinations_hash = compute_destinations_hash(full_profile)
         (e2e_env["source"] / "extra.txt").write_text("extra", encoding="utf-8")
@@ -353,4 +358,3 @@ class TestBackupTypeLogs:
         type_logs = [m for m in stats.log_lines if "Backup type:" in m]
         assert len(type_logs) == 1
         assert "differential" in type_logs[0]
-        assert "reference:" not in type_logs[0]

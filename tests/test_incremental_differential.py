@@ -107,7 +107,7 @@ class TestDifferentialBasic:
         changed = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 1
-        assert changed[0].relative_path == "doc.txt"
+        assert changed[0].relative_path.endswith("/doc.txt")
 
     def test_new_file_included(self, source_dir, manifest_path):
         """New file added after first backup should be included."""
@@ -119,7 +119,7 @@ class TestDifferentialBasic:
         changed = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 1
-        assert changed[0].relative_path == "new_file.txt"
+        assert changed[0].relative_path.endswith("/new_file.txt")
 
     def test_deleted_file_not_in_changed(self, source_dir, manifest_path):
         """Deleted file should not appear in changed list (not collected)."""
@@ -132,7 +132,7 @@ class TestDifferentialBasic:
 
         assert len(changed) == 0
         # Verify the file is not in collected files either
-        assert all(f.relative_path != "doc.txt" for f in files)
+        assert all(not f.relative_path.endswith("/doc.txt") for f in files)
 
     def test_multiple_changes_detected(self, source_dir, manifest_path):
         """Multiple files changed should all be detected."""
@@ -146,9 +146,9 @@ class TestDifferentialBasic:
         changed = filter_changed_files(files, manifest_path)
 
         changed_names = {f.relative_path for f in changed}
-        assert "doc.txt" in changed_names
-        assert "data.bin" in changed_names
-        assert "brand_new.txt" in changed_names
+        assert any(n.endswith("/doc.txt") for n in changed_names)
+        assert any(n.endswith("/data.bin") for n in changed_names)
+        assert any(n.endswith("/brand_new.txt") for n in changed_names)
         assert len(changed) == 3
 
 
@@ -172,7 +172,7 @@ class TestChangeDetectionEdgeCases:
         changed = filter_changed_files(files, manifest_path)
 
         assert len(changed) >= 1
-        assert any(f.relative_path == "doc.txt" for f in changed)
+        assert any(f.relative_path.endswith("/doc.txt") for f in changed)
 
     def test_different_size_detected_without_hash(self, source_dir, manifest_path):
         """File with different size should be detected by size check alone."""
@@ -183,7 +183,7 @@ class TestChangeDetectionEdgeCases:
         files = _collect(source_dir)
         changed = filter_changed_files(files, manifest_path)
 
-        assert any(f.relative_path == "doc.txt" for f in changed)
+        assert any(f.relative_path.endswith("/doc.txt") for f in changed)
 
     def test_mtime_changed_content_same_skipped(self, source_dir, manifest_path):
         """File with changed mtime but identical content should be skipped."""
@@ -199,7 +199,7 @@ class TestChangeDetectionEdgeCases:
         changed = filter_changed_files(files, manifest_path)
 
         # Content is the same, hash matches → should be skipped
-        assert not any(f.relative_path == "doc.txt" for f in changed)
+        assert not any(f.relative_path.endswith("/doc.txt") for f in changed)
 
     def test_empty_file_handled(self, source_dir, manifest_path):
         """Empty file should be tracked and detected correctly."""
@@ -208,19 +208,20 @@ class TestChangeDetectionEdgeCases:
 
         # Verify empty file is in manifest
         manifest = load_manifest(manifest_path)
-        assert "empty.txt" in manifest
-        assert manifest["empty.txt"]["size"] == 0
+        empty_key = next(k for k in manifest if k.endswith("/empty.txt"))
+        assert empty_key
+        assert manifest[empty_key]["size"] == 0
 
         # Second run: empty file unchanged
         files = _collect(source_dir)
         changed = filter_changed_files(files, manifest_path)
-        assert not any(f.relative_path == "empty.txt" for f in changed)
+        assert not any(f.relative_path.endswith("/empty.txt") for f in changed)
 
         # Modify empty file to non-empty
         (source_dir / "empty.txt").write_text("Now has content", encoding="utf-8")
         files = _collect(source_dir)
         changed = filter_changed_files(files, manifest_path)
-        assert any(f.relative_path == "empty.txt" for f in changed)
+        assert any(f.relative_path.endswith("/empty.txt") for f in changed)
 
     def test_file_truncated_to_empty(self, source_dir, manifest_path):
         """File truncated to 0 bytes should be detected."""
@@ -231,7 +232,7 @@ class TestChangeDetectionEdgeCases:
         files = _collect(source_dir)
         changed = filter_changed_files(files, manifest_path)
 
-        assert any(f.relative_path == "doc.txt" for f in changed)
+        assert any(f.relative_path.endswith("/doc.txt") for f in changed)
 
 
 # ===========================================================================
@@ -254,8 +255,8 @@ class TestFileRenameAndMove:
         changed = filter_changed_files(files, manifest_path)
 
         changed_names = {f.relative_path for f in changed}
-        assert "document.txt" in changed_names
-        assert "doc.txt" not in changed_names
+        assert any(n.endswith("/document.txt") for n in changed_names)
+        assert not any(n.endswith("/doc.txt") for n in changed_names)
 
     def test_moved_file_detected_as_new(self, source_dir, manifest_path):
         """File moved to different directory = new relative path."""
@@ -365,7 +366,7 @@ class TestMultipleBackupCycles:
         (source_dir / "doc.txt").write_text("Updated content", encoding="utf-8")
         _, changed3 = _do_backup_cycle(source_dir, manifest_path)
         assert len(changed3) == 1
-        assert changed3[0].relative_path == "doc.txt"
+        assert changed3[0].relative_path.endswith("/doc.txt")
 
     def test_differential_after_add_modify_delete(self, source_dir, manifest_path):
         """Complex scenario: add + modify + delete in one cycle."""
@@ -382,9 +383,9 @@ class TestMultipleBackupCycles:
         changed = filter_changed_files(files, manifest_path)
 
         changed_names = {f.relative_path for f in changed}
-        assert "added.txt" in changed_names
-        assert "data.bin" in changed_names
-        assert "nested.txt" not in changed_names  # Deleted = not collected
+        assert any(n.endswith("/added.txt") for n in changed_names)
+        assert any(n.endswith("/data.bin") for n in changed_names)
+        assert not any(n.endswith("/nested.txt") for n in changed_names)  # Deleted = not collected
         assert len(changed) == 2
 
     def test_five_cycles_progressive_changes(self, source_dir, manifest_path):
@@ -413,7 +414,7 @@ class TestMultipleBackupCycles:
         (source_dir / "file5.txt").write_text("Fifth", encoding="utf-8")
         _, c5 = _do_backup_cycle(source_dir, manifest_path)
         assert len(c5) == 1  # Only the new file
-        assert c5[0].relative_path == "file5.txt"
+        assert c5[0].relative_path.endswith("/file5.txt")
 
 
 # ===========================================================================
@@ -562,7 +563,7 @@ class TestFilterErrorHandling:
 
         files = _collect(source_dir)
         # Find the doc.txt file
-        doc_file = next(f for f in files if f.relative_path == "doc.txt")
+        doc_file = next(f for f in files if f.relative_path.endswith("/doc.txt"))
 
         # Mock compute_sha256 to raise for this specific file
         original_sha = None
@@ -581,7 +582,7 @@ class TestFilterErrorHandling:
             changed = filter_changed_files(files, manifest_path)
 
         # doc.txt should be in changed (fail-safe: can't read = include)
-        assert any(f.relative_path == "doc.txt" for f in changed)
+        assert any(f.relative_path.endswith("/doc.txt") for f in changed)
 
     def test_manifest_with_permissions_error_triggers_full(self, source_dir, tmp_path):
         """Unreadable manifest should trigger full backup."""
@@ -627,7 +628,7 @@ class TestManyFiles:
         assert len(changed2) == 5
         changed_names = {f.relative_path for f in changed2}
         for i in [10, 25, 50, 75, 99]:
-            assert f"file_{i:03d}.txt" in changed_names
+            assert any(n.endswith(f"/file_{i:03d}.txt") for n in changed_names)
 
     def test_thousand_files_all_unchanged(self, tmp_path):
         """1000 files unchanged on second run: all should be skipped."""

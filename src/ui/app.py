@@ -506,8 +506,6 @@ class BackupManagerApp:
                 )
             if st == StorageType.S3:
                 return f"s3:{config.s3_bucket}:{config.s3_prefix.strip('/')}"
-            if st == StorageType.PROTON:
-                return f"proton:{config.proton_username}" f":{config.proton_remote_path.strip('/')}"
             return ""
 
         targets = [("Storage", storage)]
@@ -1142,7 +1140,7 @@ class BackupManagerApp:
             "About",
             f"{APP_TITLE} v{__version__}\n\n"
             f"Copyright (c) 2026 Loic Ader\n"
-            f"MIT License\n\n"
+            f"GNU General Public License v3.0\n\n"
             f"Backup management system with encryption,\n"
             f"scheduling, and multi-destination support.",
         )

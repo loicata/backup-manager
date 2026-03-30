@@ -439,11 +439,13 @@ class TestPipelineContentConsistency:
         engine = BackupEngine(mgr)
         engine.run_backup(profile)
 
-        # Collect source content
+        # Collect source content — relative_path now includes source dir prefix
         expected = {}
+        source_name = source.name
         for f in sorted(source.rglob("*")):
             if f.is_file():
-                rel = str(f.relative_to(source)).replace("\\", "/")
+                inner_rel = str(f.relative_to(source)).replace("\\", "/")
+                rel = f"{source_name}/{inner_rel}"
                 expected[rel] = f.read_bytes()
 
         # Find backup

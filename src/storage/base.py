@@ -7,6 +7,7 @@ delete_backup, test_connection, get_free_space, get_file_size.
 
 import functools
 import logging
+import os
 import random
 import time
 from abc import ABC, abstractmethod
@@ -15,6 +16,36 @@ from pathlib import Path
 from typing import BinaryIO
 
 logger = logging.getLogger(__name__)
+
+
+def long_path_str(path: Path) -> str:
+    """Return a Windows extended-length path string if needed.
+
+    Adds the ``\\\\?\\`` prefix on Windows to bypass the 260-char
+    MAX_PATH limit.  On other platforms returns the path unchanged.
+
+    Args:
+        path: The path to convert.
+
+    Returns:
+        String representation safe for long paths.
+    """
+    s = str(path.resolve())
+    if os.name == "nt" and not s.startswith("\\\\?\\"):
+        return f"\\\\?\\{s}"
+    return s
+
+
+def long_path_mkdir(path: Path) -> None:
+    """Create a directory, handling long paths on Windows.
+
+    Args:
+        path: Directory to create.
+    """
+    if os.name == "nt":
+        os.makedirs(long_path_str(path), exist_ok=True)
+    else:
+        path.mkdir(parents=True, exist_ok=True)
 
 
 def with_retry(max_retries: int = 3, base_delay: float = 2.0):

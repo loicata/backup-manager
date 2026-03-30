@@ -5,6 +5,6 @@ import importlib.metadata as _meta
 try:
     __version__ = _meta.metadata("backup-manager")["Version"]
 except _meta.PackageNotFoundError:
-    __version__ = "3.1.4"  # Fallback for dev/PyInstaller builds
+    __version__ = "3.1.5"  # Fallback for dev/PyInstaller builds
 
 __author__ = "Loic Ader"

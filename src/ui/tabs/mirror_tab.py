@@ -7,6 +7,7 @@ from tkinter import filedialog, ttk
 
 from src.core.config import BackupProfile, StorageConfig, StorageType
 from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
+from src.storage.s3 import PROVIDER_REGIONS
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Spacing
 
@@ -47,7 +48,6 @@ class MirrorTab(ScrollableTab):
             (StorageType.NETWORK, "Network folder (UNC)", True),
             (StorageType.SFTP, "Remote server SFTP (SSH)", FEAT_SFTP in self._features),
             (StorageType.S3, "S3 Cloud Storage", FEAT_S3 in self._features),
-            (StorageType.PROTON, "Proton Drive (beta)", True),
         ]
 
         for stype, label, available in options:
@@ -152,10 +152,9 @@ class MirrorTab(ScrollableTab):
             textvariable=self.s3_provider_var,
             values=[
                 "aws",
-                "minio",
+                "scaleway",
                 "wasabi",
                 "ovh",
-                "scaleway",
                 "digitalocean",
                 "cloudflare",
                 "backblaze_s3",
@@ -163,39 +162,31 @@ class MirrorTab(ScrollableTab):
             ],
             state="readonly",
         ).pack(fill="x")
+
+        # Region — Combobox with provider-specific values
+        default_regions = PROVIDER_REGIONS.get("aws", [])
+        ttk.Label(f, text="Region:").pack(anchor="w")
+        region_var = tk.StringVar(value=default_regions[0] if default_regions else "")
+        self._s3_vars["s3_region"] = region_var
+        self._s3_region_cb = ttk.Combobox(f, textvariable=region_var, values=default_regions)
+        self._s3_region_cb.pack(fill="x")
+
+        self.s3_provider_var.trace_add("write", self._on_s3_provider_changed)
+
         for label, key, default in [
             ("Bucket", "s3_bucket", ""),
-            ("Region", "s3_region", "eu-west-1"),
+            ("Prefix (optional)", "s3_prefix", ""),
             ("Access Key", "s3_access_key", ""),
             ("Secret Key", "s3_secret_key", ""),
+            ("Endpoint URL (optional — auto-detected from provider)", "s3_endpoint_url", ""),
         ]:
             ttk.Label(f, text=f"{label}:").pack(anchor="w")
             var = tk.StringVar(value=default)
             self._s3_vars[key] = var
-            ttk.Entry(f, textvariable=var).pack(fill="x")
-
-        # Proton
-        f = ttk.Frame(self._config_container)
-        self._config_frames["proton"] = f
-        self._proton_vars = {}
-        for label, key, default in [
-            ("Proton username", "proton_username", ""),
-            ("Proton password", "proton_password", ""),
-            ("2FA seed (optional)", "proton_2fa", ""),
-            ("Remote path", "proton_remote_path", "/Backups"),
-            ("rclone path (optional)", "proton_rclone_path", ""),
-        ]:
-            ttk.Label(f, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
-            var = tk.StringVar(value=default)
-            self._proton_vars[key] = var
-            if "password" in key or "2fa" in key:
+            if "secret" in key:
                 ttk.Entry(f, textvariable=var, show="●").pack(fill="x")
             else:
                 ttk.Entry(f, textvariable=var).pack(fill="x")
-
-        from src.ui.tabs.storage_tab import StorageTab
-
-        StorageTab._add_proton_guide(f)
 
         self._on_type_changed()
 
@@ -210,6 +201,15 @@ class MirrorTab(ScrollableTab):
         )
         if path:
             self._sftp_vars["sftp_key_path"].set(path)
+
+    def _on_s3_provider_changed(self, *args):
+        """Update region combobox when the S3 provider changes."""
+        provider = self.s3_provider_var.get()
+        regions = PROVIDER_REGIONS.get(provider, [])
+        self._s3_region_cb["values"] = regions
+        current = self._s3_vars["s3_region"].get()
+        if current not in regions:
+            self._s3_vars["s3_region"].set(regions[0] if regions else "")
 
     def _on_type_changed(self, *args):
         """Show config fields for selected storage type."""
@@ -278,10 +278,6 @@ class MirrorTab(ScrollableTab):
             config.s3_provider = self.s3_provider_var.get()
             for key, var in self._s3_vars.items():
                 setattr(config, key, var.get())
-        elif stype == StorageType.PROTON:
-            for key, var in self._proton_vars.items():
-                setattr(config, key, var.get())
-
         config.storage_type = stype
         return config
 
@@ -299,11 +295,13 @@ class MirrorTab(ScrollableTab):
                     var.set(str(getattr(m, key, "")))
             if hasattr(self, "_s3_vars"):
                 self.s3_provider_var.set(getattr(m, "s3_provider", "aws"))
+                # Set region AFTER provider to override the provider callback reset.
                 for key, var in self._s3_vars.items():
                     var.set(str(getattr(m, key, "")))
-            if hasattr(self, "_proton_vars"):
-                for key, var in self._proton_vars.items():
-                    var.set(str(getattr(m, key, "")))
+                # Re-apply region explicitly: the provider trace may reset it.
+                saved_region = str(getattr(m, "s3_region", ""))
+                if saved_region:
+                    self._s3_vars["s3_region"].set(saved_region)
         else:
             self.enabled_var.set(False)
         self._toggle_enabled()

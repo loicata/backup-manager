@@ -34,7 +34,6 @@ class StorageType(StrEnum):
     NETWORK = "network"
     SFTP = "sftp"
     S3 = "s3"
-    PROTON = "proton"
 
 
 class ScheduleFrequency(StrEnum):
@@ -75,13 +74,6 @@ class StorageConfig:
     s3_endpoint_url: str = ""
     s3_provider: str = "aws"
 
-    # Proton Drive
-    proton_username: str = ""
-    proton_password: str = ""
-    proton_2fa: str = ""
-    proton_remote_path: str = "/Backups"
-    proton_rclone_path: str = ""
-
     # Mirror-specific
     mirror_encrypt: bool = False
 
@@ -105,7 +97,6 @@ class StorageConfig:
             and self.destination_path == ""
             and self.sftp_host == ""
             and self.s3_bucket == ""
-            and self.proton_username == ""
         ):
             return
         self.validate()
@@ -130,18 +121,12 @@ class StorageConfig:
             if not self.sftp_host or not self.sftp_host.strip():
                 raise ValueError("sftp_host is required for SFTP storage")
 
-        elif st == StorageType.S3:
-            if not self.s3_bucket or not self.s3_bucket.strip():
-                raise ValueError("s3_bucket is required for S3 storage")
-
-        elif st == StorageType.PROTON and (
-            not self.proton_username or not self.proton_username.strip()
-        ):
-            raise ValueError("proton_username is required for Proton storage")
+        elif st == StorageType.S3 and (not self.s3_bucket or not self.s3_bucket.strip()):
+            raise ValueError("s3_bucket is required for S3 storage")
 
     def is_remote(self) -> bool:
         """True if this storage requires network upload (no local path)."""
-        return self.storage_type in (StorageType.SFTP, StorageType.S3, StorageType.PROTON)
+        return self.storage_type in (StorageType.SFTP, StorageType.S3)
 
 
 @dataclass
@@ -220,6 +205,7 @@ class BackupProfile:
     full_backup_every: int = 7  # Force a full backup every N backups (differential)
     differential_count: int = 0  # Backups since last full (auto-managed)
     destinations_hash: str = ""  # SHA-256 of destination configs (auto-managed)
+    sources_hash: str = ""  # SHA-256 of source paths (auto-managed)
     bandwidth_limit_kbps: int = 0
     sort_order: int = 0
     active: bool = True
@@ -242,8 +228,6 @@ _DESTINATION_IDENTITY_FIELDS = [
     "s3_region",
     "s3_provider",
     "s3_endpoint_url",
-    "proton_username",
-    "proton_remote_path",
 ]
 
 
@@ -272,6 +256,23 @@ def compute_destinations_hash(profile: BackupProfile) -> str:
     return hashlib.sha256(":".join(parts).encode("utf-8")).hexdigest()
 
 
+def compute_sources_hash(profile: BackupProfile) -> str:
+    """Compute a SHA-256 fingerprint of all source paths.
+
+    Detects when sources are added or removed, which requires
+    a full backup to ensure all destinations have complete data.
+
+    Args:
+        profile: Backup profile to fingerprint.
+
+    Returns:
+        Hex digest of the SHA-256 hash.
+    """
+    # Sort paths for consistent hashing regardless of UI order.
+    paths = sorted(profile.source_paths)
+    return hashlib.sha256("|".join(paths).encode("utf-8")).hexdigest()
+
+
 # --- Sensitive fields that must be encrypted before save ---
 
 _STORAGE_SECRET_FIELDS = [
@@ -279,8 +280,6 @@ _STORAGE_SECRET_FIELDS = [
     "sftp_key_passphrase",
     "s3_access_key",
     "s3_secret_key",
-    "proton_password",
-    "proton_2fa",
 ]
 
 _EMAIL_SECRET_FIELDS = ["password"]
@@ -449,9 +448,6 @@ class ConfigManager:
         if "retention" in data:
             r = data["retention"]
             if "policy" in r:
-                # Migrate old "simple" policy to GFS
-                if r["policy"] == "simple":
-                    r["policy"] = "gfs"
                 r["policy"] = RetentionPolicy(r["policy"])
             data["retention"] = self._safe_construct(RetentionConfig, r)
         if "encryption" in data:
@@ -467,16 +463,6 @@ class ConfigManager:
                     m["storage_type"] = StorageType(m["storage_type"])
                 mirrors.append(self._safe_construct(StorageConfig, m))
             data["mirror_destinations"] = mirrors
-
-        # Migrate old encryption_mode string to new boolean flags
-        old_mode = data.pop("encryption_mode", None)
-        if old_mode and old_mode != "none":
-            if "encrypt_primary" not in data:
-                data["encrypt_primary"] = old_mode in ("all", "primary")
-            if "encrypt_mirror1" not in data:
-                data["encrypt_mirror1"] = old_mode in ("all", "mirror1_only")
-            if "encrypt_mirror2" not in data:
-                data["encrypt_mirror2"] = old_mode in ("all", "mirror2_only")
 
         return self._safe_construct(BackupProfile, data)
 

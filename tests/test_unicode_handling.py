@@ -41,7 +41,7 @@ class TestCollectorUnicode:
         (tmp_path / "\u00e9l\u00e8ve.tmp").write_text("skip", encoding="utf-8")
         files = collect_files([str(tmp_path)], exclude_patterns=["*.tmp"])
         assert len(files) == 1
-        assert files[0].relative_path == "garder.txt"
+        assert files[0].relative_path.endswith("garder.txt")
 
     def test_paths_with_spaces_and_parens(self, tmp_path):
         """Paths containing spaces and parentheses are handled."""
@@ -103,7 +103,8 @@ class TestLocalWriterUnicode:
         backup_path = write_flat(files, dest, "unicode_test")
 
         for name in names:
-            target = backup_path / name
+            # Files are now stored under a subdirectory matching source folder name
+            target = backup_path / "source" / name
             assert target.exists(), f"Missing: {name}"
             assert target.read_text(encoding="utf-8") == f"content of {name}"
 
@@ -165,6 +166,7 @@ class TestMixedEncodings:
         dest.mkdir()
         backup_path = write_flat(files, dest, "mixed_test")
 
-        assert (backup_path / "readme.txt").exists()
-        assert (backup_path / "\u00e9l\u00e8ve.txt").exists()
-        assert (backup_path / "\u6d4b\u8bd5.txt").exists()
+        # Files are now stored under a subdirectory matching source folder name
+        assert (backup_path / "mixed" / "readme.txt").exists()
+        assert (backup_path / "mixed" / "\u00e9l\u00e8ve.txt").exists()
+        assert (backup_path / "mixed" / "\u6d4b\u8bd5.txt").exists()

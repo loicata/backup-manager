@@ -22,6 +22,22 @@ SMTP_PRESETS = {
     "protonmail": {"host": "127.0.0.1", "port": 1025, "tls": False},
 }
 
+# Authentication hints displayed under the password field per provider
+SMTP_AUTH_HINTS: dict[str, str] = {
+    "gmail": (
+        "Use an App Password, not your Google password.\n"
+        "Google Account \u2192 Security \u2192 2-Step Verification \u2192 App passwords"
+    ),
+    "outlook": (
+        "If MFA is enabled, use an App Password.\n"
+        "Microsoft Account \u2192 Security \u2192 App passwords"
+    ),
+    "protonmail": (
+        "Requires Proton Mail Bridge running locally.\n"
+        "Use the Bridge password, not your Proton account password."
+    ),
+}
+
 
 def send_backup_report(
     config: EmailConfig,
@@ -203,7 +219,7 @@ def _build_html(
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
                            border-top: 1px solid #eee; text-align: center;">
-                    Backup Manager v3.1.4
+                    Backup Manager v3.1.5
                 </td>
             </tr>
         </table>

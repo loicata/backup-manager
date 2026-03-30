@@ -20,7 +20,7 @@ import tarfile
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
-from src.storage.base import StorageBackend, with_retry
+from src.storage.base import StorageBackend, long_path_mkdir, long_path_str, with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -1004,10 +1004,11 @@ class SFTPStorage(StorageBackend):
             remote_path = f"{remote_dir}/{entry.filename}"
             local_path = local_dir / entry.filename
             if stat_module.S_ISDIR(entry.st_mode):
-                local_path.mkdir(parents=True, exist_ok=True)
+                long_path_mkdir(local_path)
                 self._sftp_download_dir(sftp, remote_path, local_path)
             else:
-                sftp.get(remote_path, str(local_path))
+                long_path_mkdir(local_path.parent)
+                sftp.get(remote_path, long_path_str(local_path))
 
     def _join_remote(self, name: str) -> str:
         """Join remote base path with a name."""

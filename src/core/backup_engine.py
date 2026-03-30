@@ -19,6 +19,7 @@ from src.core.config import (
     StorageConfig,
     StorageType,
     compute_destinations_hash,
+    compute_sources_hash,
 )
 from src.core.events import (
     BACKUP_DONE,
@@ -323,7 +324,7 @@ class BackupEngine:
         Verification levels (best available per backend):
         - SFTP: SHA-256 computed server-side via exec channel
         - S3: MD5 from ETag (simple uploads < 5GB)
-        - Proton/other: file count + sizes only
+        - Other: file count + sizes only
 
         Args:
             ctx: Pipeline context with backend and files.
@@ -541,6 +542,8 @@ class BackupEngine:
         - No manifest exists (first run or manifest deleted).
         - The differential cycle threshold is reached.
         - Storage destinations have changed (new mirror, different path, etc.).
+        - Source paths have changed (folder added or removed).
+        - Any destination has no full backup.
 
         Sets ``ctx.forced_full`` to True when promotion happens.  The
         profile's ``backup_type`` is changed to FULL for this run only
@@ -553,19 +556,66 @@ class BackupEngine:
         manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
         no_manifest = not manifest_path.exists()
         cycle_reached = ctx.profile.differential_count >= ctx.profile.full_backup_every
-        current_hash = compute_destinations_hash(ctx.profile)
-        destinations_changed = ctx.profile.destinations_hash != current_hash
 
-        if no_manifest or cycle_reached or destinations_changed:
+        current_dest_hash = compute_destinations_hash(ctx.profile)
+        destinations_changed = ctx.profile.destinations_hash != current_dest_hash
+
+        current_src_hash = compute_sources_hash(ctx.profile)
+        sources_changed = ctx.profile.sources_hash != current_src_hash
+
+        dest_missing_full = self._any_destination_missing_full(ctx)
+
+        if (
+            no_manifest
+            or cycle_reached
+            or destinations_changed
+            or sources_changed
+            or dest_missing_full
+        ):
             ctx.forced_full = True
             ctx.profile.backup_type = BackupType.FULL
             if destinations_changed:
                 reason = "destinations changed"
+            elif sources_changed:
+                reason = "sources changed"
             elif no_manifest:
                 reason = "no manifest"
+            elif dest_missing_full:
+                reason = f"no full backup on {dest_missing_full}"
             else:
                 reason = "cycle reached"
             self._log(f"Forcing full backup ({reason})")
+
+    def _any_destination_missing_full(self, ctx: PipelineContext) -> str:
+        """Check if any configured destination is missing a full backup.
+
+        Checks all destinations (local, network, SFTP, S3).
+        A full backup is required on every destination for differential
+        backups to be restorable.  If any destination is empty or has
+        no FULL backup, a full is forced on all destinations.
+
+        Args:
+            ctx: Current pipeline context.
+
+        Returns:
+            Name of the first destination without a full backup,
+            or empty string if all destinations have at least one full.
+        """
+        destinations = [("Storage", ctx.profile.storage)]
+        for i, mirror in enumerate(ctx.profile.mirror_destinations):
+            destinations.append((f"Mirror {i + 1}", mirror))
+
+        for name, config in destinations:
+            try:
+                backend = self._get_backend(config)
+                backups = backend.list_backups()
+                has_full = any("_FULL_" in b["name"] for b in backups)
+                if not has_full:
+                    logger.info("Destination %s has no full backup", name)
+                    return name
+            except Exception as e:
+                logger.warning("Could not check %s: %s", name, e)
+        return ""
 
     def _phase_update_delta(self, ctx: PipelineContext) -> None:
         """Phase 8: Update manifest for differential tracking.
@@ -587,6 +637,7 @@ class BackupEngine:
             save_manifest(full_manifest, manifest_path)
             ctx.profile.differential_count = 0
             ctx.profile.destinations_hash = compute_destinations_hash(ctx.profile)
+            ctx.profile.sources_hash = compute_sources_hash(ctx.profile)
         else:
             ctx.profile.differential_count += 1
 
@@ -783,7 +834,6 @@ class BackupEngine:
             StorageType.NETWORK: self._build_network,
             StorageType.SFTP: self._build_sftp,
             StorageType.S3: self._build_s3,
-            StorageType.PROTON: self._build_proton,
         }
         builder = builders.get(storage.storage_type)
         if builder is None:
@@ -828,18 +878,6 @@ class BackupEngine:
             secret_key=storage.s3_secret_key,
             endpoint_url=storage.s3_endpoint_url,
             provider=storage.s3_provider,
-        )
-
-    @staticmethod
-    def _build_proton(storage: StorageConfig) -> StorageBackend:
-        from src.storage.proton import ProtonDriveStorage
-
-        return ProtonDriveStorage(
-            username=storage.proton_username,
-            password=storage.proton_password,
-            twofa_seed=storage.proton_2fa,
-            remote_path=storage.proton_remote_path,
-            rclone_path=storage.proton_rclone_path,
         )
 
     def precheck_targets(self, profile: BackupProfile) -> list[tuple[str, str, bool, str]]:
@@ -896,8 +934,6 @@ class BackupEngine:
             return (
                 f"Check S3 bucket {config.s3_bucket} " f"({config.s3_provider} {config.s3_region})"
             )
-        if st == StorageType.PROTON:
-            return f"Sign in to Proton Drive ({config.proton_username})"
         return f"Check {st.value} destination"
 
     def _check_cancel(self) -> None:

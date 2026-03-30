@@ -150,7 +150,10 @@ def _add_file(
 
     try:
         st = filepath.stat()
-        rel = filepath.relative_to(source_root).as_posix()
+        inner_rel = filepath.relative_to(source_root).as_posix()
+        # Prefix with source directory name to preserve folder structure
+        # when multiple sources are configured.
+        rel = f"{source_root.name}/{inner_rel}"
         files.append(
             FileInfo(
                 source_path=filepath,

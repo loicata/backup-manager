@@ -1,9 +1,9 @@
 [project]
 name = "backup-manager"
-version = "3.1.4"
+version = "3.1.5"
 description = "Backup management system with encryption, scheduling, and multi-destination support"
 authors = [{name = "Loic Ader"}]
-license = {text = "MIT"}
+license = {text = "GPL-3.0-or-later"}
 requires-python = ">=3.11"
 
 dependencies = [
@@ -12,7 +12,6 @@ dependencies = [
     "Pillow>=10.0.0",
     "paramiko>=3.0.0",
     "boto3>=1.35.0",
-    "pyotp>=2.9.0",
 ]
 
 [project.optional-dependencies]
@@ -39,7 +38,6 @@ omit = [
     "src/core/update_checker.py",
     # Remote backends need real infrastructure or complex mocking
     "src/storage/network.py",
-    "src/storage/proton.py",
     "src/storage/sftp.py",
     "src/storage/s3.py",
     # Standalone verification module (pipeline verifier is tested)

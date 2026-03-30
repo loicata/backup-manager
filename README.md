@@ -1,4 +1,4 @@
-# Backup Manager v3.1.4
+# Backup Manager v3.1.5
 
 A reliable, secure, and user-friendly Windows backup application designed for personal and small-business use. Manage multiple backup profiles, store copies on local drives, network shares, or remote servers, and let the built-in scheduler and GFS retention policy take care of the rest.
 
@@ -28,7 +28,6 @@ A reliable, secure, and user-friendly Windows backup application designed for pe
 | **Network (UNC)** | Backup to shared network folders (`\\server\share`) |
 | **SFTP (SSH)** | Backup to any remote server with password or SSH key authentication |
 | **S3 Cloud** | Backup to Amazon S3 or any S3-compatible provider |
-| **Proton Drive** | Backup to Proton Drive via rclone integration (beta) |
 
 ### Mirrors
 
@@ -73,14 +72,14 @@ Old backups are automatically deleted when the configured limits are exceeded. T
 
 - **SHA-256 checksum manifest** generated before each backup.
 - **Post-backup verification** re-reads and re-hashes every file to confirm integrity.
-- **Remote verification:** SHA-256 hash check via server-side `sha256sum` (SFTP), ETag/MD5 comparison (S3), or file-count validation (Proton Drive).
+- **Remote verification:** SHA-256 hash check via server-side `sha256sum` (SFTP), ETag/MD5 comparison (S3).
 - **Zero-tolerance policy:** any missing or corrupted file marks the entire backup as failed.
 - `.wbverify` manifest saved alongside each backup for future auditing.
 
 ### Recovery
 
 - **Restore** from any local backup folder with optional decryption.
-- **Retrieve** backups stored on remote servers (SFTP, S3, Proton Drive) directly from the Recovery tab — no external tool required.
+- **Retrieve** backups stored on remote servers (SFTP, S3) directly from the Recovery tab — no external tool required.
 
 ### Email notifications
 - SMTP-based email alerts on backup success or failure.
@@ -190,8 +189,7 @@ backup-manager/
 │   ├── storage/                # Storage backends
 │   │   ├── local.py               # Local / USB / UNC
 │   │   ├── sftp.py                # SFTP via Paramiko
-│   │   ├── s3.py                  # Amazon S3 via Boto3
-│   │   └── proton.py              # Proton Drive via rclone
+│   │   └── s3.py                  # Amazon S3 via Boto3
 │   ├── security/               # Security layer
 │   │   ├── encryption.py          # AES-256-GCM, DPAPI, password storage
 │   │   └── secure_memory.py       # Secure memory handling
@@ -241,13 +239,11 @@ backup-manager/
 | **boto3** | >= 1.35.0 |
 | **Pillow** | >= 10.0.0 |
 | **pystray** | >= 0.19.0 |
-| **pyotp** | >= 2.9.0 |
-
 ---
 
 ## License
 
-[MIT License](LICENSE) — Copyright (c) 2026 Loic Ader
+[GNU General Public License v3.0](LICENSE) — Copyright (c) 2026 Loic Ader
 
 ---
 

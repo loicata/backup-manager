@@ -56,9 +56,27 @@ class ScrollableTab(ttk.Frame):
 
     def _bind_mousewheel(self, _event: tk.Event) -> None:
         self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        # Block Combobox from stealing mousewheel events while scrolling.
+        self._disable_combobox_wheel(self.inner)
 
     def _unbind_mousewheel(self, _event: tk.Event) -> None:
         self._canvas.unbind_all("<MouseWheel>")
 
     def _on_mousewheel(self, event: tk.Event) -> None:
         self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _disable_combobox_wheel(self, widget: tk.Widget) -> None:
+        """Prevent all Combobox descendants from capturing mousewheel.
+
+        Readonly Comboboxes change their selected value on mousewheel,
+        which is undesirable when the user is scrolling the tab.
+
+        Args:
+            widget: Root widget to search recursively.
+        """
+        for child in widget.winfo_children():
+            if isinstance(child, ttk.Combobox):
+                child.bind("<MouseWheel>", lambda e: "break")
+                child.bind("<Button-4>", lambda e: "break")
+                child.bind("<Button-5>", lambda e: "break")
+            self._disable_combobox_wheel(child)

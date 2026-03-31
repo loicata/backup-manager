@@ -25,7 +25,7 @@ from src.storage.base import StorageBackend, long_path_mkdir, long_path_str, wit
 logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT = 30  # Seconds for SSH/SFTP connection (LAN + internet)
-_OPERATION_TIMEOUT = 120  # Seconds for SFTP operations (delete, list, etc.)
+_OPERATION_TIMEOUT = 600  # Seconds for SFTP operations (delete, list, etc.)
 _EXEC_PROBE_TIMEOUT = 10  # Seconds for exec channel probe
 _KEEPALIVE_INTERVAL = 30  # Seconds between SSH keepalive packets
 _FAST_CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -193,6 +193,9 @@ class SFTPStorage(StorageBackend):
             raise OSError(
                 f"Cannot reach {self._host}:{self._port} " f"(timeout {_CONNECT_TIMEOUT}s)"
             ) from e
+
+        # Switch socket to operation timeout now that connection succeeded
+        sock.settimeout(_OPERATION_TIMEOUT)
 
         transport = paramiko.Transport(sock)
         transport.set_keepalive(_KEEPALIVE_INTERVAL)
@@ -643,6 +646,9 @@ class SFTPStorage(StorageBackend):
                 for entry in entries:
                     if entry.filename.startswith("."):
                         continue
+                    # Skip manifests (.wbverify) — metadata, not backups
+                    if entry.filename.endswith(".wbverify"):
+                        continue
                     backups.append(
                         {
                             "name": entry.filename,
@@ -973,9 +979,17 @@ class SFTPStorage(StorageBackend):
                 transport.close()
 
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
-        """Download a backup from SFTP to a local directory."""
+        """Download a backup from SFTP to a local directory.
+
+        If the destination already exists it is removed first so that
+        a re-download always starts from a clean state.
+        """
+        import shutil
+
         local_dir.mkdir(parents=True, exist_ok=True)
         dst = local_dir / remote_name
+        if dst.exists():
+            shutil.rmtree(dst, ignore_errors=True)
         dst.mkdir(parents=True, exist_ok=True)
 
         transport = self._get_transport()
@@ -984,6 +998,15 @@ class SFTPStorage(StorageBackend):
             try:
                 remote_base = self._join_remote(remote_name)
                 self._sftp_download_dir(sftp, remote_base, dst)
+
+                # Download .wbverify manifest if present
+                manifest_remote = self._join_remote(f"{remote_name}.wbverify")
+                manifest_local = local_dir / f"{remote_name}.wbverify"
+                try:
+                    sftp.get(manifest_remote, str(manifest_local))
+                    logger.info("Downloaded manifest: %s.wbverify", remote_name)
+                except FileNotFoundError:
+                    pass  # Older backups may not have manifests
             finally:
                 sftp.close()
         finally:

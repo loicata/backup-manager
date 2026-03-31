@@ -19,6 +19,7 @@ def rotate_backups(
     backend: StorageBackend,
     retention: RetentionConfig,
     events: EventBus | None = None,
+    current_backup_name: str = "",
 ) -> int:
     """Apply GFS retention policy and delete old backups.
 
@@ -26,6 +27,9 @@ def rotate_backups(
         backend: Storage backend to manage.
         retention: Retention configuration.
         events: Optional event bus.
+        current_backup_name: Name of the backup just created in this
+            run.  This backup is always protected from deletion
+            regardless of the retention policy outcome.
 
     Returns:
         Number of backups deleted.
@@ -34,7 +38,7 @@ def rotate_backups(
     if not backups:
         return 0
 
-    return _rotate_gfs(backend, backups, retention, events)
+    return _rotate_gfs(backend, backups, retention, events, current_backup_name)
 
 
 def _is_full_backup(name: str) -> bool:
@@ -47,6 +51,7 @@ def _rotate_gfs(
     backups: list[dict],
     retention: RetentionConfig,
     events: EventBus | None = None,
+    current_backup_name: str = "",
 ) -> int:
     """GFS rotation: keep daily/weekly/monthly backups.
 
@@ -57,6 +62,10 @@ def _rotate_gfs(
     phase_log = PhaseLogger("rotator", events)
     now = datetime.now()
     keep = set()
+
+    # Always protect the backup created in this run
+    if current_backup_name:
+        keep.add(current_backup_name)
 
     # Sort by date
     dated_backups = []

@@ -6,9 +6,11 @@ Two types of manifests:
 """
 
 import hashlib
+import io
 import json
 import logging
 from pathlib import Path
+from typing import BinaryIO
 
 from src.core.events import EventBus
 from src.core.hashing import compute_sha256
@@ -87,3 +89,35 @@ def save_integrity_manifest(manifest: dict, backup_path: Path) -> Path:
     )
     logger.info("Saved manifest: %s", manifest_path)
     return manifest_path
+
+
+def upload_manifest_to_remote(
+    manifest: dict,
+    backend: object,
+    backup_name: str,
+) -> None:
+    """Upload integrity manifest to a remote storage backend.
+
+    The manifest is serialised to JSON and uploaded as
+    ``{backup_name}.wbverify`` at the same level as the backup
+    directory on the remote destination.
+
+    Args:
+        manifest: Manifest dict from build_integrity_manifest().
+        backend: Remote StorageBackend instance with upload_file().
+        backup_name: Name of the backup directory on the remote.
+
+    Raises:
+        OSError: If the upload fails (caller decides error policy).
+    """
+    if not manifest:
+        raise ValueError("Manifest is empty")
+    if not backup_name:
+        raise ValueError("backup_name must not be empty")
+
+    data = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
+    buf: BinaryIO = io.BytesIO(data)
+    remote_path = f"{backup_name}.wbverify"
+
+    backend.upload_file(buf, remote_path, size=len(data))
+    logger.info("Uploaded manifest: %s", remote_path)

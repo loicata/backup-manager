@@ -17,6 +17,7 @@ from src.core.config import StorageConfig, StorageType
 from src.core.events import EventBus
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
+from src.core.phases.manifest import save_integrity_manifest, upload_manifest_to_remote
 from src.core.phases.remote_writer import write_remote
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ def mirror_backup(
     encrypt_password: str = "",
     encrypt_flags: list[bool] | None = None,
     cancel_check: Callable[[], None] | None = None,
+    integrity_manifest: dict | None = None,
 ) -> list[tuple[str, bool, str]]:
     """Upload backup to mirror destinations.
 
@@ -49,6 +51,8 @@ def mirror_backup(
         encrypt_flags: Per-mirror encryption booleans [mirror1, mirror2].
                        If None or too short, defaults to False.
         cancel_check: Callable that raises CancelledError if cancelled.
+        integrity_manifest: Integrity manifest dict to persist alongside
+                            the backup on each mirror.  Never encrypted.
 
     Returns:
         List of (mirror_name, success, message) tuples.
@@ -75,6 +79,15 @@ def mirror_backup(
             # Determine if this mirror should be encrypted
             should_encrypt = i < len(flags) and flags[i]
             mirror_pw = encrypt_password if should_encrypt else ""
+            logger.info(
+                "Mirror %d: should_encrypt=%s, flags=%s, "
+                "has_password=%s, is_remote=%s",
+                i + 1,
+                should_encrypt,
+                flags,
+                bool(encrypt_password),
+                config.is_remote(),
+            )
 
             has_local_backup = (
                 backup_path is not None and backup_path != Path(".") and backup_path.is_dir()
@@ -107,6 +120,19 @@ def mirror_backup(
                     backup_name,
                     phase_log,
                     cancel_check,
+                )
+
+            # Upload .wbverify to this mirror (never encrypted)
+            if integrity_manifest:
+                _upload_mirror_manifest(
+                    integrity_manifest,
+                    config,
+                    backend,
+                    backup_path,
+                    backup_name,
+                    has_local_backup,
+                    mirror_name,
+                    phase_log,
                 )
 
             results.append((mirror_name, True, "OK"))
@@ -211,6 +237,50 @@ def _write_source_files_to_local(
             filename=f.relative_path,
             phase="mirror_upload",
         )
+
+
+def _upload_mirror_manifest(
+    integrity_manifest: dict,
+    config: StorageConfig,
+    backend: object,
+    backup_path: Path,
+    backup_name: str,
+    has_local_backup: bool,
+    mirror_name: str,
+    phase_log: PhaseLogger,
+) -> None:
+    """Persist .wbverify manifest on a mirror destination.
+
+    Remote mirrors: upload via backend.upload_file().
+    Local mirrors with local primary: copy from source .wbverify.
+    Local mirrors with remote primary: save manifest directly.
+
+    Manifest is never encrypted regardless of mirror encryption
+    settings — it contains only hashes, not sensitive data.
+
+    Args:
+        integrity_manifest: Manifest dict to persist.
+        config: Mirror storage configuration.
+        backend: Instantiated storage backend for this mirror.
+        backup_path: Local backup path (may be Path(".") for remote primary).
+        backup_name: Backup directory name.
+        has_local_backup: True if primary backup is local.
+        mirror_name: Human-readable mirror label for logging.
+        phase_log: Phase logger instance.
+    """
+    try:
+        if config.is_remote():
+            upload_manifest_to_remote(integrity_manifest, backend, backup_name)
+        elif has_local_backup:
+            src_manifest = backup_path.parent / f"{backup_path.name}.wbverify"
+            if src_manifest.exists():
+                dst_manifest = Path(backend._dest) / f"{backup_name}.wbverify"
+                shutil.copy2(src_manifest, dst_manifest)
+        else:
+            mirror_backup_dir = Path(backend._dest) / backup_name
+            save_integrity_manifest(integrity_manifest, mirror_backup_dir)
+    except Exception as e:
+        phase_log.warning(f"Manifest upload to {mirror_name} failed: {e}")
 
 
 def _describe_mirror(config: StorageConfig) -> str:

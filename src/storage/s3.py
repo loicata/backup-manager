@@ -198,11 +198,12 @@ class S3Storage(StorageBackend):
                     }
                 )
 
-            # Objects (files)
+            # Objects (files) — skip manifests (.wbverify) as they
+            # are metadata, not backups.
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 name = key.rsplit("/", 1)[-1]
-                if name and key != prefix:
+                if name and key != prefix and not name.endswith(".wbverify"):
                     last_mod = obj.get("LastModified", 0)
                     if hasattr(last_mod, "timestamp"):
                         last_mod = last_mod.timestamp()
@@ -358,9 +359,17 @@ class S3Storage(StorageBackend):
         return files
 
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
-        """Download a backup from S3 to a local directory."""
+        """Download a backup from S3 to a local directory.
+
+        If the destination already exists it is removed first so that
+        a re-download always starts from a clean state.
+        """
+        import shutil
+
         long_path_mkdir(local_dir)
         dst = local_dir / remote_name
+        if dst.exists():
+            shutil.rmtree(dst, ignore_errors=True)
         long_path_mkdir(dst)
 
         client = self._get_client()
@@ -378,6 +387,16 @@ class S3Storage(StorageBackend):
                 local_file = dst / rel
                 long_path_mkdir(local_file.parent)
                 client.download_file(self._bucket, key, long_path_str(local_file))
+
+        # Download .wbverify manifest if present
+        manifest_key = self._s3_key(f"{remote_name}.wbverify")
+        manifest_local = local_dir / f"{remote_name}.wbverify"
+        try:
+            client.download_file(self._bucket, manifest_key, long_path_str(manifest_local))
+            logger.info("Downloaded manifest: %s.wbverify", remote_name)
+        except Exception:
+            pass  # Older backups may not have manifests
+
         return dst
 
     def _make_progress_cb(self, total: int):

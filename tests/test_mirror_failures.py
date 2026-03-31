@@ -276,7 +276,7 @@ class TestMirrorRotation:
         """Mirror rotation failure is logged but does not fail the backup."""
         call_count = {"n": 0}
 
-        def side_effect(backend, retention, events=None):
+        def side_effect(backend, retention, events=None, current_backup_name=""):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return 0  # Primary rotation OK

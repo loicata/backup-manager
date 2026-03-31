@@ -67,6 +67,14 @@ def write_remote(
 
         use_tar = not encrypt_password and getattr(backend, "supports_tar_stream", False) is True
 
+        logger.info(
+            "Remote write: encrypt=%s, use_tar=%s, supports_tar=%s, files=%d",
+            bool(encrypt_password),
+            use_tar,
+            getattr(backend, "supports_tar_stream", False),
+            len(files),
+        )
+
         if use_tar:
             _upload_tar_batch(backend, files, backup_name, phase_log, cancel_check)
         else:
@@ -162,8 +170,12 @@ def _upload_file_by_file(
 
         try:
             if encrypt_password:
+                if i == 0:
+                    logger.info("Encrypting files before upload (first file: %s)", remote_path)
                 _upload_encrypted(backend, file_info, remote_path, encrypt_password)
             else:
+                if i == 0:
+                    logger.info("Uploading plain files (first file: %s)", remote_path)
                 _upload_plain(backend, file_info, remote_path)
         except Exception as e:
             raise WriteError(file_info.relative_path, e) from e

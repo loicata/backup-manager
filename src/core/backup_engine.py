@@ -41,7 +41,11 @@ from src.core.phases.filter import (
     save_manifest,
 )
 from src.core.phases.local_writer import generate_backup_name
-from src.core.phases.manifest import build_integrity_manifest, save_integrity_manifest
+from src.core.phases.manifest import (
+    build_integrity_manifest,
+    save_integrity_manifest,
+    upload_manifest_to_remote,
+)
 from src.core.phases.mirror import mirror_backup
 from src.core.phases.rotator import rotate_backups
 from src.core.phases.verifier import verify_backup
@@ -283,10 +287,21 @@ class BackupEngine:
         write_backup(ctx, cancel_check=self._check_cancel)
 
     def _phase_save_manifest(self, ctx: PipelineContext) -> None:
-        """Phase 5: Save integrity manifest alongside backup."""
+        """Phase 5: Save integrity manifest alongside backup.
+
+        Local backups: writes .wbverify next to the backup directory.
+        Remote backups: uploads .wbverify to the remote backend.
+        """
         self._phase("Saving manifest...")
         if ctx.backup_path and ctx.backup_path.exists():
             save_integrity_manifest(ctx.integrity_manifest, ctx.backup_path)
+
+        if ctx.backup_remote_name and ctx.backend is not None:
+            try:
+                upload_manifest_to_remote(ctx.integrity_manifest, ctx.backend, ctx.backup_name)
+            except Exception as e:
+                self._log(f"Warning: manifest upload failed: {e}")
+                logger.warning("Failed to upload manifest to remote: %s", e)
 
     def _phase_verify(self, ctx: PipelineContext) -> None:
         """Phase 6: Post-backup verification.
@@ -642,6 +657,14 @@ class BackupEngine:
             encrypt_pw = ""
             if ctx.profile.encryption.enabled and ctx.profile.encryption.stored_password:
                 encrypt_pw = ctx.profile.encryption.stored_password
+            logger.info(
+                "Mirror phase: encrypt_flags=%s, encryption_enabled=%s, "
+                "has_stored_password=%s, encrypt_pw_set=%s",
+                encrypt_flags,
+                ctx.profile.encryption.enabled,
+                bool(ctx.profile.encryption.stored_password),
+                bool(encrypt_pw),
+            )
 
             ctx.result.mirror_results = mirror_backup(
                 mirror_path,
@@ -653,6 +676,7 @@ class BackupEngine:
                 encrypt_password=encrypt_pw,
                 encrypt_flags=encrypt_flags,
                 cancel_check=self._check_cancel,
+                integrity_manifest=ctx.integrity_manifest,
             )
 
     def _phase_verify_mirrors(self, ctx: PipelineContext) -> None:
@@ -678,6 +702,13 @@ class BackupEngine:
             self._check_cancel()
             mirror_encrypted = (
                 ctx.profile.encryption.enabled and i < len(encrypt_flags) and encrypt_flags[i]
+            )
+            logger.info(
+                "Verify %s: encrypted=%s (enc_enabled=%s, flag=%s)",
+                mirror_name,
+                mirror_encrypted,
+                ctx.profile.encryption.enabled,
+                encrypt_flags[i] if i < len(encrypt_flags) else "N/A",
             )
 
             try:
@@ -705,15 +736,23 @@ class BackupEngine:
                                 f"(file listing not supported)"
                             )
                 else:
-                    # Local mirror — hash verification
-                    mirror_path = Path(config.destination_path) / ctx.backup_name
-                    if mirror_path.exists() and mirror_path.is_dir():
-                        self._phase(f"Verifying {mirror_name} (hash)...")
-                        manifest_file = mirror_path.parent / f"{mirror_path.name}.wbverify"
-                        if manifest_file.exists():
-                            ok, msg = verify_backup(mirror_path, manifest_file, self._events)
-                            if not ok:
-                                raise RuntimeError(f"{mirror_name}: {msg}")
+                    # Local mirror — hash verification.
+                    # Skip when the mirror itself is encrypted OR when
+                    # the primary was encrypted (files are .wbenc copies).
+                    primary_encrypted = (
+                        ctx.profile.encrypt_primary
+                        and ctx.profile.encryption.enabled
+                        and ctx.profile.encryption.stored_password
+                    )
+                    if not mirror_encrypted and not primary_encrypted:
+                        mirror_path = Path(config.destination_path) / ctx.backup_name
+                        if mirror_path.exists() and mirror_path.is_dir():
+                            self._phase(f"Verifying {mirror_name} (hash)...")
+                            manifest_file = mirror_path.parent / f"{mirror_path.name}.wbverify"
+                            if manifest_file.exists():
+                                ok, msg = verify_backup(mirror_path, manifest_file, self._events)
+                                if not ok:
+                                    raise RuntimeError(f"{mirror_name}: {msg}")
 
             except RuntimeError:
                 raise
@@ -812,6 +851,7 @@ class BackupEngine:
             ctx.backend,
             ctx.profile.retention,
             self._events,
+            current_backup_name=ctx.backup_name,
         )
 
         # Rotate mirrors with the same retention policy
@@ -819,7 +859,12 @@ class BackupEngine:
             mirror_name = f"Mirror {i + 1}"
             try:
                 backend = self._get_backend(config)
-                deleted = rotate_backups(backend, ctx.profile.retention, self._events)
+                deleted = rotate_backups(
+                    backend,
+                    ctx.profile.retention,
+                    self._events,
+                    current_backup_name=ctx.backup_name,
+                )
                 if deleted:
                     self._log(f"{mirror_name}: rotated {deleted} old backup(s)")
             except Exception as e:

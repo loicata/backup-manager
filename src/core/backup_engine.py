@@ -18,8 +18,7 @@ from src.core.config import (
     BackupType,
     StorageConfig,
     StorageType,
-    compute_destinations_hash,
-    compute_sources_hash,
+    compute_profile_hash,
 )
 from src.core.events import (
     BACKUP_DONE,
@@ -541,8 +540,7 @@ class BackupEngine:
         A full backup is forced when:
         - No manifest exists (first run or manifest deleted).
         - The differential cycle threshold is reached.
-        - Storage destinations have changed (new mirror, different path, etc.).
-        - Source paths have changed (folder added or removed).
+        - The profile configuration has changed (any setting except email).
         - Any destination has no full backup.
 
         Sets ``ctx.forced_full`` to True when promotion happens.  The
@@ -557,27 +555,16 @@ class BackupEngine:
         no_manifest = not manifest_path.exists()
         cycle_reached = ctx.profile.differential_count >= ctx.profile.full_backup_every
 
-        current_dest_hash = compute_destinations_hash(ctx.profile)
-        destinations_changed = ctx.profile.destinations_hash != current_dest_hash
-
-        current_src_hash = compute_sources_hash(ctx.profile)
-        sources_changed = ctx.profile.sources_hash != current_src_hash
+        current_hash = compute_profile_hash(ctx.profile)
+        profile_changed = ctx.profile.profile_hash != current_hash
 
         dest_missing_full = self._any_destination_missing_full(ctx)
 
-        if (
-            no_manifest
-            or cycle_reached
-            or destinations_changed
-            or sources_changed
-            or dest_missing_full
-        ):
+        if no_manifest or cycle_reached or profile_changed or dest_missing_full:
             ctx.forced_full = True
             ctx.profile.backup_type = BackupType.FULL
-            if destinations_changed:
-                reason = "destinations changed"
-            elif sources_changed:
-                reason = "sources changed"
+            if profile_changed:
+                reason = "profile configuration changed"
             elif no_manifest:
                 reason = "no manifest"
             elif dest_missing_full:
@@ -636,8 +623,7 @@ class BackupEngine:
             }
             save_manifest(full_manifest, manifest_path)
             ctx.profile.differential_count = 0
-            ctx.profile.destinations_hash = compute_destinations_hash(ctx.profile)
-            ctx.profile.sources_hash = compute_sources_hash(ctx.profile)
+            ctx.profile.profile_hash = compute_profile_hash(ctx.profile)
         else:
             ctx.profile.differential_count += 1
 
@@ -683,9 +669,16 @@ class BackupEngine:
         if not ctx.profile.verification.auto_verify:
             return
 
+        encrypt_flags = [
+            ctx.profile.encrypt_mirror1,
+            ctx.profile.encrypt_mirror2,
+        ]
         for i, config in enumerate(ctx.profile.mirror_destinations):
             mirror_name = f"Mirror {i + 1}"
             self._check_cancel()
+            mirror_encrypted = (
+                ctx.profile.encryption.enabled and i < len(encrypt_flags) and encrypt_flags[i]
+            )
 
             try:
                 backend = self._get_backend(config)
@@ -697,11 +690,15 @@ class BackupEngine:
                     has_checksums = verified and any(c for _, _, c in verified)
 
                     if has_checksums:
-                        self._verify_mirror_checksums(ctx, verified, mirror_name)
+                        self._verify_mirror_checksums(
+                            ctx, verified, mirror_name, encrypted=mirror_encrypted
+                        )
                     else:
                         remote_files = backend.list_backup_files(ctx.backup_name)
                         if remote_files:
-                            self._verify_mirror_sizes(ctx, remote_files, mirror_name)
+                            self._verify_mirror_sizes(
+                                ctx, remote_files, mirror_name, encrypted=mirror_encrypted
+                            )
                         else:
                             self._log(
                                 f"{mirror_name}: verification skipped "
@@ -728,6 +725,7 @@ class BackupEngine:
         ctx: PipelineContext,
         remote_files: list[tuple[str, int, str]],
         mirror_name: str,
+        encrypted: bool = False,
     ) -> None:
         """Verify mirror files using checksums. Delegates to checksum logic."""
         from src.core.hashing import compute_sha256
@@ -738,22 +736,29 @@ class BackupEngine:
         size_verified = 0
 
         for f in ctx.files:
-            if f.relative_path not in remote_map:
-                errors.append(f"Missing on {mirror_name}: {f.relative_path}")
+            expected_path = f.relative_path + ".wbenc" if encrypted else f.relative_path
+            if expected_path not in remote_map:
+                errors.append(f"Missing on {mirror_name}: {expected_path}")
                 continue
 
-            remote_size, remote_checksum = remote_map[f.relative_path]
+            remote_size, remote_checksum = remote_map[expected_path]
+
+            # Skip hash/checksum comparison for encrypted mirrors —
+            # the remote file is ciphertext, so hashes will never match.
+            if encrypted:
+                size_verified += 1
+                continue
 
             if remote_checksum and len(remote_checksum) == 64:
                 local_hash = compute_sha256(f.source_path)
                 if local_hash != remote_checksum:
-                    errors.append(f"Hash mismatch on {mirror_name}: " f"{f.relative_path}")
+                    errors.append(f"Hash mismatch on {mirror_name}: " f"{expected_path}")
                     continue
                 hash_verified += 1
             elif remote_checksum and len(remote_checksum) == 32:
                 local_md5 = self._compute_md5(f.source_path)
                 if local_md5 != remote_checksum:
-                    errors.append(f"MD5 mismatch on {mirror_name}: " f"{f.relative_path}")
+                    errors.append(f"MD5 mismatch on {mirror_name}: " f"{expected_path}")
                     continue
                 hash_verified += 1
             else:
@@ -779,16 +784,19 @@ class BackupEngine:
         ctx: PipelineContext,
         remote_files: list[tuple[str, int]],
         mirror_name: str,
+        encrypted: bool = False,
     ) -> None:
-        """Verify mirror files by size only."""
+        """Verify mirror files by size (or presence only when encrypted)."""
         remote_map = {path: size for path, size in remote_files}
         errors = []
 
         for f in ctx.files:
-            if f.relative_path not in remote_map:
-                errors.append(f"Missing on {mirror_name}: {f.relative_path}")
-            elif remote_map[f.relative_path] != f.size:
-                errors.append(f"Size mismatch on {mirror_name}: {f.relative_path}")
+            expected_path = f.relative_path + ".wbenc" if encrypted else f.relative_path
+            if expected_path not in remote_map:
+                errors.append(f"Missing on {mirror_name}: {expected_path}")
+            elif not encrypted and remote_map[expected_path] != f.size:
+                # Skip size check for encrypted files — ciphertext is larger
+                errors.append(f"Size mismatch on {mirror_name}: {expected_path}")
 
         if errors:
             self._raise_verify_error(errors, len(ctx.files))
@@ -850,7 +858,11 @@ class BackupEngine:
     def _build_network(storage: StorageConfig) -> StorageBackend:
         from src.storage.network import NetworkStorage
 
-        return NetworkStorage(storage.destination_path)
+        return NetworkStorage(
+            destination_path=storage.destination_path,
+            username=storage.network_username,
+            password=storage.network_password,
+        )
 
     @staticmethod
     def _build_sftp(storage: StorageConfig) -> StorageBackend:

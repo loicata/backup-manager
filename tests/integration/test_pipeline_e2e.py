@@ -343,15 +343,15 @@ class TestBackupTypeLogs:
         save_manifest(manifest, manifest_path)
 
         # Run a full backup first so the destination is not empty.
-        from src.core.config import compute_destinations_hash
+        from src.core.config import compute_profile_hash
 
         full_profile.backup_type = BackupType.FULL
-        full_profile.destinations_hash = compute_destinations_hash(full_profile)
+        full_profile.profile_hash = compute_profile_hash(full_profile)
         engine.run_backup(full_profile)
 
         # Now run differential — destination has a backup, manifest exists.
         full_profile.backup_type = BackupType.DIFFERENTIAL
-        full_profile.destinations_hash = compute_destinations_hash(full_profile)
+        full_profile.profile_hash = compute_profile_hash(full_profile)
         (e2e_env["source"] / "extra.txt").write_text("extra", encoding="utf-8")
         stats = engine.run_backup(full_profile)
 

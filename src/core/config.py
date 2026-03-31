@@ -56,6 +56,10 @@ class StorageConfig:
     storage_type: StorageType = StorageType.LOCAL
     destination_path: str = ""
 
+    # Network (UNC)
+    network_username: str = ""
+    network_password: str = ""
+
     # SFTP
     sftp_host: str = ""
     sftp_port: int = 22
@@ -113,9 +117,17 @@ class StorageConfig:
         if not isinstance(st, StorageType):
             return
 
-        if st in (StorageType.LOCAL, StorageType.NETWORK):
+        if st == StorageType.LOCAL:
             if not self.destination_path or not self.destination_path.strip():
-                raise ValueError(f"destination_path is required for {st.value} storage")
+                raise ValueError("destination_path is required for local storage")
+
+        elif st == StorageType.NETWORK:
+            if not self.destination_path or not self.destination_path.strip():
+                raise ValueError("destination_path is required for network storage")
+            if not self.network_username or not self.network_username.strip():
+                raise ValueError("network_username is required for network storage")
+            if not self.network_password or not self.network_password.strip():
+                raise ValueError("network_password is required for network storage")
 
         elif st == StorageType.SFTP:
             if not self.sftp_host or not self.sftp_host.strip():
@@ -204,8 +216,10 @@ class BackupProfile:
     encrypt_mirror2: bool = False
     full_backup_every: int = 7  # Force a full backup every N backups (differential)
     differential_count: int = 0  # Backups since last full (auto-managed)
-    destinations_hash: str = ""  # SHA-256 of destination configs (auto-managed)
-    sources_hash: str = ""  # SHA-256 of source paths (auto-managed)
+    destinations_hash: str = ""  # Deprecated — kept for JSON compat
+    sources_hash: str = ""  # Deprecated — kept for JSON compat
+    encryption_hash: str = ""  # Deprecated — kept for JSON compat
+    profile_hash: str = ""  # SHA-256 of profile config (auto-managed)
     bandwidth_limit_kbps: int = 0
     sort_order: int = 0
     active: bool = True
@@ -214,9 +228,9 @@ class BackupProfile:
     last_full_backup: str | None = None
 
 
-# --- Destination fingerprint ---
+# --- Profile fingerprint ---
 
-# Fields that identify a storage destination (excludes secrets).
+# Storage fields used for identity (excludes secrets like passwords/keys).
 _DESTINATION_IDENTITY_FIELDS = [
     "storage_type",
     "destination_path",
@@ -231,12 +245,16 @@ _DESTINATION_IDENTITY_FIELDS = [
 ]
 
 
-def compute_destinations_hash(profile: BackupProfile) -> str:
-    """Compute a SHA-256 fingerprint of all destination configurations.
+def compute_profile_hash(profile: BackupProfile) -> str:
+    """Compute a SHA-256 fingerprint of the full profile configuration.
 
-    Includes the primary storage and all mirror destinations.
-    Only uses identity fields (no secrets like passwords or keys)
-    so that credential rotation does not trigger a forced full backup.
+    Covers sources, destinations, encryption, retention, and profile
+    name.  Excludes email settings (notifications do not affect backup
+    content) and secrets (credential rotation must not force a full
+    backup).
+
+    Any change detected by this hash forces a full backup on the next
+    differential run.
 
     Args:
         profile: Backup profile to fingerprint.
@@ -245,37 +263,45 @@ def compute_destinations_hash(profile: BackupProfile) -> str:
         Hex digest of the SHA-256 hash.
     """
     parts: list[str] = []
+
+    # Profile identity (excludes backup_type — it toggles between runs)
+    parts.append(f"name={profile.name}")
+    parts.append(f"full_backup_every={profile.full_backup_every}")
+    parts.append(f"bandwidth_limit_kbps={profile.bandwidth_limit_kbps}")
+
+    # Sources
+    parts.append(f"sources={','.join(sorted(profile.source_paths))}")
+    parts.append(f"excludes={','.join(sorted(profile.exclude_patterns))}")
+
+    # Destinations (primary + mirrors)
     configs = [profile.storage] + list(profile.mirror_destinations)
-    for config in configs:
+    for i, config in enumerate(configs):
         for field_name in _DESTINATION_IDENTITY_FIELDS:
             value = getattr(config, field_name, "")
             if isinstance(value, StrEnum):
                 value = value.value
-            parts.append(f"{field_name}={value}")
-        parts.append("|")  # Separator between destinations
-    return hashlib.sha256(":".join(parts).encode("utf-8")).hexdigest()
+            parts.append(f"dest{i}.{field_name}={value}")
 
+    # Encryption
+    parts.append(f"enc_enabled={profile.encryption.enabled}")
+    parts.append(f"enc_primary={profile.encrypt_primary}")
+    parts.append(f"enc_mirror1={profile.encrypt_mirror1}")
+    parts.append(f"enc_mirror2={profile.encrypt_mirror2}")
 
-def compute_sources_hash(profile: BackupProfile) -> str:
-    """Compute a SHA-256 fingerprint of all source paths.
+    # Retention
+    r = profile.retention
+    parts.append(f"ret_policy={r.policy.value}")
+    parts.append(f"ret_daily={r.gfs_daily}")
+    parts.append(f"ret_weekly={r.gfs_weekly}")
+    parts.append(f"ret_monthly={r.gfs_monthly}")
 
-    Detects when sources are added or removed, which requires
-    a full backup to ensure all destinations have complete data.
-
-    Args:
-        profile: Backup profile to fingerprint.
-
-    Returns:
-        Hex digest of the SHA-256 hash.
-    """
-    # Sort paths for consistent hashing regardless of UI order.
-    paths = sorted(profile.source_paths)
-    return hashlib.sha256("|".join(paths).encode("utf-8")).hexdigest()
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 # --- Sensitive fields that must be encrypted before save ---
 
 _STORAGE_SECRET_FIELDS = [
+    "network_password",
     "sftp_password",
     "sftp_key_passphrase",
     "s3_access_key",

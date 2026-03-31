@@ -108,8 +108,16 @@ class MirrorTab(ScrollableTab):
         f = ttk.Frame(self._config_container)
         self._config_frames["network"] = f
         ttk.Label(f, text="Network path (UNC):").pack(anchor="w")
-        self.network_path_var = tk.StringVar()
+        self.network_path_var = tk.StringVar(value=r"\\server\backups")
         ttk.Entry(f, textvariable=self.network_path_var).pack(fill="x")
+
+        ttk.Label(f, text="Username:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self.network_user_var = tk.StringVar(value=r"username")
+        ttk.Entry(f, textvariable=self.network_user_var).pack(fill="x")
+
+        ttk.Label(f, text="Password:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self.network_pass_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self.network_pass_var, show="\u25cf").pack(fill="x")
 
         # SFTP
         f = ttk.Frame(self._config_container)
@@ -215,9 +223,20 @@ class MirrorTab(ScrollableTab):
         """Show config fields for selected storage type."""
         for frame in self._config_frames.values():
             frame.pack_forget()
-        frame = self._config_frames.get(self.type_var.get())
+        stype = self.type_var.get()
+        frame = self._config_frames.get(stype)
         if frame:
             frame.pack(fill="both", expand=True)
+
+        if stype == StorageType.NETWORK.value:
+            current = self.network_path_var.get()
+            if not current.startswith("\\\\"):
+                self.network_path_var.set(r"\\server\backups")
+                self.network_user_var.set("username")
+                self.network_pass_var.set("")
+        elif stype == StorageType.SFTP.value and hasattr(self, "_sftp_vars"):
+            if not self._sftp_vars["sftp_remote_path"].get():
+                self._sftp_vars["sftp_remote_path"].set("/home/username/backups")
 
     def _toggle_enabled(self):
         """Enable or disable all content widgets."""
@@ -267,6 +286,8 @@ class MirrorTab(ScrollableTab):
             config.destination_path = self.local_path_var.get()
         elif stype == StorageType.NETWORK:
             config.destination_path = self.network_path_var.get()
+            config.network_username = self.network_user_var.get()
+            config.network_password = self.network_pass_var.get()
         elif stype == StorageType.SFTP:
             for key, var in self._sftp_vars.items():
                 val = var.get()
@@ -289,16 +310,17 @@ class MirrorTab(ScrollableTab):
             self.enabled_var.set(True)
             self.type_var.set(m.storage_type.value)
             self.local_path_var.set(m.destination_path)
-            self.network_path_var.set(m.destination_path)
-            if hasattr(self, "_sftp_vars"):
+            if m.storage_type == StorageType.NETWORK:
+                self.network_path_var.set(m.destination_path)
+                self.network_user_var.set(getattr(m, "network_username", ""))
+                self.network_pass_var.set(getattr(m, "network_password", ""))
+            elif m.storage_type == StorageType.SFTP and hasattr(self, "_sftp_vars"):
                 for key, var in self._sftp_vars.items():
                     var.set(str(getattr(m, key, "")))
-            if hasattr(self, "_s3_vars"):
+            elif m.storage_type == StorageType.S3 and hasattr(self, "_s3_vars"):
                 self.s3_provider_var.set(getattr(m, "s3_provider", "aws"))
-                # Set region AFTER provider to override the provider callback reset.
                 for key, var in self._s3_vars.items():
                     var.set(str(getattr(m, key, "")))
-                # Re-apply region explicitly: the provider trace may reset it.
                 saved_region = str(getattr(m, "s3_region", ""))
                 if saved_region:
                     self._s3_vars["s3_region"].set(saved_region)

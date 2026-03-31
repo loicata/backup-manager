@@ -226,6 +226,8 @@ class TestDescribeTarget:
         config = StorageConfig(
             storage_type=StorageType.NETWORK,
             destination_path="\\\\SERVER\\Share",
+            network_username="user",
+            network_password="pass",
         )
         msg = BackupEngine._describe_target(config)
         assert "network share" in msg

@@ -7,6 +7,8 @@ Only directory backups are supported (ZIP compression has been removed).
 """
 
 import logging
+import os
+import stat
 from pathlib import Path
 
 from src.core.events import EventBus
@@ -54,7 +56,11 @@ def encrypt_backup(
     for i, filepath in enumerate(files):
         encrypted_path = filepath.with_suffix(filepath.suffix + ".wbenc")
         if encrypt_file(filepath, encrypted_path, password):
-            filepath.unlink()  # Remove original
+            try:
+                filepath.unlink()
+            except PermissionError:
+                os.chmod(filepath, stat.S_IWRITE)
+                filepath.unlink()
         else:
             phase_log.error(f"Encryption failed: {filepath.name}")
 

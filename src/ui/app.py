@@ -1111,17 +1111,27 @@ class BackupManagerApp:
         self.root.focus_force()
 
     def _on_close(self):
-        """Minimize to tray instead of closing."""
+        """Auto-save current profile and minimize to tray."""
+        self._auto_save()
         self.root.withdraw()
 
     def _quit_app(self):
-        """Actually quit the application."""
+        """Auto-save current profile and quit the application."""
+        self._auto_save()
         # Hide the window immediately to avoid visual flicker during cleanup
         self.root.withdraw()
         self.root.update_idletasks()
         self.scheduler.stop()
         self.tray.stop()
         self.root.destroy()
+
+    def _auto_save(self):
+        """Silently save the current profile if one is loaded."""
+        if self._current_profile is not None:
+            try:
+                self._save_profile(silent=True)
+            except Exception as exc:
+                logger.warning("Auto-save failed: %s", exc)
 
     def _show_modules(self):
         from src.installer import check_all

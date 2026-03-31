@@ -98,14 +98,16 @@ class StorageTab(ScrollableTab):
         self._config_frames["network"] = frame
 
         ttk.Label(frame, text="Network path (UNC):").pack(anchor="w")
-        self.network_path_var = tk.StringVar()
+        self.network_path_var = tk.StringVar(value=r"\\server\backups")
         ttk.Entry(frame, textvariable=self.network_path_var).pack(fill="x")
-        ttk.Label(
-            frame,
-            text=r"e.g. \\server\share\backups",
-            foreground=Colors.TEXT_SECONDARY,
-            font=Fonts.small(),
-        ).pack(anchor="w")
+
+        ttk.Label(frame, text="Username:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self.network_user_var = tk.StringVar(value=r"username")
+        ttk.Entry(frame, textvariable=self.network_user_var).pack(fill="x")
+
+        ttk.Label(frame, text="Password:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self.network_pass_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=self.network_pass_var, show="\u25cf").pack(fill="x")
 
     def _build_sftp_config(self):
         frame = ttk.Frame(self._config_container)
@@ -224,6 +226,16 @@ class StorageTab(ScrollableTab):
         if frame:
             frame.pack(fill="both", expand=True)
 
+        if stype == StorageType.NETWORK.value:
+            current = self.network_path_var.get()
+            if not current.startswith("\\\\"):
+                self.network_path_var.set(r"\\server\backups")
+                self.network_user_var.set("username")
+                self.network_pass_var.set("")
+        elif stype == StorageType.SFTP.value and hasattr(self, "_sftp_vars"):
+            if not self._sftp_vars["sftp_remote_path"].get():
+                self._sftp_vars["sftp_remote_path"].set("/home/username/backups")
+
     def _browse_local(self):
         path = filedialog.askdirectory(title="Select backup destination")
         if path:
@@ -275,6 +287,8 @@ class StorageTab(ScrollableTab):
             config.destination_path = self.local_path_var.get()
         elif stype == StorageType.NETWORK:
             config.destination_path = self.network_path_var.get()
+            config.network_username = self.network_user_var.get()
+            config.network_password = self.network_pass_var.get()
         elif stype == StorageType.SFTP:
             for key, var in self._sftp_vars.items():
                 val = var.get()
@@ -294,17 +308,17 @@ class StorageTab(ScrollableTab):
         self.type_var.set(s.storage_type.value)
 
         self.local_path_var.set(s.destination_path)
-        self.network_path_var.set(s.destination_path)
-
-        if hasattr(self, "_sftp_vars"):
+        if s.storage_type == StorageType.NETWORK:
+            self.network_path_var.set(s.destination_path)
+            self.network_user_var.set(getattr(s, "network_username", ""))
+            self.network_pass_var.set(getattr(s, "network_password", ""))
+        elif s.storage_type == StorageType.SFTP and hasattr(self, "_sftp_vars"):
             for key, var in self._sftp_vars.items():
                 var.set(str(getattr(s, key, "")))
-
-        if hasattr(self, "_s3_vars"):
+        elif s.storage_type == StorageType.S3 and hasattr(self, "_s3_vars"):
             self.s3_provider_var.set(s.s3_provider)
             for key, var in self._s3_vars.items():
                 var.set(str(getattr(s, key, "")))
-            # Re-apply region: the provider trace may have reset it.
             saved_region = str(getattr(s, "s3_region", ""))
             if saved_region:
                 self._s3_vars["s3_region"].set(saved_region)

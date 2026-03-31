@@ -696,7 +696,7 @@ class TestDestinationChangeForcesFull:
         engine = BackupEngine(mgr)
         r1 = engine.run_backup(profile)
         assert r1.files_processed == 1
-        assert profile.destinations_hash != ""
+        assert profile.profile_hash != ""
 
         # Run 2: no changes → skipped (differential)
         engine2 = BackupEngine(mgr)
@@ -724,7 +724,7 @@ class TestDestinationChangeForcesFull:
         # Run 1: first full
         engine = BackupEngine(mgr)
         engine.run_backup(profile)
-        old_hash = profile.destinations_hash
+        old_hash = profile.profile_hash
 
         # Run 2: differential (no changes → skipped)
         engine2 = BackupEngine(mgr)
@@ -746,7 +746,7 @@ class TestDestinationChangeForcesFull:
         r3 = engine3.run_backup(profile)
         assert r3.files_processed == 1
         assert r3.files_skipped == 0
-        assert profile.destinations_hash != old_hash
+        assert profile.profile_hash != old_hash
 
     def test_same_destinations_stays_differential(self, tmp_path):
         """Same destinations: differential stays differential."""
@@ -764,19 +764,19 @@ class TestDestinationChangeForcesFull:
         assert r2.files_skipped == 1
         assert r2.files_processed == 0
 
-    def test_destinations_hash_persisted(self, tmp_path):
-        """destinations_hash is saved to profile after full backup."""
-        from src.core.config import compute_destinations_hash
+    def test_profile_hash_persisted(self, tmp_path):
+        """profile_hash is saved to profile after full backup."""
+        from src.core.config import compute_profile_hash
 
         mgr, profile, source, dest = self._make_env(tmp_path)
 
-        assert profile.destinations_hash == ""
+        assert profile.profile_hash == ""
 
         from src.core.backup_engine import BackupEngine
 
         engine = BackupEngine(mgr)
         engine.run_backup(profile)
 
-        expected = compute_destinations_hash(profile)
-        assert profile.destinations_hash == expected
-        assert len(profile.destinations_hash) == 64
+        expected = compute_profile_hash(profile)
+        assert profile.profile_hash == expected
+        assert len(profile.profile_hash) == 64

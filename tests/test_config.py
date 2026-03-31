@@ -14,7 +14,7 @@ from src.core.config import (
     ScheduleFrequency,
     StorageConfig,
     StorageType,
-    compute_destinations_hash,
+    compute_profile_hash,
 )
 
 
@@ -24,7 +24,12 @@ class TestStorageConfig:
         assert cfg.is_remote() is False
 
     def test_network_is_not_remote(self):
-        cfg = StorageConfig(storage_type=StorageType.NETWORK, destination_path="//server/share")
+        cfg = StorageConfig(
+            storage_type=StorageType.NETWORK,
+            destination_path="//server/share",
+            network_username="user",
+            network_password="pass",
+        )
         assert cfg.is_remote() is False
 
     def test_sftp_is_remote(self):
@@ -296,15 +301,15 @@ class TestConfigManager:
         assert not hasattr(profiles[0], "compress") or "compress" not in vars(profiles[0])
 
 
-class TestComputeDestinationsHash:
-    """Tests for compute_destinations_hash."""
+class TestComputeProfileHash:
+    """Tests for compute_profile_hash."""
 
     def test_same_config_produces_same_hash(self):
         """Identical profiles produce the same hash."""
         profile = BackupProfile(
             storage=StorageConfig(storage_type=StorageType.LOCAL, destination_path="/backups"),
         )
-        assert compute_destinations_hash(profile) == compute_destinations_hash(profile)
+        assert compute_profile_hash(profile) == compute_profile_hash(profile)
 
     def test_different_path_produces_different_hash(self):
         """Changing destination_path changes the hash."""
@@ -314,7 +319,7 @@ class TestComputeDestinationsHash:
         p2 = BackupProfile(
             storage=StorageConfig(storage_type=StorageType.LOCAL, destination_path="/other"),
         )
-        assert compute_destinations_hash(p1) != compute_destinations_hash(p2)
+        assert compute_profile_hash(p1) != compute_profile_hash(p2)
 
     def test_adding_mirror_changes_hash(self):
         """Adding a mirror destination changes the hash."""
@@ -327,7 +332,7 @@ class TestComputeDestinationsHash:
                 StorageConfig(storage_type=StorageType.S3, s3_bucket="my-bucket"),
             ],
         )
-        assert compute_destinations_hash(p1) != compute_destinations_hash(p2)
+        assert compute_profile_hash(p1) != compute_profile_hash(p2)
 
     def test_password_change_does_not_change_hash(self):
         """Changing a secret (password) does not change the hash."""
@@ -345,35 +350,49 @@ class TestComputeDestinationsHash:
                 sftp_password="new_pass",
             ),
         )
-        assert compute_destinations_hash(p1) == compute_destinations_hash(p2)
+        assert compute_profile_hash(p1) == compute_profile_hash(p2)
 
-    def test_s3_provider_change_changes_hash(self):
-        """Changing S3 provider changes the hash."""
-        p1 = BackupProfile(
-            storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="bk", s3_provider="aws"),
-        )
-        p2 = BackupProfile(
-            storage=StorageConfig(
-                storage_type=StorageType.S3,
-                s3_bucket="bk",
-                s3_provider="scaleway",
-            ),
-        )
-        assert compute_destinations_hash(p1) != compute_destinations_hash(p2)
+    def test_encryption_change_changes_hash(self):
+        """Toggling encryption changes the hash."""
+        p1 = BackupProfile(encrypt_primary=False)
+        p2 = BackupProfile(encrypt_primary=True)
+        assert compute_profile_hash(p1) != compute_profile_hash(p2)
+
+    def test_retention_change_changes_hash(self):
+        """Changing retention policy changes the hash."""
+        from src.core.config import RetentionConfig
+
+        p1 = BackupProfile(retention=RetentionConfig(gfs_daily=7))
+        p2 = BackupProfile(retention=RetentionConfig(gfs_daily=14))
+        assert compute_profile_hash(p1) != compute_profile_hash(p2)
+
+    def test_name_change_changes_hash(self):
+        """Changing profile name changes the hash."""
+        p1 = BackupProfile(name="Profile A")
+        p2 = BackupProfile(name="Profile B")
+        assert compute_profile_hash(p1) != compute_profile_hash(p2)
+
+    def test_email_change_does_not_change_hash(self):
+        """Changing email settings does not change the hash."""
+        from src.core.config import EmailConfig
+
+        p1 = BackupProfile(email=EmailConfig(smtp_host="a.com"))
+        p2 = BackupProfile(email=EmailConfig(smtp_host="b.com"))
+        assert compute_profile_hash(p1) == compute_profile_hash(p2)
 
     def test_hash_is_64_char_hex(self):
         """Hash is a valid SHA-256 hex digest."""
         profile = BackupProfile()
-        h = compute_destinations_hash(profile)
+        h = compute_profile_hash(profile)
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
 
-    def test_destinations_hash_roundtrip(self, tmp_config_dir):
-        """destinations_hash is persisted and loaded correctly."""
+    def test_profile_hash_roundtrip(self, tmp_config_dir):
+        """profile_hash is persisted and loaded correctly."""
         mgr = ConfigManager(config_dir=tmp_config_dir)
         profile = BackupProfile(name="HashTest")
-        profile.destinations_hash = compute_destinations_hash(profile)
+        profile.profile_hash = compute_profile_hash(profile)
         mgr.save_profile(profile)
 
         loaded = mgr.get_all_profiles()[0]
-        assert loaded.destinations_hash == profile.destinations_hash
+        assert loaded.profile_hash == profile.profile_hash

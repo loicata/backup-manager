@@ -12,6 +12,7 @@ from src.core.events import EventBus
 from src.core.exceptions import WriteError
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
+from src.storage.base import long_path_mkdir, long_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +36,15 @@ def write_flat(
     """
     phase_log = PhaseLogger("writer", events)
     backup_dir = destination / backup_name
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    long_path_mkdir(backup_dir)
 
     total = len(files)
     for i, file_info in enumerate(files):
         target = backup_dir / file_info.relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
+        long_path_mkdir(target.parent)
 
         try:
-            shutil.copy2(file_info.source_path, target)
+            shutil.copy2(long_path_str(file_info.source_path), long_path_str(target))
         except (OSError, PermissionError) as e:
             raise WriteError(file_info.relative_path, e) from e
 

@@ -58,7 +58,7 @@ class TestLocalWriterDiskFull:
         enospc = OSError(errno.ENOSPC, "No space left on device")
 
         with (
-            patch.object(Path, "mkdir", side_effect=enospc),
+            patch("os.makedirs", side_effect=enospc),
             pytest.raises(OSError, match="No space left"),
         ):
             write_flat([fi], tmp_path / "dst", "bk2")

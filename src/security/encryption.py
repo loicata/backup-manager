@@ -1,6 +1,19 @@
 """AES-256-GCM encryption with PBKDF2-HMAC-SHA256 key derivation.
 
-File format (.wbenc):
+Streaming tar encryption format (.tar.wbenc):
+    Header (37 bytes):
+        [4B magic: b"WBEC"]
+        [1B version: 0x01]
+        [16B salt]
+        [16B reserved zeros]
+    Body (repeating chunks):
+        [4B plaintext_length, big-endian. 0 = EOF sentinel]
+        [12B nonce]
+        [ciphertext + 16B GCM tag]
+    EOF:
+        [4B zeros]
+
+Per-field encryption (password storage):
     [16B salt] [12B nonce] [ciphertext + 16B GCM tag]
 
 Password storage:
@@ -10,9 +23,11 @@ Password storage:
 
 import base64
 import hashlib
+import io
 import logging
 import os
 import secrets
+import struct
 import sys
 from pathlib import Path
 
@@ -126,68 +141,257 @@ def decrypt_bytes(encrypted: bytes, password: str) -> bytes:
             key[i] = 0
 
 
-def encrypt_file(input_path: Path, output_path: Path, password: str) -> bool:
-    """Encrypt a file with AES-256-GCM.
+# --- Streaming tar encryption (.tar.wbenc) ---
 
-    Reads the entire file to produce a single GCM ciphertext.
-    AES-GCM requires all data for authentication, so streaming
-    is not possible with a single nonce. Files are read in one
-    pass but written immediately to limit memory peak.
+TAR_WBENC_MAGIC = b"WBEC"
+TAR_WBENC_VERSION = 1
+TAR_WBENC_HEADER_SIZE = 37  # 4 magic + 1 version + 16 salt + 16 reserved
+_RESERVED = b"\x00" * 16
+
+
+def _read_exact(stream: io.RawIOBase, n: int) -> bytes:
+    """Read exactly *n* bytes from *stream*.
 
     Args:
-        input_path: Source file.
-        output_path: Destination .wbenc file.
-        password: Encryption password.
+        stream: Binary readable stream.
+        n: Number of bytes to read.
 
     Returns:
-        True on success, False on failure.
+        Exactly *n* bytes.
+
+    Raises:
+        ValueError: If stream ends before *n* bytes are read.
     """
-    try:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = stream.read(n - len(buf))
+        if not chunk:
+            raise ValueError(f"Unexpected end of stream (wanted {n}, got {len(buf)})")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+class StreamEncryptor:
+    """Encrypts data in independent GCM chunks sharing a single derived key.
+
+    Each chunk gets a sequential nonce (counter encoded as 12-byte
+    big-endian).  A single PBKDF2 derivation is performed at init.
+
+    Args:
+        password: Encryption password.
+    """
+
+    def __init__(self, password: str):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-        salt = secrets.token_bytes(SALT_SIZE)
-        nonce = secrets.token_bytes(NONCE_SIZE)
-        key = derive_key(password, salt)
-        aesgcm = AESGCM(key)
+        self._salt = secrets.token_bytes(SALT_SIZE)
+        key = bytearray(derive_key(password, self._salt))
+        self._aesgcm = AESGCM(bytes(key))
+        # Zero out the intermediate key copy
+        for i in range(len(key)):
+            key[i] = 0
+        self._counter = 0
 
-        data = input_path.read_bytes()
-        ciphertext = aesgcm.encrypt(nonce, data, None)
+    def header(self) -> bytes:
+        """Return the 37-byte .tar.wbenc file header."""
+        return TAR_WBENC_MAGIC + bytes([TAR_WBENC_VERSION]) + self._salt + _RESERVED
 
-        # Write immediately and release plaintext
-        del data
+    def encrypt_chunk(self, plaintext: bytes) -> bytes:
+        """Encrypt one chunk.
 
-        with open(output_path, "wb") as f:
-            f.write(salt)
-            f.write(nonce)
-            f.write(ciphertext)
+        Args:
+            plaintext: Raw data (up to CHUNK_SIZE bytes).
 
-        return True
-    except (OSError, ValueError) as e:
-        logger.error("Failed to encrypt %s: %s", input_path, e)
-        return False
-    except Exception:
-        logger.exception("Unexpected error encrypting %s", input_path)
-        return False
+        Returns:
+            [4B length][12B nonce][ciphertext + 16B tag]
+        """
+        if not plaintext:
+            raise ValueError("Cannot encrypt empty chunk")
+        nonce = self._counter.to_bytes(NONCE_SIZE, "big")
+        self._counter += 1
+        ct = self._aesgcm.encrypt(nonce, plaintext, None)
+        length_prefix = struct.pack(">I", len(plaintext))
+        return length_prefix + nonce + ct
+
+    def finalize(self) -> bytes:
+        """Return the 4-byte EOF sentinel."""
+        return b"\x00\x00\x00\x00"
 
 
-def decrypt_file(input_path: Path, output_path: Path, password: str) -> bool:
-    """Decrypt a .wbenc file.
+class StreamDecryptor:
+    """Decrypts a .tar.wbenc stream chunk by chunk.
 
     Args:
-        input_path: Encrypted .wbenc file.
-        output_path: Destination for decrypted file.
         password: Decryption password.
-
-    Returns:
-        True on success, False on failure.
     """
-    try:
-        encrypted = input_path.read_bytes()
-        plaintext = decrypt_bytes(encrypted, password)
-        output_path.write_bytes(plaintext)
+
+    def __init__(self, password: str):
+        self._password = password
+        self._aesgcm = None
+        self._counter = 0
+
+    def read_header(self, stream: io.RawIOBase) -> None:
+        """Read and validate the file header, derive the key.
+
+        Args:
+            stream: Binary readable stream positioned at byte 0.
+
+        Raises:
+            ValueError: If magic, version, or header size is wrong.
+        """
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        hdr = _read_exact(stream, TAR_WBENC_HEADER_SIZE)
+        if hdr[:4] != TAR_WBENC_MAGIC:
+            raise ValueError("Not a .tar.wbenc file (bad magic)")
+        if hdr[4] != TAR_WBENC_VERSION:
+            raise ValueError(f"Unsupported .tar.wbenc version: {hdr[4]}")
+
+        salt = hdr[5:21]
+        key = bytearray(derive_key(self._password, salt))
+        self._aesgcm = AESGCM(bytes(key))
+        for i in range(len(key)):
+            key[i] = 0
+        self._counter = 0
+
+    def decrypt_next_chunk(self, stream: io.RawIOBase) -> bytes | None:
+        """Decrypt the next chunk from the stream.
+
+        Args:
+            stream: Binary readable stream.
+
+        Returns:
+            Decrypted plaintext bytes, or None at EOF.
+
+        Raises:
+            ValueError: On authentication failure or corruption.
+        """
+        if self._aesgcm is None:
+            raise ValueError("Must call read_header() before decrypting")
+
+        length_bytes = _read_exact(stream, 4)
+        plaintext_len = struct.unpack(">I", length_bytes)[0]
+        if plaintext_len == 0:
+            return None  # EOF sentinel
+
+        expected_nonce = self._counter.to_bytes(NONCE_SIZE, "big")
+        nonce = _read_exact(stream, NONCE_SIZE)
+        if nonce != expected_nonce:
+            raise ValueError(
+                f"Nonce mismatch at chunk {self._counter} "
+                f"(expected {expected_nonce.hex()}, got {nonce.hex()})"
+            )
+        self._counter += 1
+
+        ct_size = plaintext_len + TAG_SIZE
+        ciphertext = _read_exact(stream, ct_size)
+        return self._aesgcm.decrypt(nonce, ciphertext, None)
+
+
+class EncryptingWriter(io.RawIOBase):
+    """Writable stream that encrypts data in chunks before writing to *dest*.
+
+    Intended as ``fileobj`` for ``tarfile.open(mode="w|")``.  Data is
+    buffered internally; when the buffer reaches CHUNK_SIZE the chunk
+    is encrypted and flushed to *dest*.
+
+    Args:
+        dest: Destination binary writable stream.
+        password: Encryption password.
+    """
+
+    def __init__(self, dest: io.RawIOBase, password: str):
+        self._dest = dest
+        self._enc = StreamEncryptor(password)
+        self._buf = bytearray()
+        self._closed = False
+        # Write header immediately
+        self._dest.write(self._enc.header())
+
+    def write(self, data: bytes | bytearray) -> int:
+        """Buffer data and flush full chunks."""
+        if self._closed:
+            raise ValueError("I/O operation on closed writer")
+        self._buf.extend(data)
+        while len(self._buf) >= CHUNK_SIZE:
+            chunk = bytes(self._buf[:CHUNK_SIZE])
+            self._buf = self._buf[CHUNK_SIZE:]
+            self._dest.write(self._enc.encrypt_chunk(chunk))
+        return len(data)
+
+    def close(self) -> None:
+        """Flush remaining buffer and write EOF sentinel."""
+        if self._closed:
+            return
+        self._closed = True
+        # Flush remaining data as final chunk
+        if self._buf:
+            self._dest.write(self._enc.encrypt_chunk(bytes(self._buf)))
+            self._buf.clear()
+        self._dest.write(self._enc.finalize())
+        self._dest.flush()
+
+    def writable(self) -> bool:
         return True
-    except Exception:
-        logger.exception("Failed to decrypt %s", input_path)
+
+    def readable(self) -> bool:
+        return False
+
+
+class DecryptingReader(io.RawIOBase):
+    """Readable stream that decrypts a .tar.wbenc on the fly.
+
+    Intended as ``fileobj`` for ``tarfile.open(mode="r|")``.  Chunks
+    are decrypted lazily as the consumer reads.
+
+    Args:
+        source: Binary readable stream containing .tar.wbenc data.
+        password: Decryption password.
+    """
+
+    def __init__(self, source: io.RawIOBase, password: str):
+        self._dec = StreamDecryptor(password)
+        self._source = source
+        self._buf = bytearray()
+        self._eof = False
+        self._dec.read_header(source)
+
+    def read(self, n: int = -1) -> bytes:
+        """Read up to *n* decrypted bytes."""
+        if n == -1:
+            # Read everything remaining
+            while not self._eof:
+                self._fill_buffer()
+            data = bytes(self._buf)
+            self._buf.clear()
+            return data
+
+        while len(self._buf) < n and not self._eof:
+            self._fill_buffer()
+
+        out = bytes(self._buf[:n])
+        self._buf = self._buf[n:]
+        return out
+
+    def readinto(self, b: bytearray) -> int:
+        """Read into a pre-allocated buffer (required by RawIOBase)."""
+        data = self.read(len(b))
+        n = len(data)
+        b[:n] = data
+        return n
+
+    def _fill_buffer(self) -> None:
+        """Decrypt one chunk into the internal buffer."""
+        chunk = self._dec.decrypt_next_chunk(self._source)
+        if chunk is None:
+            self._eof = True
+        else:
+            self._buf.extend(chunk)
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
         return False
 
 

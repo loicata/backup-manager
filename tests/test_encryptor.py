@@ -1,9 +1,12 @@
-"""Tests for the encryptor pipeline phase."""
+"""Tests for the encryptor pipeline phase (.tar.wbenc format)."""
+
+import tarfile
 
 import pytest
 
 from src.core.events import EventBus
 from src.core.phases.encryptor import encrypt_backup
+from src.security.encryption import DecryptingReader
 
 
 @pytest.fixture
@@ -20,29 +23,42 @@ def backup_dir(tmp_path):
 
 
 class TestEncryptBackupDirectory:
-    """Test directory encryption."""
+    """Test directory encryption into .tar.wbenc archive."""
 
-    def test_encrypts_all_files(self, backup_dir):
-        """All files should be replaced with .wbenc versions."""
+    def test_produces_tar_wbenc_archive(self, backup_dir):
+        """encrypt_backup creates a .tar.wbenc file and removes the directory."""
         result = encrypt_backup(backup_dir, "test_password_123!")
-        assert result == backup_dir
 
-        enc_files = list(backup_dir.rglob("*.wbenc"))
-        assert len(enc_files) == 3
+        assert result.suffix == ".wbenc"
+        assert result.name == "backup.tar.wbenc"
+        assert result.exists()
+        # Original directory should be removed
+        assert not backup_dir.exists()
 
-        # Originals should be removed
-        txt_files = list(backup_dir.rglob("*.txt"))
-        assert len(txt_files) == 0
+    def test_archive_contains_all_files(self, backup_dir):
+        """The .tar.wbenc archive contains all original files."""
+        result = encrypt_backup(backup_dir, "test_password_123!")
 
-    def test_skips_already_encrypted(self, backup_dir):
-        """Already .wbenc files should not be re-encrypted."""
-        # Create a .wbenc file that should be skipped
-        (backup_dir / "already.wbenc").write_bytes(b"encrypted data")
+        with open(result, "rb") as f:
+            reader = DecryptingReader(f, "test_password_123!")
+            with tarfile.open(fileobj=reader, mode="r|") as tar:
+                names = sorted(m.name for m in tar)
 
-        encrypt_backup(backup_dir, "test_password_123!")
-        # Only 3 txt files should be encrypted, not the .wbenc
-        enc_files = list(backup_dir.rglob("*.wbenc"))
-        assert len(enc_files) == 4  # 3 new + 1 existing
+        assert "file1.txt" in names
+        assert "file2.txt" in names
+        assert "subdir/file3.txt" in names
+
+    def test_archive_content_matches(self, backup_dir):
+        """Decrypted archive content matches original files."""
+        result = encrypt_backup(backup_dir, "test_password_123!")
+
+        with open(result, "rb") as f:
+            reader = DecryptingReader(f, "test_password_123!")
+            with tarfile.open(fileobj=reader, mode="r|") as tar:
+                for member in tar:
+                    extracted = tar.extractfile(member)
+                    if extracted and member.name == "file1.txt":
+                        assert extracted.read() == b"Content one"
 
     def test_emits_progress_events(self, backup_dir):
         """Progress events should be emitted for each file."""
@@ -65,8 +81,8 @@ class TestEncryptBackupDirectory:
         assert any("complete" in m.lower() for m in log_msgs)
 
 
-class TestEncryptBackupRejectsFile:
-    """Test that encrypt_backup rejects single files (ZIP removed)."""
+class TestEncryptBackupRejectsNonDirectory:
+    """Test that encrypt_backup rejects non-directory inputs."""
 
     def test_file_raises_value_error(self, tmp_path):
         """encrypt_backup on a file should raise ValueError."""

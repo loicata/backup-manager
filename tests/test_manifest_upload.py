@@ -177,6 +177,7 @@ class TestPhaseSaveManifestRemote:
         engine._cancelled = False
 
         ctx = MagicMock()
+        ctx.profile.encrypt_primary = False
         ctx.backup_path = None
         ctx.backup_remote_name = "MyBackup_FULL_20260331"
         ctx.backup_name = "MyBackup_FULL_20260331"
@@ -201,6 +202,7 @@ class TestPhaseSaveManifestRemote:
         backup_dir.mkdir()
 
         ctx = MagicMock()
+        ctx.profile.encrypt_primary = False
         ctx.backup_path = backup_dir
         ctx.backup_remote_name = ""
         ctx.backup_name = "backup"
@@ -224,6 +226,7 @@ class TestPhaseSaveManifestRemote:
         engine._cancelled = False
 
         ctx = MagicMock()
+        ctx.profile.encrypt_primary = False
         ctx.backup_path = None
         ctx.backup_remote_name = "bk_01"
         ctx.backup_name = "bk_01"
@@ -301,10 +304,10 @@ class TestMirrorManifestUpload:
 
     @patch("src.core.phases.mirror.upload_manifest_to_remote")
     @patch("src.core.phases.mirror.write_remote")
-    def test_manifest_not_encrypted_even_when_mirror_encrypted(
+    def test_manifest_not_uploaded_separately_when_mirror_encrypted(
         self, mock_write, mock_upload, tmp_path
     ):
-        """Manifest upload bypasses encryption pipeline."""
+        """Encrypted mirrors embed manifest in .tar.wbenc, no separate upload."""
         files = _make_files(tmp_path, count=1)
         manifest = {"version": 1, "files": {}, "total_checksum": "x"}
         mock_backend = MagicMock()
@@ -324,8 +327,8 @@ class TestMirrorManifestUpload:
         mock_write.assert_called_once()
         assert mock_write.call_args.kwargs.get("encrypt_password") == "secret123"
 
-        # upload_manifest_to_remote called directly (no encryption)
-        mock_upload.assert_called_once_with(manifest, mock_backend, "bk_01")
+        # Manifest NOT uploaded separately (embedded in .tar.wbenc)
+        mock_upload.assert_not_called()
 
     @patch("src.core.phases.mirror.upload_manifest_to_remote")
     @patch("src.core.phases.mirror.write_remote")

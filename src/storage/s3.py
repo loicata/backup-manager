@@ -102,14 +102,23 @@ class S3Storage(StorageBackend):
         return template.format(region=region, account_id="")
 
     def _get_client(self):
-        """Create a boto3 S3 client."""
+        """Create a boto3 S3 client with robust timeout settings."""
         import boto3
+        from botocore.config import Config
+
+        config = Config(
+            connect_timeout=60,
+            read_timeout=600,
+            retries={"max_attempts": 5, "mode": "adaptive"},
+            s3={"multipart_chunksize": 16 * 1024 * 1024},  # 16 MB parts
+        )
 
         kwargs = {
             "service_name": "s3",
             "region_name": self._region,
             "aws_access_key_id": self._access_key,
             "aws_secret_access_key": self._secret_key,
+            "config": config,
         }
         if self._endpoint_url:
             kwargs["endpoint_url"] = self._endpoint_url
@@ -296,9 +305,13 @@ class S3Storage(StorageBackend):
         try:
             client = self._get_client()
             key = self._s3_key(remote_name)
+            logger.info("get_file_size: bucket=%s key=%r", self._bucket, key)
             response = client.head_object(Bucket=self._bucket, Key=key)
-            return response.get("ContentLength")
-        except Exception:
+            size = response.get("ContentLength")
+            logger.info("get_file_size: found, size=%s", size)
+            return size
+        except Exception as e:
+            logger.warning("get_file_size: not found: %s: %s", type(e).__name__, e)
             return None
 
     def list_backup_files(self, backup_name: str) -> list[tuple[str, int]]:

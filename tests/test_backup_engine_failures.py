@@ -167,17 +167,17 @@ class TestVerifyFailures:
 class TestEncryptFailures:
 
     def test_encryption_failure_propagates(self, env, profile):
-        """Encryption error should bubble up from the pipeline."""
+        """Encryption error during write should bubble up from the pipeline."""
         profile.encrypt_primary = True
-        profile.encryption = EncryptionConfig(enabled=True, stored_password="secret")
+        profile.encryption = EncryptionConfig(enabled=True, stored_password="secret1234567890")
 
         engine = _engine(env)
         with (
             patch(
-                "src.core.backup_engine.encrypt_backup",
+                "src.security.encryption.EncryptingWriter",
                 side_effect=OSError("disk full"),
             ),
-            pytest.raises(OSError, match="disk full"),
+            pytest.raises(Exception, match="disk full"),
         ):
             engine.run_backup(profile)
 
@@ -267,7 +267,6 @@ class TestCancellation:
             "_phase_collect",
             "_phase_write",
             "_phase_verify",
-            "_phase_encrypt",
             "_phase_mirror",
             "_phase_rotate",
         ],

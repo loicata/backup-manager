@@ -63,9 +63,10 @@ def _rotate_gfs(
     now = datetime.now()
     keep = set()
 
-    # Always protect the backup created in this run
+    # Always protect the backup created in this run (both plain and encrypted)
     if current_backup_name:
         keep.add(current_backup_name)
+        keep.add(f"{current_backup_name}.tar.wbenc")
 
     # Sort by date
     dated_backups = []

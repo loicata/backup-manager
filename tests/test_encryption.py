@@ -9,11 +9,11 @@ from cryptography.exceptions import InvalidTag
 from src.security.encryption import (
     KEY_SIZE,
     SALT_SIZE,
+    DecryptingReader,
+    EncryptingWriter,
     decrypt_bytes,
-    decrypt_file,
     derive_key,
     encrypt_bytes,
-    encrypt_file,
     evaluate_password,
     retrieve_password,
     store_password,
@@ -86,33 +86,35 @@ class TestEncryptDecryptBytes:
         assert decrypted == data
 
 
-class TestEncryptDecryptFile:
-    def test_roundtrip(self, tmp_path):
-        src = tmp_path / "plain.txt"
-        enc = tmp_path / "encrypted.wbenc"
-        dec = tmp_path / "decrypted.txt"
+class TestStreamingEncryptDecrypt:
+    """Test EncryptingWriter / DecryptingReader round-trip."""
 
-        src.write_text("File content", encoding="utf-8")
-        assert encrypt_file(src, enc, "password") is True
-        assert enc.exists()
-        assert encrypt_file(src, enc, "password") is True
+    def test_roundtrip(self):
+        import io
 
-        assert decrypt_file(enc, dec, "password") is True
-        assert dec.read_text(encoding="utf-8") == "File content"
+        buf = io.BytesIO()
+        writer = EncryptingWriter(buf, "password1234567890")
+        writer.write(b"File content")
+        writer.close()
 
-    def test_wrong_password_returns_false(self, tmp_path):
-        src = tmp_path / "plain.txt"
-        enc = tmp_path / "encrypted.wbenc"
-        dec = tmp_path / "decrypted.txt"
+        buf.seek(0)
+        reader = DecryptingReader(buf, "password1234567890")
+        assert reader.read() == b"File content"
 
-        src.write_text("Secret", encoding="utf-8")
-        encrypt_file(src, enc, "correct")
-        assert decrypt_file(enc, dec, "wrong") is False
+    def test_wrong_password_raises(self):
+        import io
 
-    def test_missing_file_returns_false(self, tmp_path):
-        enc = tmp_path / "encrypted.wbenc"
-        result = encrypt_file(tmp_path / "missing.txt", enc, "password")
-        assert result is False
+        buf = io.BytesIO()
+        writer = EncryptingWriter(buf, "correct-password-1234")
+        writer.write(b"Secret")
+        writer.close()
+
+        buf.seek(0)
+        from cryptography.exceptions import InvalidTag
+
+        with pytest.raises((ValueError, InvalidTag)):
+            reader = DecryptingReader(buf, "wrong-password-12345678")
+            reader.read()
 
 
 class TestPasswordStorage:

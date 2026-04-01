@@ -91,34 +91,26 @@ def _make_profile(
 class TestEncryptPrimaryPipeline:
     """Full pipeline with encrypt_primary enabled."""
 
-    def test_encrypted_files_have_wbenc_extension(self, pipeline_env):
-        """After backup with encrypt_primary=True, files must be .wbenc."""
+    def test_encrypted_backup_produces_tar_wbenc(self, pipeline_env):
+        """After backup with encrypt_primary=True, a .tar.wbenc archive is created."""
         profile = _make_profile(pipeline_env, encrypt_primary=True)
         engine = BackupEngine(pipeline_env["config_manager"])
         stats = engine.run_backup(profile)
 
         backup_path = Path(stats.backup_path)
         assert backup_path.exists()
+        assert backup_path.name.endswith(".tar.wbenc")
 
-        all_files = list(backup_path.rglob("*"))
-        data_files = [
-            f for f in all_files if f.is_file() and f.name != f"{backup_path.name}.wbverify"
-        ]
-        # Every data file should end in .wbenc
-        for f in data_files:
-            assert f.suffix == ".wbenc", f"Expected .wbenc extension: {f.name}"
-
-    def test_no_plaintext_files_remain(self, pipeline_env):
-        """Original plaintext files must be removed after encryption."""
+    def test_no_plaintext_directory_remains(self, pipeline_env):
+        """Original plaintext directory must be removed after encryption."""
         profile = _make_profile(pipeline_env, encrypt_primary=True)
         engine = BackupEngine(pipeline_env["config_manager"])
         stats = engine.run_backup(profile)
 
         backup_path = Path(stats.backup_path)
-        plaintext_names = {"readme.txt", "data.bin", "nested.txt"}
-        remaining = {f.name for f in backup_path.rglob("*") if f.is_file()}
-        overlap = plaintext_names & remaining
-        assert not overlap, f"Plaintext files still present: {overlap}"
+        # The .tar.wbenc file exists, but the plain directory should be gone
+        plain_dir = backup_path.with_suffix("").with_suffix("")  # Remove .tar.wbenc
+        assert not plain_dir.exists() or not plain_dir.is_dir()
 
 
 class TestVerifyBeforeEncrypt:
@@ -142,8 +134,8 @@ class TestVerifyBeforeEncrypt:
 class TestMirrorEncryption:
     """Mirror destinations with per-mirror encryption flags."""
 
-    def test_mirror_receives_files(self, pipeline_env):
-        """Mirror with encryption should receive uploaded files."""
+    def test_encrypted_mirror_produces_tar_wbenc(self, pipeline_env):
+        """Encrypted mirror should produce a .tar.wbenc file."""
         mirror_dest = pipeline_env["dest"].parent / "mirror1"
         mirror_dest.mkdir()
 
@@ -161,8 +153,12 @@ class TestMirrorEncryption:
 
         assert stats.mirror_results is not None
         assert len(stats.mirror_results) == 1
-        mirror_name, success, msg = stats.mirror_results[0]
+        _name, success, msg = stats.mirror_results[0]
         assert success, f"Mirror upload failed: {msg}"
+
+        # Mirror should have a .tar.wbenc file
+        wbenc_files = list(mirror_dest.glob("*.tar.wbenc"))
+        assert len(wbenc_files) == 1
 
     def test_different_encryption_per_mirror(self, pipeline_env):
         """mirror1 encrypted, mirror2 plain — both succeed independently."""
@@ -192,6 +188,12 @@ class TestMirrorEncryption:
         assert stats.mirror_results[0][1] is True  # mirror1 success
         assert stats.mirror_results[1][1] is True  # mirror2 success
 
+        # Mirror1: .tar.wbenc file
+        assert len(list(m1_dir.glob("*.tar.wbenc"))) == 1
+        # Mirror2: plain directory
+        dirs = [d for d in m2_dir.iterdir() if d.is_dir()]
+        assert len(dirs) == 1
+
 
 class TestEncryptPrimaryAndMirror:
     """Primary and mirror both encrypted independently."""
@@ -214,12 +216,9 @@ class TestEncryptPrimaryAndMirror:
         engine = BackupEngine(pipeline_env["config_manager"])
         stats = engine.run_backup(profile)
 
-        # Primary: .wbenc files
+        # Primary: .tar.wbenc archive
         backup_path = Path(stats.backup_path)
-        data_files = [
-            f for f in backup_path.rglob("*") if f.is_file() and not f.name.endswith(".wbverify")
-        ]
-        assert all(f.suffix == ".wbenc" for f in data_files)
+        assert backup_path.name.endswith(".tar.wbenc")
 
         # Mirror: succeeded
         assert stats.mirror_results[0][1] is True
@@ -228,18 +227,18 @@ class TestEncryptPrimaryAndMirror:
 class TestEncryptionWithCancellation:
     """Pipeline cancellation during encryption phase triggers cleanup."""
 
-    def test_cancel_during_encrypt_raises(self, pipeline_env):
-        """Cancelling during encryption should raise CancelledError."""
+    def test_cancel_during_verify_raises(self, pipeline_env):
+        """Cancelling during verification should raise CancelledError."""
         profile = _make_profile(pipeline_env, encrypt_primary=True)
         events = EventBus()
         engine = BackupEngine(pipeline_env["config_manager"], events=events)
 
-        # Cancel when we hit the encryption phase
-        def cancel_on_encrypt(phase="", **kw):
-            if "Encrypt" in phase:
+        # Cancel when we hit the verification phase
+        def cancel_on_verify(phase="", **kw):
+            if "Verifying" in phase:
                 engine.cancel()
 
-        events.subscribe("phase_changed", cancel_on_encrypt)
+        events.subscribe("phase_changed", cancel_on_verify)
 
         with pytest.raises(CancelledError):
             engine.run_backup(profile)

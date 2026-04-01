@@ -15,11 +15,11 @@ from src.security.encryption import (
     NONCE_SIZE,
     PBKDF2_ITERATIONS,
     SALT_SIZE,
+    DecryptingReader,
+    EncryptingWriter,
     decrypt_bytes,
-    decrypt_file,
     derive_key,
     encrypt_bytes,
-    encrypt_file,
 )
 
 
@@ -95,37 +95,47 @@ class TestBinaryDataWithNullBytes:
         assert decrypted == data
 
 
-class TestFileEncryptionEdgeCases:
-    """Test file-level encryption error handling."""
+class TestStreamingEncryptionEdgeCases:
+    """Test streaming encryption edge cases."""
 
-    def test_source_deleted_mid_encryption_returns_false(self, tmp_path):
-        """If the source file vanishes during read, encrypt_file returns False."""
-        missing = tmp_path / "gone.txt"
-        output = tmp_path / "gone.wbenc"
-        # File does not exist at all
-        result = encrypt_file(missing, output, "password")
-        assert result is False
+    def test_encrypting_writer_to_file(self, tmp_path):
+        """EncryptingWriter writes valid .tar.wbenc to a real file."""
 
-    def test_output_file_overwrite(self, tmp_path):
-        """Encrypting to an existing output file should overwrite it."""
-        src = tmp_path / "plain.txt"
-        src.write_text("Original content", encoding="utf-8")
-        enc = tmp_path / "output.wbenc"
-        enc.write_bytes(b"old data that should be replaced")
+        enc_path = tmp_path / "test.tar.wbenc"
+        with open(enc_path, "wb") as f:
+            writer = EncryptingWriter(f, "password1234567890")
+            writer.write(b"file content here")
+            writer.close()
 
-        assert encrypt_file(src, enc, "password") is True
-        # Verify it's valid encrypted data (can be decrypted)
-        assert decrypt_file(enc, tmp_path / "dec.txt", "password") is True
-        assert (tmp_path / "dec.txt").read_text(encoding="utf-8") == "Original content"
+        with open(enc_path, "rb") as f:
+            reader = DecryptingReader(f, "password1234567890")
+            assert reader.read() == b"file content here"
 
-    def test_encrypt_file_unreadable_source(self, tmp_path):
-        """encrypt_file returns False when source cannot be read."""
-        src = tmp_path / "no_read.txt"
-        enc = tmp_path / "out.wbenc"
+    def test_empty_write_then_close(self):
+        """Closing EncryptingWriter without any writes produces valid stream."""
+        import io
 
-        with patch("pathlib.Path.read_bytes", side_effect=OSError("Permission denied")):
-            result = encrypt_file(src, enc, "password")
-        assert result is False
+        buf = io.BytesIO()
+        writer = EncryptingWriter(buf, "password1234567890")
+        writer.close()
+
+        buf.seek(0)
+        reader = DecryptingReader(buf, "password1234567890")
+        assert reader.read() == b""
+
+    def test_very_large_data_streaming(self):
+        """Multi-MB data streams correctly through encrypt/decrypt."""
+        import io
+
+        data = os.urandom(3 * 1024 * 1024 + 777)  # 3 MB + odd bytes
+        buf = io.BytesIO()
+        writer = EncryptingWriter(buf, "password1234567890")
+        writer.write(data)
+        writer.close()
+
+        buf.seek(0)
+        reader = DecryptingReader(buf, "password1234567890")
+        assert reader.read() == data
 
 
 class TestDPAPIFallback:

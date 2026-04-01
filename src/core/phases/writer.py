@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from src.core.phases.base import PipelineContext
-from src.core.phases.local_writer import write_flat
+from src.core.phases.local_writer import write_encrypted_tar, write_flat
 from src.core.phases.remote_writer import write_remote
 
 logger = logging.getLogger(__name__)
@@ -40,15 +40,28 @@ def write_backup(
             encrypt_password=encrypt_pw,
             events=ctx.events,
             cancel_check=cancel_check,
+            integrity_manifest=ctx.integrity_manifest if encrypt_pw else None,
         )
     else:
         dest = Path(ctx.profile.storage.destination_path)
-        ctx.backup_path = write_flat(
-            ctx.files,
-            dest,
-            ctx.backup_name,
-            ctx.events,
-        )
+        encrypt_pw = _get_encrypt_password(ctx)
+
+        if encrypt_pw:
+            ctx.backup_path = write_encrypted_tar(
+                ctx.files,
+                dest,
+                ctx.backup_name,
+                encrypt_pw,
+                ctx.events,
+                integrity_manifest=ctx.integrity_manifest,
+            )
+        else:
+            ctx.backup_path = write_flat(
+                ctx.files,
+                dest,
+                ctx.backup_name,
+                ctx.events,
+            )
 
 
 def _get_encrypt_password(ctx: PipelineContext) -> str:

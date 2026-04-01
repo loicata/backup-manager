@@ -72,21 +72,20 @@ class TestLocalWriterDiskFull:
 class TestEncryptorDiskFull:
     """Disk full during encryption output write."""
 
-    def test_encrypt_file_failure_logged(self, tmp_path):
-        """encrypt_file returns False on ENOSPC — encryptor logs error."""
+    def test_encrypt_backup_disk_full_raises(self, tmp_path):
+        """ENOSPC during tar.wbenc write propagates as an error."""
         from src.core.phases.encryptor import encrypt_backup
 
         backup_dir = tmp_path / "backup"
         backup_dir.mkdir()
         (backup_dir / "data.txt").write_text("secret", encoding="utf-8")
 
-        with patch("src.core.phases.encryptor.encrypt_file", return_value=False) as mock_enc:
-            result = encrypt_backup(backup_dir, "password123")
-
-        # Original file must NOT be deleted when encryption fails
-        assert (backup_dir / "data.txt").exists()
-        assert result == backup_dir
-        mock_enc.assert_called_once()
+        enospc = OSError(errno.ENOSPC, "No space left on device")
+        with (
+            patch("builtins.open", side_effect=enospc),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            encrypt_backup(backup_dir, "password12345678")
 
 
 # ---------------------------------------------------------------------------

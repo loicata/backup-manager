@@ -3,10 +3,10 @@
 import pytest
 
 from src.core.config import (
+    _STORAGE_SECRET_FIELDS,
     ConfigManager,
     StorageConfig,
     StorageType,
-    _STORAGE_SECRET_FIELDS,
 )
 
 

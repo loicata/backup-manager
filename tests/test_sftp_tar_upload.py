@@ -512,8 +512,8 @@ class TestRemoteWriterTarIntegration:
         assert backend.upload_file.call_count == 3
         backend.disconnect.assert_called_once()
 
-    def test_write_remote_encrypted_uses_file_by_file(self, tmp_path):
-        """Encrypted uploads must use file-by-file even with tar support."""
+    def test_write_remote_encrypted_uses_tar_wbenc(self, tmp_path):
+        """Encrypted uploads produce a single .tar.wbenc via upload_file."""
         from src.core.phases.remote_writer import write_remote
 
         files = _make_file_infos(tmp_path, count=2)
@@ -528,15 +528,21 @@ class TestRemoteWriterTarIntegration:
             ]
         )
         backend.supports_tar_stream = True
-        backend.upload_file.return_value = None
 
-        with patch("src.security.encryption.encrypt_file", return_value=True):
-            write_remote(files, backend, "backup_2026", encrypt_password="secret")
+        def _drain(fileobj, remote_path, size=0):
+            while fileobj.read(65536):
+                pass
 
-        # Should NOT use tar
+        backend.upload_file.side_effect = _drain
+
+        write_remote(files, backend, "backup_2026", encrypt_password="password12345678")
+
+        # Should NOT use unencrypted tar stream
         backend.upload_tar_stream.assert_not_called()
-        # Should use file-by-file
-        assert backend.upload_file.call_count == 2
+        # Should upload single .tar.wbenc file
+        backend.upload_file.assert_called_once()
+        remote_path = backend.upload_file.call_args[0][1]
+        assert remote_path == "backup_2026.tar.wbenc"
 
     def test_write_remote_disconnect_on_error(self, tmp_path):
         """Backend is disconnected even if upload fails."""

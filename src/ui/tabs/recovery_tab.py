@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from src.core.config import BackupProfile, StorageConfig, StorageType
 from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
-from src.security.encryption import decrypt_file
+from src.security.encryption import DecryptingReader
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 
@@ -584,9 +584,9 @@ class RecoveryTab(ScrollableTab):
             self._user_modified_pw = False
             return
         src = Path(path)
-        if not src.is_dir():
+        if not src.exists():
             return
-        has_encrypted = any(src.rglob("*.wbenc"))
+        has_encrypted = src.suffix == ".wbenc" or (src.is_dir() and any(src.rglob("*.wbenc")))
         if has_encrypted and self._stored_password:
             self._user_modified_pw = False
             self.password_var.set(_PASSWORD_PLACEHOLDER)
@@ -624,8 +624,8 @@ class RecoveryTab(ScrollableTab):
             messagebox.showwarning("Restore", "Please select a backup folder.")
             return
         src = Path(backup_path)
-        if not src.is_dir():
-            messagebox.showwarning("Restore", f"Backup folder does not exist:\n{backup_path}")
+        if not src.exists():
+            messagebox.showwarning("Restore", f"Backup does not exist:\n{backup_path}")
             return
         if not dest_path:
             messagebox.showwarning("Restore", "Please select a restore destination.")
@@ -633,8 +633,9 @@ class RecoveryTab(ScrollableTab):
 
         password = self._get_effective_password()
 
-        src_files = [f for f in src.rglob("*") if f.is_file()]
-        has_encrypted = any(f.suffix == ".wbenc" for f in src_files)
+        has_encrypted = src.suffix == ".wbenc" or (
+            src.is_dir() and any(f.suffix == ".wbenc" for f in src.rglob("*"))
+        )
         if has_encrypted and not password:
             messagebox.showwarning(
                 "Restore",
@@ -656,68 +657,94 @@ class RecoveryTab(ScrollableTab):
         ).start()
 
     def _do_restore(self, src: Path, dst: Path, password: str) -> None:
-        """Restore files from backup folder to destination.
+        """Restore files from backup to destination.
+
+        Supports two backup formats:
+        - .tar.wbenc file: encrypted tar archive (streamed decryption)
+        - Plain directory: copy files as-is
 
         Args:
-            src: Source backup directory.
+            src: Source backup (directory or .tar.wbenc file).
             dst: Destination directory.
             password: Decryption password (empty string if not needed).
         """
         try:
-            copied = 0
-            decrypted = 0
-            skipped = 0
+            # Detect .tar.wbenc file (either src itself or alongside a dir)
+            tar_wbenc = None
+            if src.is_file() and src.name.endswith(".tar.wbenc"):
+                tar_wbenc = src
+            elif src.is_dir():
+                candidate = src.with_suffix(".tar.wbenc")
+                if candidate.is_file():
+                    tar_wbenc = candidate
 
+            if tar_wbenc is not None:
+                self._restore_encrypted_tar(tar_wbenc, dst, password)
+                return
+
+            # Plain directory: copy files
+            copied = 0
             files = [f for f in src.rglob("*") if f.is_file()]
             if not files:
                 self.after(
                     0,
-                    lambda: self._restore_done(False, "No files found in backup folder"),
+                    lambda: self._restore_done(False, "No files found in backup"),
                 )
                 return
 
             for f in files:
                 rel = f.relative_to(src)
+                target = dst / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, target)
+                copied += 1
 
-                if f.suffix == ".wbenc":
-                    if not password:
-                        skipped += 1
-                        logger.warning("Skipped encrypted file (no password): %s", rel)
-                        continue
-                    target = dst / rel.with_suffix("")
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    ok = decrypt_file(f, target, password)
-                    if ok:
-                        decrypted += 1
-                    else:
-                        skipped += 1
-                        logger.warning("Failed to decrypt: %s", rel)
-                else:
-                    target = dst / rel
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(f, target)
-                    copied += 1
+            msg = f"Restore complete — {copied} files copied"
+            self.after(0, lambda: self._restore_done(True, msg))
 
-            parts = []
-            if copied:
-                parts.append(f"{copied} copied")
-            if decrypted:
-                parts.append(f"{decrypted} decrypted")
-            if skipped:
-                parts.append(f"{skipped} skipped")
-
-            success = (copied + decrypted) > 0 and skipped == 0
-            if copied + decrypted == 0:
-                msg = f"Restore failed — {skipped} files skipped " "(wrong password?)"
-            elif skipped > 0:
-                msg = f"Restore partial — {', '.join(parts)}"
-            else:
-                msg = f"Restore complete — {', '.join(parts)}"
-
-            self.after(0, lambda: self._restore_done(success, msg))
         except Exception as e:
             logger.exception("Restore failed")
             self.after(0, lambda _e=e: self._restore_done(False, str(_e)))
+
+    def _restore_encrypted_tar(
+        self,
+        tar_path: Path,
+        dst: Path,
+        password: str,
+    ) -> None:
+        """Restore from a .tar.wbenc encrypted archive.
+
+        Args:
+            tar_path: Path to the .tar.wbenc file.
+            dst: Destination directory.
+            password: Decryption password.
+        """
+        import tarfile
+
+        if not password:
+            self.after(
+                0,
+                lambda: self._restore_done(False, "Password required for encrypted backup"),
+            )
+            return
+
+        try:
+            with open(tar_path, "rb") as f:
+                reader = DecryptingReader(f, password)
+                with tarfile.open(fileobj=reader, mode="r|") as tar:
+                    tar.extractall(path=dst, filter="data")
+
+            # Count extracted files
+            count = sum(1 for _ in dst.rglob("*") if _.is_file())
+            msg = f"Restore complete — {count} files decrypted"
+            self.after(0, lambda: self._restore_done(True, msg))
+
+        except Exception as e:
+            err_msg = str(e)
+            if "tag" in err_msg.lower() or "authentication" in err_msg.lower():
+                err_msg = "Decryption failed — wrong password?"
+            logger.exception("Encrypted restore failed")
+            self.after(0, lambda _e=err_msg: self._restore_done(False, _e))
 
     def _restore_done(self, ok: bool, msg: str) -> None:
         """Display restore result.

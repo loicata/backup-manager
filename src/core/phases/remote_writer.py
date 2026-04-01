@@ -1,26 +1,25 @@
 """Phase 3b: Stream files to remote destination (SFTP/S3).
 
-No temp files, no ZIP — each file is uploaded individually,
-or as a single tar stream when the backend supports it.
-Encryption uses a temporary encrypted file to avoid loading
-the entire plaintext into memory.
+No temp files, no ZIP — files are streamed as a tar archive.
+When encryption is enabled, the tar stream is encrypted on the fly
+using chunked AES-256-GCM (.tar.wbenc format) with a single key
+derivation for maximum throughput.
 """
 
 import contextlib
 import logging
-import tempfile
+import os
+import tarfile
+import threading
 from collections.abc import Callable
-from pathlib import Path
 
 from src.core.events import EventBus
 from src.core.exceptions import WriteError
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
-from src.storage.base import StorageBackend
+from src.storage.base import StorageBackend, long_path_str
 
 logger = logging.getLogger(__name__)
-
-CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 
 def write_remote(
@@ -30,64 +29,73 @@ def write_remote(
     encrypt_password: str = "",
     events: EventBus | None = None,
     cancel_check: Callable[[], None] | None = None,
+    integrity_manifest: dict | None = None,
 ) -> str:
-    """Stream files one by one to a remote storage backend.
+    """Stream files to a remote storage backend.
 
-    When the backend supports tar-stream upload and no per-file
-    encryption is needed, all files are sent in a single tar
-    archive for dramatically better small-file performance.
+    Selects the best upload strategy:
+    - Encrypted: tar + chunked AES-256-GCM → single .tar.wbenc file
+    - Unencrypted + tar support: tar stream via exec channel
+    - Unencrypted fallback: file-by-file upload
 
     Args:
         files: Files to back up.
         backend: Storage backend (SFTP, S3).
-        backup_name: Name for this backup (remote directory).
-        encrypt_password: If set, encrypt each file before upload.
+        backup_name: Name for this backup (remote directory or file).
+        encrypt_password: If set, encrypt the tar stream.
         events: Optional event bus.
         cancel_check: Callable that raises CancelledError if cancelled.
 
     Returns:
-        Remote backup name (directory name on the server).
-
-    Raises:
-        CancelledError: If cancelled by user between files.
+        Remote backup name.
     """
     phase_log = PhaseLogger("remote_writer", events)
     total = len(files)
-
     phase_log.info(f"Uploading {total} files to remote...")
 
-    # Open persistent connection for batch upload (1 connection, N files)
     if hasattr(backend, "connect"):
         backend.connect()
 
     try:
-        # Check cancel before starting
         if cancel_check is not None:
             cancel_check()
 
-        use_tar = not encrypt_password and getattr(backend, "supports_tar_stream", False) is True
+        use_tar = getattr(backend, "supports_tar_stream", False) is True
 
         logger.info(
-            "Remote write: encrypt=%s, use_tar=%s, supports_tar=%s, files=%d",
+            "Remote write: encrypt=%s, use_tar=%s, files=%d",
             bool(encrypt_password),
             use_tar,
-            getattr(backend, "supports_tar_stream", False),
             len(files),
         )
 
-        if use_tar:
-            _upload_tar_batch(backend, files, backup_name, phase_log, cancel_check)
-        else:
-            _upload_file_by_file(
+        if encrypt_password:
+            _upload_encrypted_tar(
                 backend,
                 files,
                 backup_name,
                 encrypt_password,
                 phase_log,
                 cancel_check,
+                integrity_manifest,
+            )
+        elif use_tar:
+            _upload_tar_batch(
+                backend,
+                files,
+                backup_name,
+                phase_log,
+                cancel_check,
+            )
+        else:
+            _upload_file_by_file(
+                backend,
+                files,
+                backup_name,
+                phase_log,
+                cancel_check,
             )
     finally:
-        # Always close persistent connection
         if hasattr(backend, "disconnect"):
             backend.disconnect()
 
@@ -95,17 +103,230 @@ def write_remote(
     return backup_name
 
 
-def _upload_tar_batch(
+def _upload_encrypted_tar(
+    backend: StorageBackend,
+    files: list[FileInfo],
+    backup_name: str,
+    password: str,
+    phase_log: PhaseLogger,
+    cancel_check: Callable[[], None] | None = None,
+    integrity_manifest: dict | None = None,
+) -> None:
+    """Upload files as an encrypted tar archive (.tar.wbenc).
+
+    For backends that support streaming (SFTP with exec channel),
+    uses os.pipe() + producer thread for zero temp files.
+    For backends that need seekable streams (S3), writes to a temp
+    file first then uploads.
+
+    Args:
+        backend: Storage backend with upload_file() method.
+        files: Files to upload.
+        backup_name: Remote backup name (becomes backup_name.tar.wbenc).
+        password: Encryption password.
+        phase_log: Phase logger for progress events.
+        cancel_check: Optional callable that raises CancelledError.
+        integrity_manifest: Optional manifest dict to embed in the archive.
+    """
+    supports_pipe = getattr(backend, "supports_tar_stream", False)
+
+    if supports_pipe:
+        _upload_encrypted_tar_pipe(
+            backend,
+            files,
+            backup_name,
+            password,
+            phase_log,
+            cancel_check,
+            integrity_manifest,
+        )
+    else:
+        _upload_encrypted_tar_tempfile(
+            backend,
+            files,
+            backup_name,
+            password,
+            phase_log,
+            cancel_check,
+            integrity_manifest,
+        )
+
+
+def _build_encrypted_tar(
+    dest,
+    files: list[FileInfo],
+    password: str,
+    phase_log: PhaseLogger,
+    cancel_check: Callable[[], None] | None,
+    integrity_manifest: dict | None,
+) -> int:
+    """Build an encrypted tar into *dest* (file-like writable).
+
+    Args:
+        dest: Writable binary stream.
+        files: Files to include.
+        password: Encryption password.
+        phase_log: Phase logger.
+        cancel_check: Optional cancel callable.
+        integrity_manifest: Optional manifest to embed.
+
+    Returns:
+        Total source bytes written.
+    """
+    from src.core.phases.local_writer import _add_manifest_to_tar
+    from src.security.encryption import EncryptingWriter
+
+    total_bytes = sum(f.size for f in files)
+    progress_total = max(total_bytes, 1)
+    bytes_written = 0
+
+    enc_writer = EncryptingWriter(dest, password)
+    with tarfile.open(fileobj=enc_writer, mode="w|") as tar:
+        for file_info in files:
+            if cancel_check is not None:
+                cancel_check()
+            info = tarfile.TarInfo(name=file_info.relative_path)
+            info.size = file_info.size
+            with open(long_path_str(file_info.source_path), "rb") as f:
+                tar.addfile(info, fileobj=f)
+            bytes_written += file_info.size
+            phase_log.progress(
+                current=bytes_written,
+                total=progress_total,
+                filename=file_info.relative_path,
+                phase="upload",
+            )
+        if integrity_manifest:
+            _add_manifest_to_tar(tar, integrity_manifest)
+    enc_writer.close()
+    return bytes_written
+
+
+def _upload_encrypted_tar_pipe(
     backend,
+    files,
+    backup_name,
+    password,
+    phase_log,
+    cancel_check,
+    integrity_manifest,
+) -> None:
+    """Stream encrypted tar via pipe (SFTP and other streaming backends)."""
+    import contextlib
+
+    read_fd, write_fd = os.pipe()
+    read_end = os.fdopen(read_fd, "rb")
+    write_end = os.fdopen(write_fd, "wb")
+
+    producer_error: list[BaseException] = []
+
+    def _produce():
+        try:
+            _build_encrypted_tar(
+                write_end,
+                files,
+                password,
+                phase_log,
+                cancel_check,
+                integrity_manifest,
+            )
+        except BaseException as e:
+            producer_error.append(e)
+        finally:
+            with contextlib.suppress(OSError):
+                write_end.close()
+
+    thread = threading.Thread(target=_produce, daemon=True)
+    thread.start()
+
+    upload_error: BaseException | None = None
+    try:
+        remote_path = f"{backup_name}.tar.wbenc"
+        backend.upload_file(read_end, remote_path, size=0)
+    except BaseException as e:
+        upload_error = e
+    finally:
+        read_end.close()
+        thread.join(timeout=30)
+
+    if upload_error:
+        raise WriteError("encrypted-tar", upload_error) from upload_error
+    if producer_error:
+        raise WriteError("encrypted-tar", producer_error[0]) from producer_error[0]
+
+
+def _upload_encrypted_tar_tempfile(
+    backend,
+    files,
+    backup_name,
+    password,
+    phase_log,
+    cancel_check,
+    integrity_manifest,
+) -> None:
+    """Write encrypted tar to temp file, then upload (S3 and seekable backends)."""
+    import tempfile
+
+    remote_path = f"{backup_name}.tar.wbenc"
+
+    with tempfile.NamedTemporaryFile(suffix=".tar.wbenc", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        with open(tmp_path, "wb") as f:
+            _build_encrypted_tar(
+                f,
+                files,
+                password,
+                phase_log,
+                cancel_check,
+                integrity_manifest,
+            )
+        enc_size = os.path.getsize(tmp_path)
+        logger.info(
+            "Uploading encrypted temp file: %s (%d bytes)",
+            tmp_path,
+            enc_size,
+        )
+        # Use boto3 upload_file (path-based) for S3 to avoid
+        # multipart stream issues. Fall back to stream-based for others.
+        if hasattr(backend, "_get_client"):
+            from boto3.s3.transfer import TransferConfig
+
+            transfer_config = TransferConfig(
+                multipart_chunksize=16 * 1024 * 1024,
+            )
+            # Apply bandwidth throttling if configured
+            bw_limit = getattr(backend, "_bandwidth_limit_kbps", 0)
+            if bw_limit > 0:
+                transfer_config.max_bandwidth = bw_limit * 1024  # KB/s → B/s
+
+            client = backend._get_client()
+            key = backend._s3_key(remote_path)
+            client.upload_file(
+                tmp_path,
+                backend._bucket,
+                key,
+                Config=transfer_config,
+            )
+        else:
+            with open(tmp_path, "rb") as f:
+                backend.upload_file(f, remote_path, size=enc_size)
+    except Exception as e:
+        raise WriteError("encrypted-tar", e) from e
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
+def _upload_tar_batch(
+    backend: StorageBackend,
     files: list[FileInfo],
     backup_name: str,
     phase_log: PhaseLogger,
     cancel_check: Callable[[], None] | None = None,
 ) -> None:
-    """Upload all files as a single tar stream.
-
-    Progress is tracked by bytes sent rather than file count,
-    so the bar advances smoothly during the transfer.
+    """Upload all files as a single unencrypted tar stream.
 
     Args:
         backend: Storage backend with upload_tar_stream() method.
@@ -115,8 +336,6 @@ def _upload_tar_batch(
         cancel_check: Optional callable that raises CancelledError.
     """
     total_bytes = sum(f.size for f in files)
-
-    # Use bytes for smooth progress (avoids a frozen bar during transfer)
     progress_total = max(total_bytes, 1)
 
     def _on_progress(bytes_sent: int, _total: int) -> None:
@@ -139,25 +358,27 @@ def _upload_tar_batch(
     except Exception as e:
         raise WriteError("tar-stream", e) from e
 
-    # Emit final progress (ensure 100% of this phase)
-    phase_log.progress(current=progress_total, total=progress_total, filename="", phase="upload")
+    phase_log.progress(
+        current=progress_total,
+        total=progress_total,
+        filename="",
+        phase="upload",
+    )
 
 
 def _upload_file_by_file(
     backend: StorageBackend,
     files: list[FileInfo],
     backup_name: str,
-    encrypt_password: str,
     phase_log: PhaseLogger,
     cancel_check: Callable[[], None] | None,
 ) -> None:
-    """Upload files one by one (original behaviour).
+    """Upload files one by one (fallback for backends without tar support).
 
     Args:
         backend: Storage backend.
         files: Files to upload.
         backup_name: Remote directory name.
-        encrypt_password: If set, encrypt each file before upload.
         phase_log: Phase logger for progress events.
         cancel_check: Callable that raises CancelledError if cancelled.
     """
@@ -169,14 +390,8 @@ def _upload_file_by_file(
         remote_path = f"{backup_name}/{file_info.relative_path}"
 
         try:
-            if encrypt_password:
-                if i == 0:
-                    logger.info("Encrypting files before upload (first file: %s)", remote_path)
-                _upload_encrypted(backend, file_info, remote_path, encrypt_password)
-            else:
-                if i == 0:
-                    logger.info("Uploading plain files (first file: %s)", remote_path)
-                _upload_plain(backend, file_info, remote_path)
+            with open(long_path_str(file_info.source_path), "rb") as f:
+                backend.upload_file(f, remote_path, size=file_info.size)
         except Exception as e:
             raise WriteError(file_info.relative_path, e) from e
 
@@ -186,44 +401,3 @@ def _upload_file_by_file(
             filename=file_info.relative_path,
             phase="upload",
         )
-
-
-def _upload_plain(
-    backend: StorageBackend,
-    file_info: FileInfo,
-    remote_path: str,
-) -> None:
-    """Upload a file as-is (no encryption)."""
-    with open(file_info.source_path, "rb") as f:
-        backend.upload_file(f, remote_path, size=file_info.size)
-
-
-def _upload_encrypted(
-    backend: StorageBackend,
-    file_info: FileInfo,
-    remote_path: str,
-    password: str,
-) -> None:
-    """Encrypt a file to a temp file, then stream-upload it.
-
-    Uses encrypt_file() which handles chunked I/O internally,
-    avoiding loading the entire plaintext into memory.
-    """
-    from src.security.encryption import encrypt_file
-
-    encrypted_path = remote_path + ".wbenc"
-
-    with tempfile.NamedTemporaryFile(suffix=".wbenc", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-
-    try:
-        if not encrypt_file(file_info.source_path, tmp_path, password):
-            raise RuntimeError(f"Encryption failed for {file_info.relative_path}")
-
-        enc_size = tmp_path.stat().st_size
-        with open(tmp_path, "rb") as f:
-            backend.upload_file(f, encrypted_path, size=enc_size)
-    finally:
-        # Always clean up temp file
-        with contextlib.suppress(OSError):
-            tmp_path.unlink()

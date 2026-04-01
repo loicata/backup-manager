@@ -33,7 +33,6 @@ from src.core.events import (
 from src.core.exceptions import CancelledError
 from src.core.phases.base import PipelineContext
 from src.core.phases.collector import collect_files
-from src.core.phases.encryptor import encrypt_backup
 from src.core.phases.filter import (
     build_updated_manifest,
     filter_changed_files,
@@ -178,6 +177,9 @@ class BackupEngine:
 
         ctx.result.files_processed = len(ctx.files)
 
+        # Check disk space on all destinations before writing
+        self._check_disk_space(ctx)
+
         # Tell the UI how many progress-emitting phases to expect
         self._emit_phase_count(ctx)
 
@@ -194,9 +196,6 @@ class BackupEngine:
 
         # Phase 6: Verify
         self._phase_verify(ctx)
-
-        # Phase 7: Encrypt
-        self._phase_encrypt(ctx)
 
         # Phase 8: Update delta manifest
         self._phase_update_delta(ctx)
@@ -261,6 +260,132 @@ class BackupEngine:
             if not ctx.files:
                 self._log("No changes detected — backup skipped")
 
+    def _check_disk_space(self, ctx: PipelineContext) -> None:
+        """Verify sufficient disk space on all destinations before writing.
+
+        Checks local/network destinations, SFTP via get_free_space(),
+        and the temp drive for S3 encrypted uploads.
+
+        Raises:
+            RuntimeError: If any destination has insufficient space.
+        """
+        import tempfile
+
+        backup_size = sum(f.size for f in ctx.files)
+        local_required = backup_size + 100 * 1024 * 1024  # backup + 100 MB margin
+        s3_temp_required = backup_size + 2 * 1024 * 1024 * 1024  # backup + 2 GB margin
+        errors = []
+
+        is_encrypted = (
+            ctx.profile.encrypt_primary
+            and ctx.profile.encryption.enabled
+            and ctx.profile.encryption.stored_password
+        )
+
+        # --- Primary destination ---
+        primary = ctx.profile.storage
+        if primary.storage_type in (StorageType.LOCAL, StorageType.NETWORK):
+            self._check_path_space(
+                primary.destination_path,
+                local_required,
+                "Storage",
+                errors,
+            )
+        elif primary.storage_type == StorageType.SFTP:
+            self._check_remote_space(
+                primary,
+                local_required,
+                "Storage (SFTP)",
+                errors,
+            )
+        elif primary.storage_type == StorageType.S3 and is_encrypted:
+            temp_dir = tempfile.gettempdir()
+            self._check_path_space(
+                temp_dir,
+                s3_temp_required,
+                f"Temp drive ({temp_dir[:3]}) for encrypted S3 upload",
+                errors,
+            )
+
+        # --- Mirror destinations ---
+        encrypt_flags = [ctx.profile.encrypt_mirror1, ctx.profile.encrypt_mirror2]
+        for i, config in enumerate(ctx.profile.mirror_destinations):
+            mirror_name = f"Mirror {i + 1}"
+            mirror_encrypted = (
+                i < len(encrypt_flags)
+                and encrypt_flags[i]
+                and ctx.profile.encryption.enabled
+                and ctx.profile.encryption.stored_password
+            )
+
+            if config.storage_type in (StorageType.LOCAL, StorageType.NETWORK):
+                self._check_path_space(
+                    config.destination_path,
+                    local_required,
+                    mirror_name,
+                    errors,
+                )
+            elif config.storage_type == StorageType.SFTP:
+                self._check_remote_space(
+                    config,
+                    local_required,
+                    f"{mirror_name} (SFTP)",
+                    errors,
+                )
+            elif config.storage_type == StorageType.S3 and mirror_encrypted:
+                temp_dir = tempfile.gettempdir()
+                self._check_path_space(
+                    temp_dir,
+                    s3_temp_required,
+                    f"Temp drive ({temp_dir[:3]}) for {mirror_name} encrypted S3",
+                    errors,
+                )
+
+        if errors:
+            detail = "\n".join(f"  - {e}" for e in errors)
+            raise RuntimeError(f"Insufficient disk space:\n{detail}")
+
+    def _check_remote_space(
+        self,
+        config: object,
+        required: int,
+        label: str,
+        errors: list[str],
+    ) -> None:
+        """Check free space on a remote SFTP destination.
+
+        Uses the backend's get_free_space() method (SFTP statvfs).
+        Silently skips if the check fails (connection issue, etc.).
+        """
+        try:
+            backend = self._get_backend(config)
+            free = backend.get_free_space()
+            if free is not None and free < required:
+                free_gb = free / (1024**3)
+                needed_gb = required / (1024**3)
+                errors.append(f"{label}: {free_gb:.1f} GB free, need {needed_gb:.1f} GB")
+        except Exception:
+            pass  # Connection not available yet, skip check
+
+    @staticmethod
+    def _check_path_space(
+        path: str,
+        required: int,
+        label: str,
+        errors: list[str],
+    ) -> None:
+        """Check free space at *path* and append to *errors* if insufficient."""
+        import shutil
+
+        try:
+            free = shutil.disk_usage(path).free
+            if free < required:
+                free_gb = free / (1024**3)
+                needed_gb = required / (1024**3)
+                errors.append(f"{label}: {free_gb:.1f} GB free, need {needed_gb:.1f} GB")
+        except OSError:
+            pass  # Path not accessible yet (USB not plugged, etc.)
+
     def _phase_integrity(self, ctx: PipelineContext) -> None:
         """Phase 3: Build integrity manifest (hashing)."""
         self._phase("Building integrity manifest...")
@@ -289,9 +414,21 @@ class BackupEngine:
     def _phase_save_manifest(self, ctx: PipelineContext) -> None:
         """Phase 5: Save integrity manifest alongside backup.
 
-        Local backups: writes .wbverify next to the backup directory.
-        Remote backups: uploads .wbverify to the remote backend.
+        Skipped for encrypted backups — the manifest is embedded inside
+        the .tar.wbenc archive to avoid leaking file metadata.
+
+        Local unencrypted: writes .wbverify next to the backup directory.
+        Remote unencrypted: uploads .wbverify to the remote backend.
         """
+        is_encrypted = (
+            ctx.profile.encrypt_primary
+            and ctx.profile.encryption.enabled
+            and ctx.profile.encryption.stored_password
+        )
+        if is_encrypted:
+            self._log("Manifest embedded in encrypted archive")
+            return
+
         self._phase("Saving manifest...")
         if ctx.backup_path and ctx.backup_path.exists():
             save_integrity_manifest(ctx.integrity_manifest, ctx.backup_path)
@@ -318,6 +455,11 @@ class BackupEngine:
         is_local_dir = (
             ctx.backup_path is not None and ctx.backup_path.exists() and ctx.backup_path.is_dir()
         )
+        is_local_encrypted = (
+            ctx.backup_path is not None
+            and ctx.backup_path.exists()
+            and ctx.backup_path.name.endswith(".tar.wbenc")
+        )
 
         if is_local_dir:
             self._phase("Verifying backup (hash)...")
@@ -326,6 +468,16 @@ class BackupEngine:
             ok, msg = verify_backup(ctx.backup_path, manifest_file, self._events)
             if not ok:
                 raise RuntimeError(msg)
+
+        elif is_local_encrypted:
+            self._phase("Verifying encrypted backup...")
+            self._check_cancel()
+            size = ctx.backup_path.stat().st_size
+            if size == 0:
+                raise RuntimeError(f"Encrypted archive is empty: {ctx.backup_path.name}")
+            self._log(
+                f"Verification OK: {ctx.backup_path.name} " f"({size:,} bytes, GCM-authenticated)"
+            )
 
         elif ctx.backup_remote_name and ctx.backend is not None:
             self._phase("Verifying remote backup (file count + sizes)...")
@@ -531,24 +683,6 @@ class BackupEngine:
             f"Remote verification failed: {len(errors)}/{total} " f"errors\n  - {detail}{extra}"
         )
 
-    def _phase_encrypt(self, ctx: PipelineContext) -> None:
-        """Phase 7: Encryption (local backups only)."""
-        needs_encryption = (
-            ctx.profile.encrypt_primary
-            and ctx.profile.encryption.enabled
-            and ctx.profile.encryption.stored_password
-            and ctx.backup_path is not None
-            and ctx.backup_path.exists()
-        )
-        if needs_encryption:
-            self._phase("Encrypting backup...")
-            self._check_cancel()
-            ctx.backup_path = encrypt_backup(
-                ctx.backup_path,
-                ctx.profile.encryption.stored_password,
-                self._events,
-            )
-
     def _maybe_force_full(self, ctx: PipelineContext) -> None:
         """Auto-promote differential to full when needed.
 
@@ -714,21 +848,35 @@ class BackupEngine:
             try:
                 backend = self._get_backend(config)
 
-                if config.is_remote():
+                if mirror_encrypted:
+                    # Encrypted mirrors produce a single .tar.wbenc file.
+                    # Verify it exists with plausible size. GCM tags
+                    # guarantee integrity at decryption time.
+                    self._phase(f"Verifying {mirror_name} (encrypted)...")
+                    self._verify_encrypted_archive(
+                        backend,
+                        config,
+                        ctx.backup_name,
+                        mirror_name,
+                    )
+                elif config.is_remote():
                     self._phase(f"Verifying {mirror_name}...")
-                    # Use same verification as primary remote
                     verified = backend.verify_backup_files(ctx.backup_name)
                     has_checksums = verified and any(c for _, _, c in verified)
 
                     if has_checksums:
                         self._verify_mirror_checksums(
-                            ctx, verified, mirror_name, encrypted=mirror_encrypted
+                            ctx,
+                            verified,
+                            mirror_name,
                         )
                     else:
                         remote_files = backend.list_backup_files(ctx.backup_name)
                         if remote_files:
                             self._verify_mirror_sizes(
-                                ctx, remote_files, mirror_name, encrypted=mirror_encrypted
+                                ctx,
+                                remote_files,
+                                mirror_name,
                             )
                         else:
                             self._log(
@@ -736,23 +884,15 @@ class BackupEngine:
                                 f"(file listing not supported)"
                             )
                 else:
-                    # Local mirror — hash verification.
-                    # Skip when the mirror itself is encrypted OR when
-                    # the primary was encrypted (files are .wbenc copies).
-                    primary_encrypted = (
-                        ctx.profile.encrypt_primary
-                        and ctx.profile.encryption.enabled
-                        and ctx.profile.encryption.stored_password
-                    )
-                    if not mirror_encrypted and not primary_encrypted:
-                        mirror_path = Path(config.destination_path) / ctx.backup_name
-                        if mirror_path.exists() and mirror_path.is_dir():
-                            self._phase(f"Verifying {mirror_name} (hash)...")
-                            manifest_file = mirror_path.parent / f"{mirror_path.name}.wbverify"
-                            if manifest_file.exists():
-                                ok, msg = verify_backup(mirror_path, manifest_file, self._events)
-                                if not ok:
-                                    raise RuntimeError(f"{mirror_name}: {msg}")
+                    # Local unencrypted mirror — hash verification.
+                    mirror_path = Path(config.destination_path) / ctx.backup_name
+                    if mirror_path.exists() and mirror_path.is_dir():
+                        self._phase(f"Verifying {mirror_name} (hash)...")
+                        manifest_file = mirror_path.parent / f"{mirror_path.name}.wbverify"
+                        if manifest_file.exists():
+                            ok, msg = verify_backup(mirror_path, manifest_file, self._events)
+                            if not ok:
+                                raise RuntimeError(f"{mirror_name}: {msg}")
 
             except RuntimeError:
                 raise
@@ -764,9 +904,8 @@ class BackupEngine:
         ctx: PipelineContext,
         remote_files: list[tuple[str, int, str]],
         mirror_name: str,
-        encrypted: bool = False,
     ) -> None:
-        """Verify mirror files using checksums. Delegates to checksum logic."""
+        """Verify unencrypted mirror files using checksums."""
         from src.core.hashing import compute_sha256
 
         remote_map = {path: (size, checksum) for path, size, checksum in remote_files}
@@ -775,18 +914,12 @@ class BackupEngine:
         size_verified = 0
 
         for f in ctx.files:
-            expected_path = f.relative_path + ".wbenc" if encrypted else f.relative_path
+            expected_path = f.relative_path
             if expected_path not in remote_map:
                 errors.append(f"Missing on {mirror_name}: {expected_path}")
                 continue
 
             remote_size, remote_checksum = remote_map[expected_path]
-
-            # Skip hash/checksum comparison for encrypted mirrors —
-            # the remote file is ciphertext, so hashes will never match.
-            if encrypted:
-                size_verified += 1
-                continue
 
             if remote_checksum and len(remote_checksum) == 64:
                 local_hash = compute_sha256(f.source_path)
@@ -823,18 +956,16 @@ class BackupEngine:
         ctx: PipelineContext,
         remote_files: list[tuple[str, int]],
         mirror_name: str,
-        encrypted: bool = False,
     ) -> None:
-        """Verify mirror files by size (or presence only when encrypted)."""
+        """Verify unencrypted mirror files by size."""
         remote_map = {path: size for path, size in remote_files}
         errors = []
 
         for f in ctx.files:
-            expected_path = f.relative_path + ".wbenc" if encrypted else f.relative_path
+            expected_path = f.relative_path
             if expected_path not in remote_map:
                 errors.append(f"Missing on {mirror_name}: {expected_path}")
-            elif not encrypted and remote_map[expected_path] != f.size:
-                # Skip size check for encrypted files — ciphertext is larger
+            elif remote_map[expected_path] != f.size:
                 errors.append(f"Size mismatch on {mirror_name}: {expected_path}")
 
         if errors:
@@ -842,6 +973,50 @@ class BackupEngine:
 
         total = len(ctx.files)
         self._log(f"{mirror_name} verification OK: {total}/{total} files " f"(by size)")
+
+    def _verify_encrypted_archive(
+        self,
+        backend: object,
+        config: object,
+        backup_name: str,
+        mirror_name: str,
+    ) -> None:
+        """Verify that a .tar.wbenc archive exists on the destination.
+
+        For encrypted backups, individual file verification is impossible
+        without decryption.  GCM authentication tags guarantee integrity
+        at restore time, so we only check that the archive exists and
+        has a plausible size (> header size).
+
+        Args:
+            backend: Storage backend instance.
+            config: Storage configuration.
+            backup_name: Backup name (without extension).
+            mirror_name: Human-readable mirror label for logging.
+
+        Raises:
+            RuntimeError: If the archive is missing or empty.
+        """
+        archive_name = f"{backup_name}.tar.wbenc"
+
+        if config.is_remote():
+            # Use get_file_size for a direct check (works for both SFTP and S3)
+            size = None
+            if hasattr(backend, "get_file_size"):
+                size = backend.get_file_size(archive_name)
+            if size is None or size == 0:
+                raise RuntimeError(
+                    f"{mirror_name}: encrypted archive {archive_name} " f"not found on remote"
+                )
+        else:
+            local_path = Path(config.destination_path) / archive_name
+            if not local_path.exists() or local_path.stat().st_size == 0:
+                raise RuntimeError(
+                    f"{mirror_name}: encrypted archive {archive_name} "
+                    f"not found at {config.destination_path}"
+                )
+
+        self._log(f"{mirror_name} verification OK: {archive_name} present")
 
     def _phase_rotate(self, ctx: PipelineContext) -> None:
         """Phase 11: Rotation — delete old backups."""

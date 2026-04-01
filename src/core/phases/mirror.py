@@ -10,6 +10,7 @@ causes the entire backup to be marked as failed.
 
 import logging
 import shutil
+import tarfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
 from src.core.phases.manifest import save_integrity_manifest, upload_manifest_to_remote
 from src.core.phases.remote_writer import write_remote
+from src.security.encryption import EncryptingWriter
+from src.storage.base import long_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +83,7 @@ def mirror_backup(
             should_encrypt = i < len(flags) and flags[i]
             mirror_pw = encrypt_password if should_encrypt else ""
             logger.info(
-                "Mirror %d: should_encrypt=%s, flags=%s, "
-                "has_password=%s, is_remote=%s",
+                "Mirror %d: should_encrypt=%s, flags=%s, " "has_password=%s, is_remote=%s",
                 i + 1,
                 should_encrypt,
                 flags,
@@ -93,7 +95,22 @@ def mirror_backup(
                 backup_path is not None and backup_path != Path(".") and backup_path.is_dir()
             )
 
-            if config.is_remote():
+            # If primary backup is a .tar.wbenc, reuse it for encrypted mirrors
+            primary_is_tar_wbenc = (
+                backup_path is not None
+                and backup_path.is_file()
+                and backup_path.name.endswith(".tar.wbenc")
+            )
+
+            if config.is_remote() and should_encrypt and primary_is_tar_wbenc:
+                # Upload the existing .tar.wbenc directly (no rebuild)
+                _upload_existing_archive(
+                    backend,
+                    backup_path,
+                    backup_name,
+                    phase_log,
+                )
+            elif config.is_remote():
                 # Stream files directly to remote mirror
                 write_remote(
                     files,
@@ -102,6 +119,19 @@ def mirror_backup(
                     encrypt_password=mirror_pw,
                     events=events,
                     cancel_check=cancel_check,
+                    integrity_manifest=integrity_manifest if mirror_pw else None,
+                )
+            elif should_encrypt:
+                # Local mirror with encryption: create .tar.wbenc archive
+                _encrypt_local_mirror(
+                    files,
+                    backup_path,
+                    backend,
+                    backup_name,
+                    mirror_pw,
+                    phase_log,
+                    cancel_check,
+                    integrity_manifest=integrity_manifest,
                 )
             elif has_local_backup:
                 # Local mirror from local backup: copy file-by-file with progress
@@ -122,8 +152,9 @@ def mirror_backup(
                     cancel_check,
                 )
 
-            # Upload .wbverify to this mirror (never encrypted)
-            if integrity_manifest:
+            # Upload .wbverify to unencrypted mirrors only.
+            # Encrypted mirrors have the manifest embedded in .tar.wbenc.
+            if integrity_manifest and not should_encrypt:
                 _upload_mirror_manifest(
                     integrity_manifest,
                     config,
@@ -150,6 +181,116 @@ def mirror_backup(
         raise RuntimeError(f"Mirror upload failed: {details}")
 
     return results
+
+
+def _upload_existing_archive(
+    backend: object,
+    archive_path: Path,
+    backup_name: str,
+    phase_log: PhaseLogger,
+) -> None:
+    """Upload an existing .tar.wbenc file to a remote backend.
+
+    Reuses the primary backup's encrypted archive instead of
+    rebuilding from source files, avoiding race conditions with
+    files that may have changed since collection.
+
+    Args:
+        backend: Remote storage backend with upload_file().
+        archive_path: Local .tar.wbenc file to upload.
+        backup_name: Backup name for the remote path.
+        phase_log: Logger for progress events.
+    """
+    remote_path = f"{backup_name}.tar.wbenc"
+    size = archive_path.stat().st_size
+
+    # For S3: use path-based upload for reliable multipart
+    if hasattr(backend, "_get_client"):
+        from boto3.s3.transfer import TransferConfig
+
+        transfer_config = TransferConfig(
+            multipart_chunksize=16 * 1024 * 1024,
+        )
+        bw_limit = getattr(backend, "_bandwidth_limit_kbps", 0)
+        if bw_limit > 0:
+            transfer_config.max_bandwidth = bw_limit * 1024
+
+        client = backend._get_client()
+        key = backend._s3_key(remote_path)
+        client.upload_file(str(archive_path), backend._bucket, key, Config=transfer_config)
+    else:
+        if hasattr(backend, "connect"):
+            backend.connect()
+        try:
+            with open(archive_path, "rb") as f:
+                backend.upload_file(f, remote_path, size=size)
+        finally:
+            if hasattr(backend, "disconnect"):
+                backend.disconnect()
+
+    phase_log.info(f"Uploaded encrypted archive: {remote_path} ({size:,} bytes)")
+
+
+def _encrypt_local_mirror(
+    files: list[FileInfo],
+    backup_path: Path | None,
+    backend: object,
+    backup_name: str,
+    password: str,
+    phase_log: PhaseLogger,
+    cancel_check: Callable[[], None] | None = None,
+    integrity_manifest: dict | None = None,
+) -> None:
+    """Create an encrypted .tar.wbenc archive on a local mirror destination.
+
+    Streams source files into a tar, encrypts on the fly, writes directly
+    to the mirror destination.  If the primary backup was already encrypted
+    (.tar.wbenc file), copies it directly instead.
+
+    Args:
+        files: Original source files.
+        backup_path: Primary backup path (may be a .tar.wbenc file).
+        backend: Local storage backend.
+        backup_name: Backup name for the archive.
+        password: Encryption password.
+        phase_log: Logger for progress events.
+        cancel_check: Optional callable that raises CancelledError.
+        integrity_manifest: Optional manifest dict to embed in the archive.
+    """
+    from src.core.phases.local_writer import _add_manifest_to_tar
+
+    dest_dir = Path(backend._dest)
+    archive_path = dest_dir / f"{backup_name}.tar.wbenc"
+
+    # If primary is already a .tar.wbenc, just copy it
+    if backup_path and backup_path.is_file() and backup_path.name.endswith(".tar.wbenc"):
+        shutil.copy2(backup_path, archive_path)
+        phase_log.info(f"Copied encrypted archive to mirror: {archive_path.name}")
+        return
+
+    # Otherwise, encrypt source files into a new .tar.wbenc
+    total = len(files)
+    with open(archive_path, "wb") as out_file:
+        enc_writer = EncryptingWriter(out_file, password)
+        with tarfile.open(fileobj=enc_writer, mode="w|") as tar:
+            for i, file_info in enumerate(files):
+                if cancel_check is not None:
+                    cancel_check()
+                info = tarfile.TarInfo(name=file_info.relative_path)
+                info.size = file_info.size
+                with open(long_path_str(file_info.source_path), "rb") as f:
+                    tar.addfile(info, fileobj=f)
+                phase_log.progress(
+                    current=i + 1,
+                    total=total,
+                    filename=file_info.relative_path,
+                    phase="mirror_upload",
+                )
+            if integrity_manifest:
+                _add_manifest_to_tar(tar, integrity_manifest)
+        enc_writer.close()
+
+    phase_log.info(f"Encrypted mirror archive created: {archive_path.name}")
 
 
 def _copy_local_mirror(

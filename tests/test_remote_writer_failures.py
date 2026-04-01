@@ -5,7 +5,7 @@ progress callbacks, and edge cases.
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -60,50 +60,42 @@ def test_upload_plain_one_fails_raises_write_error(tmp_path):
     assert backend.upload_file.call_count == 2
 
 
-# -- Encrypted upload tests --
+# -- Encrypted tar upload tests --
 
 
-@patch("src.security.encryption.encrypt_file", return_value=True)
-def test_upload_encrypted_success(mock_enc, tmp_path):
-    """Encrypted upload: temp file created, encrypted, uploaded, temp cleaned."""
-    files = _make_files(tmp_path, count=1)
+def _drain_upload(fileobj, remote_path, size=0):
+    """Mock upload_file that drains the stream (required for pipe-based uploads)."""
+    while fileobj.read(65536):
+        pass
+
+
+def test_upload_encrypted_tar_success(tmp_path):
+    """Encrypted upload produces a single .tar.wbenc file via backend.upload_file."""
+    files = _make_files(tmp_path, count=3)
     backend = MagicMock()
+    backend.upload_file.side_effect = _drain_upload
 
-    write_remote(files, backend, "backup_01", encrypt_password="pass")
+    write_remote(files, backend, "backup_01", encrypt_password="password12345678")
 
-    mock_enc.assert_called_once()
     backend.upload_file.assert_called_once()
-    # Verify remote path has .wbenc extension
     remote_path = backend.upload_file.call_args[0][1]
-    assert remote_path.endswith(".wbenc")
+    assert remote_path == "backup_01.tar.wbenc"
 
 
-@patch("src.security.encryption.encrypt_file", return_value=False)
-def test_upload_encrypted_encryption_fails_raises(mock_enc, tmp_path):
-    """Encryption fails -- WriteError raised, temp file cleaned up."""
+def test_upload_encrypted_tar_upload_fails_raises(tmp_path):
+    """Upload failure during encrypted tar raises WriteError."""
     files = _make_files(tmp_path, count=1)
     backend = MagicMock()
 
-    with pytest.raises(WriteError, match="file_0.txt"):
-        write_remote(files, backend, "backup_01", encrypt_password="pass")
+    def _drain_then_fail(fileobj, remote_path, size=0):
+        while fileobj.read(65536):
+            pass
+        raise ConnectionError("timeout")
 
-    # upload_file should NOT have been called (encryption failed raises RuntimeError)
-    backend.upload_file.assert_not_called()
+    backend.upload_file.side_effect = _drain_then_fail
 
-
-@patch("src.security.encryption.encrypt_file", return_value=True)
-def test_upload_encrypted_upload_fails_raises(mock_enc, tmp_path):
-    """Upload fails after encryption -- WriteError raised, temp file cleaned up."""
-    files = _make_files(tmp_path, count=1)
-    backend = MagicMock()
-    backend.upload_file.side_effect = ConnectionError("timeout")
-
-    with pytest.raises(WriteError, match="file_0.txt") as exc_info:
-        write_remote(files, backend, "backup_01", encrypt_password="pass")
-
-    assert isinstance(exc_info.value.original, ConnectionError)
-    mock_enc.assert_called_once()
-    backend.upload_file.assert_called_once()
+    with pytest.raises(WriteError, match="encrypted-tar"):
+        write_remote(files, backend, "backup_01", encrypt_password="password12345678")
 
 
 # -- Progress and edge cases --

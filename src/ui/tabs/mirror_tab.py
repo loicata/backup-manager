@@ -304,13 +304,27 @@ class MirrorTab(ScrollableTab):
 
     def load_profile(self, profile: BackupProfile):
         """Load mirror config from profile."""
+        # Reset all fields before loading to avoid stale values
+        self.local_path_var.set("")
+        self.network_path_var.set("")
+        self.network_user_var.set("")
+        self.network_pass_var.set("")
+        if hasattr(self, "_sftp_vars"):
+            for key, var in self._sftp_vars.items():
+                var.set("22" if key == "sftp_port" else "")
+        if hasattr(self, "_s3_vars"):
+            self.s3_provider_var.set("aws")
+            for var in self._s3_vars.values():
+                var.set("")
+
         mirrors = profile.mirror_destinations
         if self._mirror_index < len(mirrors):
             m = mirrors[self._mirror_index]
             self.enabled_var.set(True)
             self.type_var.set(m.storage_type.value)
-            self.local_path_var.set(m.destination_path)
-            if m.storage_type == StorageType.NETWORK:
+            if m.storage_type == StorageType.LOCAL:
+                self.local_path_var.set(m.destination_path)
+            elif m.storage_type == StorageType.NETWORK:
                 self.network_path_var.set(m.destination_path)
                 self.network_user_var.set(getattr(m, "network_username", ""))
                 self.network_pass_var.set(getattr(m, "network_password", ""))

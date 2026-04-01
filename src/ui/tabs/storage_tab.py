@@ -307,8 +307,23 @@ class StorageTab(ScrollableTab):
         s = profile.storage
         self.type_var.set(s.storage_type.value)
 
-        self.local_path_var.set(s.destination_path)
-        if s.storage_type == StorageType.NETWORK:
+        # Reset all fields before loading to avoid stale values
+        self.local_path_var.set("")
+        self.network_path_var.set("")
+        self.network_user_var.set("")
+        self.network_pass_var.set("")
+        if hasattr(self, "_sftp_vars"):
+            for key, var in self._sftp_vars.items():
+                var.set("22" if key == "sftp_port" else "")
+        if hasattr(self, "_s3_vars"):
+            self.s3_provider_var.set("aws")
+            for var in self._s3_vars.values():
+                var.set("")
+
+        # Load values for the active storage type
+        if s.storage_type == StorageType.LOCAL:
+            self.local_path_var.set(s.destination_path)
+        elif s.storage_type == StorageType.NETWORK:
             self.network_path_var.set(s.destination_path)
             self.network_user_var.set(getattr(s, "network_username", ""))
             self.network_pass_var.set(getattr(s, "network_password", ""))

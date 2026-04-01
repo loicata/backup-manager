@@ -212,8 +212,8 @@ def main():
             # off-screen so the transient wizard Toplevel is visible.
             logger.info("No profiles — launching setup wizard...")
             root.geometry("1x1+-10000+-10000")
+            root.attributes("-alpha", 0)  # Fully transparent before showing
             root.deiconify()
-            root.attributes("-alpha", 0)  # Fully transparent root
             wizard = SetupWizard(root)
             profile = wizard.run()
             root.attributes("-alpha", 1)  # Restore opacity

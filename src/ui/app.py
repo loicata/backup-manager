@@ -546,6 +546,22 @@ class BackupManagerApp:
             self.config_manager.delete_profile(self._current_profile.id)
             self._current_profile = None
             self._load_profiles()
+            if self._current_profile is None:
+                self._clear_tabs()
+
+    def _clear_tabs(self):
+        """Reset all tabs to empty/default state after profile deletion."""
+        blank = BackupProfile()
+        self.tab_general.load_profile(blank)
+        self.tab_storage.load_profile(blank)
+        self.tab_mirror1.load_profile(blank)
+        self.tab_mirror2.load_profile(blank)
+        self.tab_retention.load_profile(blank)
+        self.tab_encryption.load_profile(blank)
+        self.tab_schedule.load_profile(blank)
+        self.tab_email.load_profile(blank)
+        self.tab_history.load_profile(blank)
+        self.tab_recovery.load_profile(blank)
 
     def _get_selected_profile(self):
         """Get the currently selected profile and its listbox index."""

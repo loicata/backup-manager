@@ -4,7 +4,6 @@ Verifies that S3 credentials are pre-filled from the profile when the
 user selects S3 in the retrieve section, just like SFTP fields are.
 """
 
-import tkinter as tk
 from unittest.mock import patch
 
 import pytest
@@ -16,15 +15,6 @@ from src.core.config import (
     StorageType,
 )
 from src.ui.tabs.recovery_tab import RecoveryTab
-
-
-@pytest.fixture(scope="module")
-def tk_root():
-    """Create a Tk root for the entire module, destroy after."""
-    root = tk.Tk()
-    root.withdraw()
-    yield root
-    root.destroy()
 
 
 @pytest.fixture()

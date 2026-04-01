@@ -9,6 +9,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+@pytest.fixture(scope="session")
+def tk_root():
+    """Single Tk instance shared across the entire test session.
+
+    Using session scope avoids Tcl corruption when multiple test
+    modules each create and destroy their own Tk root.
+    """
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.withdraw()
+    yield root
+    root.destroy()
+
+
 @pytest.fixture
 def tmp_config_dir(tmp_path):
     """Provide a temporary config directory for ConfigManager."""

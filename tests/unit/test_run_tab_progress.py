@@ -4,21 +4,10 @@ Verifies that the weighted progress bar correctly computes percentages
 when phases report progress at different times.
 """
 
-import tkinter as tk
-
 import pytest
 
 from src.core.events import EventBus
 from src.ui.tabs.run_tab import RunTab
-
-
-@pytest.fixture(scope="module")
-def tk_root():
-    """Create a Tk root for the entire module, destroy after."""
-    root = tk.Tk()
-    root.withdraw()
-    yield root
-    root.destroy()
 
 
 @pytest.fixture()

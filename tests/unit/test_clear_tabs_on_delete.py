@@ -8,7 +8,6 @@ Verifies that:
 - BackupManagerApp._clear_tabs resets all tabs to default state.
 """
 
-import tkinter as tk
 from unittest.mock import patch
 
 import pytest
@@ -16,15 +15,6 @@ import pytest
 from src.core.config import BackupProfile, StorageConfig, StorageType
 from src.ui.tabs.mirror_tab import MirrorTab
 from src.ui.tabs.storage_tab import StorageTab
-
-
-@pytest.fixture(scope="module")
-def tk_root():
-    """Create a Tk root for the entire module, destroy after."""
-    root = tk.Tk()
-    root.withdraw()
-    yield root
-    root.destroy()
 
 
 @pytest.fixture()

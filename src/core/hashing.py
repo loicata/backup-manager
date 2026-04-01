@@ -6,6 +6,7 @@ Replaces the duplicated compute_file_hash() in filter.py and manifest.py.
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -35,14 +36,19 @@ def compute_sha256(filepath: Path) -> str:
     if not isinstance(filepath, Path):
         raise TypeError(f"Expected Path, got {type(filepath).__name__}: {filepath!r}")
 
+    # Use string path with \\?\ prefix on Windows to bypass MAX_PATH
+    str_path = str(filepath)
+    if os.name == "nt" and not str_path.startswith("\\\\?\\"):
+        str_path = f"\\\\?\\{str_path}"
+
     if filepath.is_dir():
         raise ValueError(f"Expected a file, not a directory: {filepath}")
 
-    if not filepath.exists():
+    if not os.path.exists(str_path):
         raise FileNotFoundError(f"File not found: {filepath}")
 
     h = hashlib.sha256()
-    with open(filepath, "rb") as f:
+    with open(str_path, "rb") as f:
         while True:
             chunk = f.read(HASH_CHUNK_SIZE)
             if not chunk:

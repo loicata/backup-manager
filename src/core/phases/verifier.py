@@ -11,6 +11,7 @@ from pathlib import Path
 from src.core.events import EventBus
 from src.core.hashing import compute_sha256
 from src.core.phase_logger import PhaseLogger
+from src.storage.base import long_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ def verify_backup(
 
     for i, (rel_path, info) in enumerate(files.items()):
         expected_hash = info.get("hash", "")
-        file_path = backup_path / rel_path
+        file_path = Path(long_path_str(backup_path / rel_path))
 
         if not file_path.exists():
             errors.append(f"Missing: {rel_path}")

@@ -141,14 +141,38 @@ class BackupManagerApp:
             font=Fonts.small(),
         ).pack()
 
+        import webbrowser
+
         tk.Label(
             sidebar,
-            text="Free and open-source\nsoftware from loicata.com",
+            text="Free and open-source",
             bg=Colors.SIDEBAR_BG,
             fg=Colors.TEXT_DISABLED,
             font=(Fonts.FAMILY, 7),
-            justify="center",
         ).pack(pady=(Spacing.SMALL, 0))
+
+        foss_row = tk.Frame(sidebar, bg=Colors.SIDEBAR_BG)
+        foss_row.pack()
+        tk.Label(
+            foss_row,
+            text="software from ",
+            bg=Colors.SIDEBAR_BG,
+            fg=Colors.TEXT_DISABLED,
+            font=(Fonts.FAMILY, 7),
+        ).pack(side="left")
+        link = tk.Label(
+            foss_row,
+            text="loicata.com",
+            bg=Colors.SIDEBAR_BG,
+            fg="#5dade2",
+            font=(Fonts.FAMILY, 7, "underline"),
+            cursor="hand2",
+        )
+        link.pack(side="left")
+        link.bind(
+            "<Button-1>",
+            lambda e: webbrowser.open("https://loicata.com"),
+        )
 
         ttk.Separator(sidebar, orient="horizontal").pack(
             fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE

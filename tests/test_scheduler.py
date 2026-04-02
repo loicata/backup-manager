@@ -246,7 +246,7 @@ class TestScheduleJournalConcurrency:
 class TestStartupMissedBackup:
     """Tests for _check_startup_missed (cold boot missed backup detection)."""
 
-    def _make_profile(self, freq=ScheduleFrequency.DAILY, time="02:00"):
+    def _make_profile(self, freq=ScheduleFrequency.DAILY, time="00:00"):
         return BackupProfile(
             name="TestProfile",
             schedule=ScheduleConfig(enabled=True, frequency=freq, time=time),

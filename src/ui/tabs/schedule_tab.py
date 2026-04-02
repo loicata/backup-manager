@@ -94,7 +94,13 @@ class ScheduleTab(ScrollableTab):
         self.journal_tree.column("profile", width=120)
         self.journal_tree.column("status", width=80)
         self.journal_tree.column("detail", width=300)
-        self.journal_tree.pack(fill="both", expand=True)
+
+        journal_scroll = ttk.Scrollbar(
+            journal_frame, orient="vertical", command=self.journal_tree.yview
+        )
+        self.journal_tree.configure(yscrollcommand=journal_scroll.set)
+        self.journal_tree.pack(side="left", fill="both", expand=True)
+        journal_scroll.pack(side="right", fill="y")
 
         ttk.Button(journal_frame, text="Refresh", command=self._refresh_journal).pack(
             anchor="e", pady=(Spacing.SMALL, 0)

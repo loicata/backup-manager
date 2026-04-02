@@ -7,6 +7,7 @@ Uses PipelineContext to pass state between phases, and BackupResult
 for error accumulation.
 """
 
+import contextlib
 import logging
 import time
 from datetime import datetime
@@ -1029,6 +1030,10 @@ class BackupEngine:
             self._events,
             current_backup_name=ctx.backup_name,
         )
+
+        # Count remaining backups on primary after rotation
+        with contextlib.suppress(Exception):
+            ctx.result.backups_available = len(ctx.backend.list_backups())
 
         # Rotate mirrors with the same retention policy
         for i, config in enumerate(ctx.profile.mirror_destinations):

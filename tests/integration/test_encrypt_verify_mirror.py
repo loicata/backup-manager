@@ -153,7 +153,7 @@ class TestMirrorEncryption:
 
         assert stats.mirror_results is not None
         assert len(stats.mirror_results) == 1
-        _name, success, msg = stats.mirror_results[0]
+        _name, success, msg, *_ = stats.mirror_results[0]
         assert success, f"Mirror upload failed: {msg}"
 
         # Mirror should have a .tar.wbenc file

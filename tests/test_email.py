@@ -504,10 +504,11 @@ class TestBuildBackupHtml:
         html = _build_backup_html("Test", True, "OK", result=result)
         assert "2m 35s" in html
 
-    def test_contains_transfer_rate(self) -> None:
+    def test_no_transfer_rate(self) -> None:
+        """Transfer rate removed from email — should not appear."""
         result = self._make_result(bytes_source=100_000_000, duration_seconds=10)
         html = _build_backup_html("Test", True, "OK", result=result)
-        assert "MB/s" in html
+        assert "Transfer rate" not in html
 
     def test_contains_backup_type(self) -> None:
         result = self._make_result()
@@ -517,13 +518,14 @@ class TestBuildBackupHtml:
     def test_contains_mirror_results(self) -> None:
         result = self._make_result()
         result.mirror_results = [
-            ("Mirror 1", True, "SFTP OK"),
-            ("Mirror 2", False, "S3 timeout"),
+            ("Mirror 1", True, "OK", "SSH user@host:22"),
+            ("Mirror 2", False, "S3 timeout", "S3 my-bucket"),
         ]
         html = _build_backup_html("Test", True, "OK", result=result)
         assert "Mirror 1" in html
         assert "Mirror 2" in html
-        assert "SFTP OK" in html
+        assert "SSH user@host:22" in html
+        assert "S3 timeout" in html
 
     def test_contains_retention_info(self) -> None:
         result = self._make_result(rotated_count=3)
@@ -531,10 +533,12 @@ class TestBuildBackupHtml:
         assert "3" in html
         assert "deleted" in html.lower()
 
-    def test_contains_free_space(self) -> None:
-        result = self._make_result()
-        html = _build_backup_html("Test", True, "OK", result=result, free_space=45_200_000_000)
-        assert "42." in html or "45." in html  # ~45.2 GB or ~42.1 GB
+    def test_contains_backups_available(self) -> None:
+        result = self._make_result(rotated_count=1)
+        result.backups_available = 5
+        html = _build_backup_html("Test", True, "OK", result=result)
+        assert "Backups available" in html
+        assert "5" in html
 
     def test_contains_errors(self) -> None:
         result = self._make_result()

@@ -166,18 +166,18 @@ def mirror_backup(
                     phase_log,
                 )
 
-            results.append((mirror_name, True, "OK"))
+            results.append((mirror_name, True, "OK", mirror_desc))
             phase_log.info(f"{mirror_name} ({mirror_desc}): upload complete")
 
         except Exception as e:
             msg = f"{type(e).__name__}: {e}"
-            results.append((mirror_name, False, msg))
+            results.append((mirror_name, False, msg, mirror_desc))
             phase_log.error(f"{mirror_name}: upload failed — {msg}")
 
     # Any mirror failure = backup failure
-    failed = [name for name, ok, _ in results if not ok]
+    failed = [name for name, ok, *_ in results if not ok]
     if failed:
-        details = "; ".join(f"{name}: {msg}" for name, ok, msg in results if not ok)
+        details = "; ".join(f"{name}: {msg}" for name, ok, msg, *_ in results if not ok)
         raise RuntimeError(f"Mirror upload failed: {details}")
 
     return results

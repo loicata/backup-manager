@@ -39,8 +39,9 @@ class BackupResult:
         bytes_source: Total bytes of source files.
         duration_seconds: Wall-clock time for the backup run.
         backup_path: Path or remote name of the created backup.
-        mirror_results: List of (mirror_name, success, message) tuples.
+        mirror_results: List of (mirror_name, success, message, description) tuples.
         rotated_count: Number of old backups deleted by rotation.
+        backups_available: Number of backups on primary after rotation.
         phase_errors: Accumulated errors from all pipeline phases.
     """
 
@@ -50,8 +51,9 @@ class BackupResult:
     bytes_source: int = 0
     duration_seconds: float = 0.0
     backup_path: str = ""
-    mirror_results: list[tuple[str, bool, str]] = field(default_factory=list)
+    mirror_results: list[tuple[str, bool, str, str]] = field(default_factory=list)
     rotated_count: int = 0
+    backups_available: int = 0
     phase_errors: list[PhaseError] = field(default_factory=list)
     log_lines: list[str] = field(default_factory=list)
 

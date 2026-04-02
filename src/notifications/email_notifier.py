@@ -461,11 +461,6 @@ def _build_backup_html(
             )
         if result.bytes_source > 0:
             stat_rows += _ROW.format(label="Source size", value=_format_size(result.bytes_source))
-        if result.bytes_source > 0 and result.duration_seconds > 0:
-            stat_rows += _ROW.format(
-                label="Transfer rate",
-                value=f"~{_format_rate(result.bytes_source, result.duration_seconds)}",
-            )
         sections += _SECTION.format(title="Statistics", rows=stat_rows)
 
     # --- Destinations section ---
@@ -474,22 +469,24 @@ def _build_backup_html(
             label="Primary",
             value=f'<span style="color: {color};">{result.backup_path or "OK"}</span>',
         )
-        for name, ok, msg in result.mirror_results:
+        for mirror_tuple in result.mirror_results:
+            name, ok, msg = mirror_tuple[0], mirror_tuple[1], mirror_tuple[2]
+            desc = mirror_tuple[3] if len(mirror_tuple) > 3 else ""
             icon_color = "#27ae60" if ok else "#e74c3c"
             icon = "OK" if ok else "FAILED"
+            display = desc if desc and ok else msg
             dest_rows += _ROW.format(
                 label=name,
-                value=f'<span style="color: {icon_color};">{icon}</span> {msg}',
+                value=f'<span style="color: {icon_color};">{icon}</span> {display}',
             )
         sections += _SECTION.format(title="Destinations", rows=dest_rows)
 
     # --- Retention section ---
-    if result and (result.rotated_count > 0 or free_space is not None):
+    if result and (result.rotated_count > 0 or result.backups_available > 0):
         ret_rows = ""
-        if result.rotated_count > 0:
-            ret_rows += _ROW.format(label="Old backups deleted", value=str(result.rotated_count))
-        if free_space is not None:
-            ret_rows += _ROW.format(label="Disk space remaining", value=_format_size(free_space))
+        if result.backups_available > 0:
+            ret_rows += _ROW.format(label="Backups available", value=str(result.backups_available))
+        ret_rows += _ROW.format(label="Old backups deleted", value=str(result.rotated_count))
         sections += _SECTION.format(title="Retention", rows=ret_rows)
 
     # --- Errors section ---

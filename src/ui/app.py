@@ -847,6 +847,9 @@ class BackupManagerApp:
                     f"{stats.files_processed} files in {stats.duration_seconds:.0f}s",
                 )
 
+                # Save backup log to file
+                self._save_backup_log(profile, stats)
+
                 # Update last_backup
                 from datetime import datetime
 
@@ -864,8 +867,10 @@ class BackupManagerApp:
 
             except CancelledError:
                 self.tray.set_state(TrayState.IDLE)
+                result = self.engine._current_result if self.engine else None
+                if result:
+                    self._save_backup_log(profile, result)
                 if profile.email.enabled:
-                    result = self.engine._current_result if self.engine else None
                     self._send_backup_email(
                         profile,
                         False,
@@ -876,8 +881,10 @@ class BackupManagerApp:
             except Exception as e:
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 self.tray.notify("Backup failed", str(e))
+                result = self.engine._current_result if self.engine else None
+                if result:
+                    self._save_backup_log(profile, result)
                 if profile.email.enabled:
-                    result = self.engine._current_result if self.engine else None
                     self._send_backup_email(
                         profile,
                         False,
@@ -1013,6 +1020,24 @@ class BackupManagerApp:
         except Exception as e:
             logger.warning("Could not send backup report: %s", e)
 
+    def _save_backup_log(self, profile: BackupProfile, result) -> None:
+        """Write backup log lines to a timestamped file.
+
+        Args:
+            profile: Backup profile.
+            result: BackupResult with log_lines.
+        """
+        try:
+            log_path = self.config_manager.get_log_path(profile.id)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            header = f"Starting backup '{profile.name}'\n"
+            log_path.write_text(
+                header + "\n".join(result.log_lines),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning("Could not save backup log: %s", e)
+
     def _send_verify_email(self, profile, result):
         """Send verification report email if configured."""
         try:
@@ -1068,6 +1093,8 @@ class BackupManagerApp:
                 files_count=stats.files_processed,
                 duration_seconds=stats.duration_seconds,
             )
+
+            self._save_backup_log(profile, stats)
 
             if profile.email.enabled:
                 self._send_backup_email(

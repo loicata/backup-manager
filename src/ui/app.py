@@ -141,6 +141,15 @@ class BackupManagerApp:
             font=Fonts.small(),
         ).pack()
 
+        tk.Label(
+            sidebar,
+            text="Free and open-source\nsoftware from loicata.com",
+            bg=Colors.SIDEBAR_BG,
+            fg=Colors.TEXT_DISABLED,
+            font=(Fonts.FAMILY, 7),
+            justify="center",
+        ).pack(pady=(Spacing.SMALL, 0))
+
         ttk.Separator(sidebar, orient="horizontal").pack(
             fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE
         )

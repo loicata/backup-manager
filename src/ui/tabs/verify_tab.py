@@ -9,7 +9,7 @@ from src.ui.theme import Colors, Fonts, Spacing
 
 
 class VerifyTab(ttk.Frame):
-    """Integrity verification: results table, progress bar, log output.
+    """Integrity verification: results table and progress bar.
 
     Args:
         parent: Parent notebook widget.
@@ -21,7 +21,6 @@ class VerifyTab(ttk.Frame):
         self._events = events or EventBus()
         self._running = False
         self._build_ui()
-        self._subscribe_events()
 
     def _build_ui(self) -> None:
         # Header
@@ -75,7 +74,6 @@ class VerifyTab(ttk.Frame):
             results_frame,
             columns=columns,
             show="headings",
-            height=9,
         )
         self.results_tree.heading("destination", text="Destination")
         self.results_tree.heading("backup", text="Backup")
@@ -102,7 +100,7 @@ class VerifyTab(ttk.Frame):
 
         # Progress section
         progress_frame = ttk.LabelFrame(self, text="Progress", padding=Spacing.PAD)
-        progress_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
+        progress_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         self.progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
         self.progress_bar.pack(fill="x")
@@ -115,27 +113,6 @@ class VerifyTab(ttk.Frame):
 
         self.percent_label = ttk.Label(status_row, text="0%", foreground=Colors.TEXT_SECONDARY)
         self.percent_label.pack(side="right")
-
-        # Log output
-        log_frame = ttk.LabelFrame(self, text="Log", padding=Spacing.PAD)
-        log_frame.pack(fill="both", expand=True, padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
-
-        self.log_text = tk.Text(
-            log_frame,
-            bg=Colors.LOG_BG,
-            fg=Colors.LOG_TEXT,
-            font=Fonts.mono(),
-            wrap="word",
-            state="disabled",
-            height=9,
-        )
-        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=log_scroll.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
-        log_scroll.pack(side="right", fill="y")
-
-    def _subscribe_events(self) -> None:
-        """Subscribe to events — currently unused (updates via add_result)."""
 
     def set_running(self, running: bool) -> None:
         """Update button states based on running status.
@@ -207,25 +184,13 @@ class VerifyTab(ttk.Frame):
                 tags=(status,),
             )
             self.results_tree.yview_moveto(1.0)
-
             self.status_label.config(text=f"{destination}: {backup_name}")
-
-            # Append to log
-            self.log_text.config(state="normal")
-            self.log_text.insert(
-                "end", f"  [{status_display}] {destination}/{backup_name}: {message}\n"
-            )
-            self.log_text.see("end")
-            self.log_text.config(state="disabled")
 
     def clear(self) -> None:
         """Reset the tab for a new verification run."""
         with contextlib.suppress(tk.TclError):
             for item in self.results_tree.get_children():
                 self.results_tree.delete(item)
-            self.log_text.config(state="normal")
-            self.log_text.delete("1.0", "end")
-            self.log_text.config(state="disabled")
             self.progress_bar["value"] = 0
             self.percent_label.config(text="0%")
             self.status_label.config(text="Idle", foreground=Colors.TEXT_SECONDARY)

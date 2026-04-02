@@ -59,7 +59,7 @@ class HistoryTab(ScrollableTab):
             return
 
         log_files = sorted(
-            self._log_dir.glob("backup_*.log"),
+            (f for f in self._log_dir.glob("backup_*.log") if f.name != "backup_manager.log"),
             key=lambda f: f.stat().st_mtime,
             reverse=True,
         )

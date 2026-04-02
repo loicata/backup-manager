@@ -247,6 +247,113 @@ def _build_html(
     """
 
 
+def _build_verify_html(
+    profile_name: str,
+    success: bool,
+    summary: str,
+    results: list,
+) -> str:
+    """Build HTML email body for verification reports with a results table.
+
+    Args:
+        profile_name: Human-readable profile name.
+        success: Whether all verifications passed.
+        summary: Summary line (e.g. "6 OK, 0 error(s) in 4.4s").
+        results: List of BackupVerifyResult objects.
+
+    Returns:
+        Complete HTML string.
+    """
+    from src import __version__
+
+    color = "#27ae60" if success else "#e74c3c"
+    status = "VERIFICATION OK" if success else "VERIFICATION FAILED"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Status colors for table cells
+    status_colors = {
+        "ok": "#27ae60",
+        "corrupted": "#e74c3c",
+        "missing": "#f39c12",
+        "error": "#e74c3c",
+    }
+
+    # Build table rows from results
+    table_rows = ""
+    for bvr in results:
+        s_color = status_colors.get(bvr.status, "#666")
+        s_label = bvr.status.upper()
+        table_rows += f"""
+            <tr>
+                <td style="padding: 8px; border-bottom: 1px solid #eee;">{bvr.destination}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #eee;
+                           font-family: monospace; font-size: 12px;">{bvr.backup_name}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #eee;
+                           color: {s_color}; font-weight: bold;">{s_label}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #eee;
+                           color: #666; font-size: 12px;">{bvr.message}</td>
+            </tr>"""
+
+    return f"""
+    <html>
+    <body style="font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px;
+                 background: #f5f6fa;">
+        <table style="max-width: 750px; margin: 0 auto; background: white;
+                      border-radius: 8px; overflow: hidden;
+                      box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <tr>
+                <td style="background: {color}; color: white; padding: 16px 20px;
+                           font-size: 18px; font-weight: bold;">
+                    Backup Manager — {status}
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 16px 20px;">
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <tr>
+                            <td style="padding: 8px 0; color: #666;">Profile</td>
+                            <td style="padding: 8px 0; font-weight: bold;">{profile_name}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px 0; color: #666;">Time</td>
+                            <td style="padding: 8px 0;">{timestamp}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px 0; color: #666;">Summary</td>
+                            <td style="padding: 8px 0;">{summary}</td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 12px 20px; border-top: 1px solid #eee;">
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <tr style="background: #f8f9fa;">
+                            <th style="padding: 8px; text-align: left;
+                                       font-size: 12px; color: #333;">Destination</th>
+                            <th style="padding: 8px; text-align: left;
+                                       font-size: 12px; color: #333;">Backup</th>
+                            <th style="padding: 8px; text-align: left;
+                                       font-size: 12px; color: #333;">Status</th>
+                            <th style="padding: 8px; text-align: left;
+                                       font-size: 12px; color: #333;">Details</th>
+                        </tr>
+                        {table_rows}
+                    </table>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 12px 20px; color: #999; font-size: 11px;
+                           border-top: 1px solid #eee; text-align: center;">
+                    Backup Manager v{__version__}
+                </td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    """
+
+
 def _format_duration(seconds: float) -> str:
     """Format seconds into human-readable duration."""
     if seconds < 60:
@@ -472,21 +579,14 @@ def send_verify_report(
     else:
         subject = f"Backup Manager — Verification FAILED — {profile_name}"
 
-    # Build details from individual results
-    lines = []
-    for bvr in result.results:
-        icon = "OK" if bvr.status == "ok" else bvr.status.upper()
-        lines.append(f"[{icon}] {bvr.destination}: {bvr.backup_name} — {bvr.message}")
-    details = "\n".join(lines)
-
     summary = (
         f"{result.ok_count} OK, {result.error_count} error(s) " f"in {result.duration_seconds:.1f}s"
     )
 
-    html = _build_html(
+    html = _build_verify_html(
         profile_name,
         success=result.success,
         summary=summary,
-        details=details,
+        results=result.results,
     )
     return _send_email(config, subject, html)

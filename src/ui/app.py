@@ -1372,6 +1372,7 @@ class BackupManagerApp:
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.grab_set()
+        dlg.geometry("420x280")
 
         frame = ttk.Frame(dlg, padding=20)
         frame.pack(fill="both", expand=True)

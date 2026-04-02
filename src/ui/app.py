@@ -174,10 +174,6 @@ class BackupManagerApp:
             lambda e: webbrowser.open("https://loicata.com"),
         )
 
-        ttk.Separator(sidebar, orient="horizontal").pack(
-            fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE
-        )
-
         # Profile listbox with section headers
         self.profile_listbox = tk.Listbox(
             sidebar,

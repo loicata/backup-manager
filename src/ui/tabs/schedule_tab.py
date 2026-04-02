@@ -5,11 +5,10 @@ import tkinter as tk
 from tkinter import ttk
 
 from src.core.config import BackupProfile, ScheduleConfig, ScheduleFrequency
-from src.ui.tabs import ScrollableTab
 from src.ui.theme import Spacing
 
 
-class ScheduleTab(ScrollableTab):
+class ScheduleTab(ttk.Frame):
     """Scheduling configuration and journal display."""
 
     def __init__(self, parent, scheduler=None, **kwargs):
@@ -21,13 +20,13 @@ class ScheduleTab(ScrollableTab):
         # Enable scheduling
         self.enabled_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
-            self.inner,
+            self,
             text="Enable automatic scheduling",
             variable=self.enabled_var,
             command=self._toggle_enabled,
         ).pack(anchor="w", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
-        self._content = ttk.Frame(self.inner)
+        self._content = ttk.Frame(self)
         self._content.pack(fill="both", expand=True)
 
         # Frequency

@@ -5,11 +5,10 @@ from tkinter import ttk
 
 from src.core.config import BackupProfile, EncryptionConfig
 from src.security.encryption import _has_dpapi, evaluate_password
-from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 
 
-class EncryptionTab(ScrollableTab):
+class EncryptionTab(ttk.Frame):
     """Encryption configuration with independent per-destination checkboxes.
 
     UI logic:
@@ -26,7 +25,7 @@ class EncryptionTab(ScrollableTab):
 
     def _build_ui(self):
         # Encryption mode
-        mode_frame = ttk.LabelFrame(self.inner, text="Encryption mode", padding=Spacing.PAD)
+        mode_frame = ttk.LabelFrame(self, text="Encryption mode", padding=Spacing.PAD)
         mode_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
         # No encryption checkbox
@@ -119,7 +118,7 @@ class EncryptionTab(ScrollableTab):
         ).pack(fill="x")
 
         # Password frame (shown/hidden based on encryption selection)
-        self._pw_frame = ttk.LabelFrame(self.inner, text="Encryption password", padding=Spacing.PAD)
+        self._pw_frame = ttk.LabelFrame(self, text="Encryption password", padding=Spacing.PAD)
 
         ttk.Label(self._pw_frame, text="Password:").pack(anchor="w")
         self.password_var = tk.StringVar()

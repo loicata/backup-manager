@@ -4,11 +4,10 @@ import os
 from pathlib import Path
 from tkinter import ttk
 
-from src.ui.tabs import ScrollableTab
 from src.ui.theme import Spacing
 
 
-class HistoryTab(ScrollableTab):
+class HistoryTab(ttk.Frame):
     """Browse and view backup execution logs."""
 
     def __init__(self, parent, log_dir: Path = None, **kwargs):
@@ -19,7 +18,7 @@ class HistoryTab(ScrollableTab):
 
     def _build_ui(self):
         # Log list
-        list_frame = ttk.LabelFrame(self.inner, text="Backup logs", padding=Spacing.PAD)
+        list_frame = ttk.LabelFrame(self, text="Backup logs", padding=Spacing.PAD)
         list_frame.pack(fill="both", expand=True, padx=Spacing.LARGE, pady=Spacing.LARGE)
 
         self.log_tree = ttk.Treeview(
@@ -41,7 +40,7 @@ class HistoryTab(ScrollableTab):
         scrollbar.pack(side="right", fill="y")
 
         # Buttons
-        btn_frame = ttk.Frame(self.inner)
+        btn_frame = ttk.Frame(self)
         btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
         ttk.Button(btn_frame, text="Refresh", command=self.refresh).pack(side="left")

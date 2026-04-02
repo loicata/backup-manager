@@ -4,11 +4,10 @@ import tkinter as tk
 from tkinter import ttk
 
 from src.core.config import BackupProfile, RetentionConfig, RetentionPolicy
-from src.ui.tabs import ScrollableTab
 from src.ui.theme import Spacing
 
 
-class RetentionTab(ScrollableTab):
+class RetentionTab(ttk.Frame):
     """GFS (Grandfather-Father-Son) retention policy configuration."""
 
     def __init__(self, parent, **kwargs):
@@ -17,7 +16,7 @@ class RetentionTab(ScrollableTab):
 
     def _build_ui(self):
         frame = ttk.LabelFrame(
-            self.inner,
+            self,
             text="GFS Retention (Grandfather-Father-Son)",
             padding=Spacing.PAD,
         )

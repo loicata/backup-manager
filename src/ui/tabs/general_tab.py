@@ -92,7 +92,7 @@ class GeneralTab(ScrollableTab):
             tree_frame,
             columns=("path", "type"),
             show="headings",
-            height=8,
+            height=7,
         )
         self.sources_tree.heading("path", text="Path")
         self.sources_tree.heading("type", text="Type")

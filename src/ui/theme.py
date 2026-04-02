@@ -211,9 +211,21 @@ def setup_theme(root: tk.Tk) -> ttk.Style:
     style.configure("TButton", font=Fonts.normal())
     style.configure("TCheckbutton", font=Fonts.normal())
     style.configure("TRadiobutton", font=Fonts.normal())
-    style.configure("TEntry", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6))
-    style.configure("TCombobox", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6))
-    style.configure("TSpinbox", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6))
+    style.configure(
+        "TEntry", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6),
+        bordercolor=Colors.INPUT_BORDER, lightcolor=Colors.INPUT_BORDER,
+        darkcolor=Colors.INPUT_BORDER,
+    )
+    style.configure(
+        "TCombobox", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6),
+        bordercolor=Colors.INPUT_BORDER, lightcolor=Colors.INPUT_BORDER,
+        darkcolor=Colors.INPUT_BORDER,
+    )
+    style.configure(
+        "TSpinbox", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6),
+        bordercolor=Colors.INPUT_BORDER, lightcolor=Colors.INPUT_BORDER,
+        darkcolor=Colors.INPUT_BORDER,
+    )
 
     # Combobox dropdown listbox font
     root.option_add("*TCombobox*Listbox.font", Fonts.normal())

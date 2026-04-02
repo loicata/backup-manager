@@ -79,7 +79,7 @@ def _build_wxs(version: str) -> str:
            Name="Backup Manager"
            Language="1033"
            Version="{version}.0"
-           Manufacturer="Loic Ader loicata.com"
+           Manufacturer="Loic Ader — https://loicata.com"
            UpgradeCode="{UPGRADE_CODE}">
 
     <Package InstallerVersion="500"
@@ -91,6 +91,10 @@ def _build_wxs(version: str) -> str:
                   AllowSameVersionUpgrades="yes" />
 
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://loicata.com" />
+    <Property Id="ARPHELPLINK" Value="https://loicata.com" />
+
     {license_line}
     {icon_lines}
 

@@ -1309,11 +1309,57 @@ class BackupManagerApp:
         messagebox.showinfo("Modules", msg)
 
     def _show_about(self):
-        messagebox.showinfo(
-            "About",
-            f"{APP_TITLE} v{__version__}\n\n"
-            f"Copyright (c) 2026 Loic Ader loicata.com\n"
-            f"GNU General Public License v3.0\n\n"
-            f"Backup management system with encryption,\n"
-            f"scheduling, and multi-destination support.",
+        import webbrowser
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("About")
+        dlg.resizable(False, False)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        frame = ttk.Frame(dlg, padding=20)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frame,
+            text=f"{APP_TITLE} v{__version__}",
+            font=Fonts.title(),
+        ).pack(anchor="w")
+
+        ttk.Label(
+            frame,
+            text="\nCopyright (c) 2026 Loic Ader",
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w")
+
+        link = ttk.Label(
+            frame,
+            text="loicata.com",
+            foreground="#1a73e8",
+            cursor="hand2",
+            font=Fonts.default(),
         )
+        link.pack(anchor="w")
+        link.bind(
+            "<Button-1>",
+            lambda e: webbrowser.open("https://loicata.com"),
+        )
+
+        ttk.Label(
+            frame,
+            text="\nGNU General Public License v3.0\n",
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w")
+
+        ttk.Label(
+            frame,
+            text="Backup management system with encryption,\n"
+            "scheduling, and multi-destination support.",
+        ).pack(anchor="w")
+
+        ttk.Button(
+            frame,
+            text="OK",
+            style="Accent.TButton",
+            command=dlg.destroy,
+        ).pack(side="right", pady=(15, 0))

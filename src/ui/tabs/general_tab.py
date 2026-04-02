@@ -54,8 +54,8 @@ class GeneralTab(ScrollableTab):
 
         self._diff_info_label = ttk.Label(
             self._diff_info_frame,
-            text="Differential applies to daily backup only.\n"
-            "Weekly and monthly retention always use full backup.",
+            text="Differential applies to daily backup only. "
+            "Weekly and monthly retention always use full backups.",
             foreground=Colors.TEXT_SECONDARY,
             wraplength=400,
             justify="left",

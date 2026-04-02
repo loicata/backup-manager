@@ -978,6 +978,54 @@ class SFTPStorage(StorageBackend):
             if not is_persistent:
                 transport.close()
 
+    def compute_remote_sha256(self, remote_name: str) -> str | None:
+        """Compute SHA-256 hash of a single remote file via exec channel.
+
+        Runs ``sha256sum`` on the server to avoid downloading the file.
+
+        Args:
+            remote_name: Name of the file (relative to remote_path).
+
+        Returns:
+            Hex SHA-256 digest, or None if the command fails.
+        """
+        full_path = self._join_remote(remote_name)
+        transport = self._get_transport()
+        is_persistent = transport is self._persistent_transport
+
+        try:
+            cmd = f"sha256sum {_shell_escape(full_path)}"
+            channel = transport.open_session()
+            try:
+                channel.settimeout(600)
+                channel.exec_command(cmd)  # nosec B601
+                output = b""
+                while True:
+                    chunk = channel.recv(65536)
+                    if not chunk:
+                        break
+                    output += chunk
+                exit_status = channel.recv_exit_status()
+            finally:
+                channel.close()
+
+            if exit_status != 0:
+                logger.warning("sha256sum failed for %s (exit %d)", remote_name, exit_status)
+                return None
+
+            line = output.decode("utf-8", errors="replace").strip()
+            parts = line.split("  ", 1)
+            if len(parts) == 2:
+                return parts[0].strip()
+            return None
+
+        except Exception as e:
+            logger.warning("compute_remote_sha256 failed: %s", e)
+            return None
+        finally:
+            if not is_persistent:
+                transport.close()
+
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
         """Download a backup from SFTP to a local directory.
 

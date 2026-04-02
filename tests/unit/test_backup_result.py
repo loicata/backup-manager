@@ -124,13 +124,12 @@ class TestBackupResultErrorSummary:
         assert len(result.error_summary()) > 0
 
 
-class TestBackupResultBackwardCompat:
-    """Verify backward compatibility with former BackupStats usage."""
+class TestBackupResultFields:
+    """Verify all expected fields exist on BackupResult."""
 
-    def test_all_former_backstats_fields_exist(self) -> None:
-        """All fields from the old BackupStats are present."""
+    def test_all_expected_fields_exist(self) -> None:
+        """All public fields are accessible."""
         result = BackupResult()
-        # These were all fields of BackupStats
         _ = result.files_found
         _ = result.files_processed
         _ = result.files_skipped

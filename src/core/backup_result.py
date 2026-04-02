@@ -1,11 +1,8 @@
 """Backup result with error accumulation.
 
-Replaces BackupStats with richer error tracking. Each phase can
-record individual file errors via add_error(), and the final result
-provides a summary for the user and email notifications.
-
-The 'errors' property returns an int for backward compatibility
-with code that used BackupStats.errors as an integer count.
+Each phase can record individual file errors via add_error(),
+and the final result provides a summary for the user and email
+notifications.
 """
 
 import logging
@@ -35,10 +32,6 @@ class PhaseError:
 class BackupResult:
     """Aggregated result of a backup run.
 
-    All fields from the former BackupStats are preserved for
-    backward compatibility. The new phase_errors list provides
-    detailed error tracking with per-file granularity.
-
     Args:
         files_found: Total files found by the collector.
         files_processed: Files actually written to the destination.
@@ -64,11 +57,7 @@ class BackupResult:
 
     @property
     def errors(self) -> int:
-        """Total error count.
-
-        Returns an int for backward compatibility with code that
-        used BackupStats.errors as an integer counter.
-        """
+        """Total error count."""
         return len(self.phase_errors)
 
     @property

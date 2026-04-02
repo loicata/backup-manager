@@ -1,8 +1,8 @@
 [project]
 name = "backup-manager"
-version = "3.2.0"
+version = "3.2.2"
 description = "Backup management system with encryption, scheduling, and multi-destination support"
-authors = [{name = "Loic Ader"}]
+authors = [{name = "Loic Ader loicata.com"}]
 license = {text = "GPL-3.0-or-later"}
 requires-python = ">=3.11"
 

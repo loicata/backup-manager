@@ -1,10 +1,5 @@
 """Backup Manager v3 — Backup management system."""
 
-import importlib.metadata as _meta
+__version__ = "3.2.2"
 
-try:
-    __version__ = _meta.metadata("backup-manager")["Version"]
-except _meta.PackageNotFoundError:
-    __version__ = "3.2.0"  # Fallback for dev/PyInstaller builds
-
-__author__ = "Loic Ader"
+__author__ = "Loic Ader loicata.com"

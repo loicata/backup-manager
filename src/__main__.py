@@ -13,6 +13,8 @@ import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 
 def _setup_dpi_awareness():
     """Enable high-DPI awareness on Windows."""
@@ -77,7 +79,7 @@ def _set_window_icon(root):
             pass  # PIL not available, iconbitmap alone is fine
 
     except Exception:
-        pass
+        logger.debug("Could not set window icon", exc_info=True)
 
 
 _mutex_handle = None
@@ -113,7 +115,8 @@ def _acquire_single_instance() -> bool:
             return False
         return True
     except Exception:
-        return True  # If mutex fails, allow running
+        logger.debug("Mutex acquisition failed, allowing startup", exc_info=True)
+        return True
 
 
 def _release_single_instance() -> None:
@@ -125,7 +128,7 @@ def _release_single_instance() -> None:
             kernel32.ReleaseMutex(_mutex_handle)
             kernel32.CloseHandle(_mutex_handle)
         except Exception:
-            pass
+            logger.debug("Could not release mutex", exc_info=True)
         _mutex_handle = None
 
 
@@ -282,7 +285,7 @@ def main():
                 f"An unexpected error occurred:\n\n{e}\n\n" f"Details saved to crash.log",
             )
         except Exception:
-            pass
+            logger.debug("Could not show error dialog", exc_info=True)
 
     finally:
         # Release mutex and force-kill any lingering daemon threads

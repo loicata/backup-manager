@@ -1,4 +1,4 @@
-# Backup Manager v3.2.0
+# Backup Manager v3.2.2
 
 A production-grade, security-focused Windows backup application built for personal and small-business use. Backup Manager lets you manage multiple backup profiles, replicate data across local drives, network shares, SFTP servers, and S3-compatible cloud storage, while enforcing end-to-end encryption, automated scheduling, and Grandfather-Father-Son retention policies.
 
@@ -135,6 +135,8 @@ Encryption passwords are stored using a layered protection scheme:
 - Encryption keys and passwords are held in `bytearray` buffers.
 - Buffers are explicitly **zeroed after use** to minimize exposure in memory.
 - Python's garbage collector cannot be fully controlled, but explicit zeroing reduces the window of exposure.
+
+> **Limitation:** Memory clearing is best-effort and relies on CPython implementation details. On alternative interpreters (PyPy, GraalPy) or under memory pressure, sensitive data may remain in process memory after zeroing. This is an inherent constraint of managed-memory languages. For threat models requiring guaranteed memory erasure, a native-code encryption layer would be needed.
 
 ### Integrity verification pipeline
 
@@ -396,7 +398,7 @@ backup-manager/
 
 ## License
 
-[GNU General Public License v3.0](LICENSE) — Copyright (c) 2026 Loic Ader
+[GNU General Public License v3.0](LICENSE) — Copyright (c) 2026 Loic Ader loicata.com
 
 ---
 

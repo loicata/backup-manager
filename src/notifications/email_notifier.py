@@ -46,6 +46,9 @@ def send_backup_report(
     summary: str,
     details: str = "",
     cancelled: bool = False,
+    result=None,
+    backup_type: str = "",
+    free_space: int | None = None,
 ) -> tuple[bool, str]:
     """Send backup report email.
 
@@ -54,8 +57,11 @@ def send_backup_report(
         profile_name: Name of the backup profile.
         success: Whether the backup succeeded.
         summary: Short summary text.
-        details: Optional detailed text.
+        details: Optional detailed text (log lines).
         cancelled: Whether the backup was cancelled by the user.
+        result: Optional BackupResult with full metrics.
+        backup_type: "FULL" or "DIFFERENTIAL".
+        free_space: Remaining disk space in bytes (primary destination).
 
     Returns:
         (sent, message) tuple.
@@ -73,17 +79,30 @@ def send_backup_report(
         return False, "Failure notification disabled"
 
     if cancelled:
-        status_emoji = "⚠️"
+        status_emoji = "\u26a0\ufe0f"
         status_text = "CANCELLED"
     elif success:
-        status_emoji = "✅"
+        status_emoji = "\u2705"
         status_text = "SUCCESS"
     else:
-        status_emoji = "❌"
+        status_emoji = "\u274c"
         status_text = "FAILED"
 
-    subject = f"{status_emoji} Backup Manager — {profile_name} — {status_text}"
-    html_body = _build_html(profile_name, success, summary, details, cancelled=cancelled)
+    subject = f"{status_emoji} Backup Manager \u2014 {profile_name} \u2014 {status_text}"
+
+    if result is not None:
+        html_body = _build_backup_html(
+            profile_name,
+            success,
+            summary,
+            details,
+            cancelled=cancelled,
+            result=result,
+            backup_type=backup_type,
+            free_space=free_space,
+        )
+    else:
+        html_body = _build_html(profile_name, success, summary, details, cancelled=cancelled)
 
     return _send_email(config, subject, html_body)
 
@@ -219,10 +238,255 @@ def _build_html(
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
                            border-top: 1px solid #eee; text-align: center;">
-                    Backup Manager v3.2.0
+                    Backup Manager v3.2.2
                 </td>
             </tr>
         </table>
     </body>
     </html>
     """
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds into human-readable duration."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours = int(minutes // 60)
+    mins = int(minutes % 60)
+    return f"{hours}h {mins:02d}m"
+
+
+def _format_size(size_bytes: int) -> str:
+    """Format bytes into human-readable size."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    if size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
+def _format_rate(size_bytes: int, seconds: float) -> str:
+    """Format transfer rate."""
+    if seconds <= 0:
+        return "—"
+    rate = size_bytes / seconds
+    if rate < 1024 * 1024:
+        return f"{rate / 1024:.1f} KB/s"
+    return f"{rate / (1024 * 1024):.1f} MB/s"
+
+
+_ROW = """<tr>
+    <td style="padding: 6px 0; color: #666; width: 160px;">{label}</td>
+    <td style="padding: 6px 0;">{value}</td>
+</tr>"""
+
+_SECTION = """<tr>
+    <td style="padding: 12px 20px; border-top: 1px solid #eee;">
+        <strong style="color: #333; font-size: 13px;">{title}</strong>
+        <table style="width: 100%; border-collapse: collapse; margin-top: 6px;">
+            {rows}
+        </table>
+    </td>
+</tr>"""
+
+
+def _build_backup_html(
+    profile_name: str,
+    success: bool,
+    summary: str,
+    details: str = "",
+    cancelled: bool = False,
+    result=None,
+    backup_type: str = "",
+    free_space: int | None = None,
+) -> str:
+    """Build enriched HTML email body with full backup metrics.
+
+    Args:
+        profile_name: Profile name.
+        success: Whether backup succeeded.
+        summary: Short summary text.
+        details: Log lines.
+        cancelled: Whether cancelled.
+        result: BackupResult with full metrics.
+        backup_type: "FULL" or "DIFFERENTIAL".
+        free_space: Remaining disk space in bytes.
+
+    Returns:
+        HTML string.
+    """
+    if cancelled:
+        color = "#f39c12"
+        status = "CANCELLED"
+    elif success:
+        color = "#27ae60"
+        status = "SUCCESS"
+    else:
+        color = "#e74c3c"
+        status = "FAILED"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # --- Overview section ---
+    overview_rows = _ROW.format(label="Profile", value=f"<strong>{profile_name}</strong>")
+    if backup_type:
+        overview_rows += _ROW.format(label="Type", value=backup_type)
+    overview_rows += _ROW.format(label="Time", value=timestamp)
+    if result and result.duration_seconds > 0:
+        overview_rows += _ROW.format(
+            label="Duration", value=_format_duration(result.duration_seconds)
+        )
+
+    sections = _SECTION.format(title="Overview", rows=overview_rows)
+
+    # --- Statistics section ---
+    if result:
+        stat_rows = _ROW.format(label="Files found", value=f"{result.files_found:,}")
+        stat_rows += _ROW.format(label="Files processed", value=f"{result.files_processed:,}")
+        if result.files_skipped > 0:
+            stat_rows += _ROW.format(
+                label="Files skipped", value=f"{result.files_skipped:,} (unchanged)"
+            )
+        if result.bytes_source > 0:
+            stat_rows += _ROW.format(label="Source size", value=_format_size(result.bytes_source))
+        if result.bytes_source > 0 and result.duration_seconds > 0:
+            stat_rows += _ROW.format(
+                label="Transfer rate",
+                value=f"~{_format_rate(result.bytes_source, result.duration_seconds)}",
+            )
+        sections += _SECTION.format(title="Statistics", rows=stat_rows)
+
+    # --- Destinations section ---
+    if result and result.mirror_results:
+        dest_rows = _ROW.format(
+            label="Primary",
+            value=f'<span style="color: {color};">{result.backup_path or "OK"}</span>',
+        )
+        for name, ok, msg in result.mirror_results:
+            icon_color = "#27ae60" if ok else "#e74c3c"
+            icon = "OK" if ok else "FAILED"
+            dest_rows += _ROW.format(
+                label=name,
+                value=f'<span style="color: {icon_color};">{icon}</span> {msg}',
+            )
+        sections += _SECTION.format(title="Destinations", rows=dest_rows)
+
+    # --- Retention section ---
+    if result and (result.rotated_count > 0 or free_space is not None):
+        ret_rows = ""
+        if result.rotated_count > 0:
+            ret_rows += _ROW.format(label="Old backups deleted", value=str(result.rotated_count))
+        if free_space is not None:
+            ret_rows += _ROW.format(label="Disk space remaining", value=_format_size(free_space))
+        sections += _SECTION.format(title="Retention", rows=ret_rows)
+
+    # --- Errors section ---
+    if result and result.phase_errors:
+        error_lines = []
+        for err in result.phase_errors[:20]:
+            if err.file_path:
+                error_lines.append(f"[{err.phase}] {err.file_path}: {err.message}")
+            else:
+                error_lines.append(f"[{err.phase}] {err.message}")
+        remaining = len(result.phase_errors) - 20
+        if remaining > 0:
+            error_lines.append(f"... and {remaining} more error(s)")
+        error_text = "\n".join(error_lines)
+        sections += f"""<tr>
+    <td style="padding: 12px 20px; border-top: 1px solid #eee;">
+        <strong style="color: #e74c3c; font-size: 13px;">Errors ({len(result.phase_errors)})</strong>
+        <pre style="background: #fdf2f2; padding: 10px; border-radius: 4px;
+                    font-size: 12px; overflow-x: auto; color: #c0392b;
+                    margin-top: 6px;">{error_text}</pre>
+    </td>
+</tr>"""
+
+    # --- Log section ---
+    log_section = ""
+    if details:
+        log_section = f"""<tr>
+    <td style="padding: 12px 20px; border-top: 1px solid #eee;">
+        <strong style="color: #333; font-size: 13px;">Log</strong>
+        <pre style="background: #f8f9fa; padding: 10px; border-radius: 4px;
+                    font-size: 11px; overflow-x: auto; max-height: 400px;
+                    overflow-y: auto; margin-top: 6px;">{details}</pre>
+    </td>
+</tr>"""
+
+    return f"""
+    <html>
+    <body style="font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px;
+                 background: #f5f6fa;">
+        <table style="max-width: 650px; margin: 0 auto; background: white;
+                      border-radius: 8px; overflow: hidden;
+                      box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <tr>
+                <td style="background: {color}; color: white; padding: 16px 20px;
+                           font-size: 18px; font-weight: bold;">
+                    Backup Manager \u2014 {status}
+                </td>
+            </tr>
+            {sections}
+            {log_section}
+            <tr>
+                <td style="padding: 12px 20px; color: #999; font-size: 11px;
+                           border-top: 1px solid #eee; text-align: center;">
+                    Backup Manager v3.2.2
+                </td>
+            </tr>
+        </table>
+    </body>
+    </html>
+    """
+
+
+def send_verify_report(
+    config: EmailConfig,
+    profile_name: str,
+    result,
+) -> tuple[bool, str]:
+    """Send integrity verification report email.
+
+    Args:
+        config: Email configuration.
+        profile_name: Human-readable profile name.
+        result: VerifyAllResult with ok_count, error_count, results.
+
+    Returns:
+        (success, message) tuple.
+    """
+    if not config.enabled:
+        return False, "Email notifications disabled"
+
+    # Only send if errors detected or send_on_success is enabled
+    if result.success and not config.send_on_success:
+        return False, "No errors and success notifications disabled"
+
+    if result.success:
+        subject = f"Backup Manager — Verification OK — {profile_name}"
+    else:
+        subject = f"Backup Manager — Verification FAILED — {profile_name}"
+
+    # Build details from individual results
+    lines = []
+    for bvr in result.results:
+        icon = "OK" if bvr.status == "ok" else bvr.status.upper()
+        lines.append(f"[{icon}] {bvr.destination}: {bvr.backup_name} — {bvr.message}")
+    details = "\n".join(lines)
+
+    summary = (
+        f"{result.ok_count} OK, {result.error_count} error(s) " f"in {result.duration_seconds:.1f}s"
+    )
+
+    html = _build_html(
+        profile_name,
+        success=result.success,
+        summary=summary,
+        details=details,
+    )
+    return _send_email(config, subject, html)

@@ -100,6 +100,32 @@ class ScheduleTab(ScrollableTab):
             anchor="e", pady=(Spacing.SMALL, 0)
         )
 
+        # Periodic integrity verification
+        verify_frame = ttk.LabelFrame(
+            self._content, text="Integrity verification", padding=Spacing.PAD
+        )
+        verify_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
+
+        self.verify_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            verify_frame,
+            text="Enable periodic integrity verification",
+            variable=self.verify_enabled_var,
+        ).pack(anchor="w")
+
+        interval_row = ttk.Frame(verify_frame)
+        interval_row.pack(fill="x", pady=(Spacing.SMALL, 0))
+        ttk.Label(interval_row, text="Verify every").pack(side="left")
+        self.verify_interval_var = tk.IntVar(value=7)
+        ttk.Spinbox(
+            interval_row,
+            textvariable=self.verify_interval_var,
+            from_=1,
+            to=90,
+            width=5,
+        ).pack(side="left", padx=Spacing.SMALL)
+        ttk.Label(interval_row, text="days").pack(side="left")
+
         self._toggle_enabled()
 
     def _toggle_enabled(self):
@@ -149,6 +175,8 @@ class ScheduleTab(ScrollableTab):
         self.time_var.set(s.time)
         self.dow_var.set(self._int_to_day_name(s.day_of_week))
         self.dom_var.set(s.day_of_month)
+        self.verify_enabled_var.set(s.verify_enabled)
+        self.verify_interval_var.set(s.verify_interval_days)
         self._toggle_enabled()
 
     def collect_config(self) -> dict:
@@ -171,5 +199,7 @@ class ScheduleTab(ScrollableTab):
                 day_of_week=self._day_name_to_int(self.dow_var.get()),
                 day_of_month=self.dom_var.get(),
                 enabled=self.enabled_var.get(),
+                verify_enabled=self.verify_enabled_var.get(),
+                verify_interval_days=self.verify_interval_var.get(),
             ),
         }

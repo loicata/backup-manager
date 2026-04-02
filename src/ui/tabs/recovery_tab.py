@@ -697,10 +697,7 @@ class RecoveryTab(ScrollableTab):
 
             # Plain directory: copy files (skip internal .wbverify manifests)
             copied = 0
-            files = [
-                f for f in src.rglob("*")
-                if f.is_file() and not f.name.endswith(".wbverify")
-            ]
+            files = [f for f in src.rglob("*") if f.is_file() and not f.name.endswith(".wbverify")]
             if not files:
                 self.after(
                     0,
@@ -767,7 +764,7 @@ class RecoveryTab(ScrollableTab):
                             strip_prefix = member.name.split("/")[0] + "/"
                         name = member.name
                         if strip_prefix and name.startswith(strip_prefix):
-                            name = name[len(strip_prefix):]
+                            name = name[len(strip_prefix) :]
                         if not name:
                             continue
                         if member.isdir():

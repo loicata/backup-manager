@@ -139,7 +139,7 @@ class BackupTray:
                 if img:
                     self._icon.icon = img
             except Exception:
-                pass
+                logger.debug("Could not update tray icon", exc_info=True)
 
     def notify(self, title: str, message: str) -> None:
         """Show a system notification."""

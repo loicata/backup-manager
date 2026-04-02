@@ -104,7 +104,7 @@ class Spacing:
 # --- App constants ---
 
 APP_TITLE = "Backup Manager"
-APP_VERSION = "3.2.0"
+APP_VERSION = "3.2.2"
 WINDOW_SIZE = "1400x900"
 MIN_SIZE = (1280, 830)
 
@@ -199,15 +199,11 @@ def setup_theme(root: tk.Tk) -> ttk.Style:
     # Override Tk named fonts so all widgets use Segoe UI 10pt,
     # including Entry/Combobox/Spinbox text content (which use TkTextFont).
     for named in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
-        tkfont.nametofont(named).configure(
-            family=Fonts.FAMILY, size=Fonts.SIZE_NORMAL
-        )
+        tkfont.nametofont(named).configure(family=Fonts.FAMILY, size=Fonts.SIZE_NORMAL)
     tkfont.nametofont("TkHeadingFont").configure(
         family=Fonts.FAMILY, size=Fonts.SIZE_NORMAL, weight="bold"
     )
-    tkfont.nametofont("TkFixedFont").configure(
-        family=Fonts.FAMILY_MONO, size=Fonts.SIZE_SMALL
-    )
+    tkfont.nametofont("TkFixedFont").configure(family=Fonts.FAMILY_MONO, size=Fonts.SIZE_SMALL)
 
     # Explicit ttk style font for widgets that ignore named fonts
     style.configure(".", font=Fonts.normal())

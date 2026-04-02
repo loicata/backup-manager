@@ -53,10 +53,6 @@ from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-# Backward compatibility alias
-# TECH-DEBT: Remove once all consumers use BackupResult directly
-BackupStats = BackupResult
-
 
 class BackupEngine:
     """Orchestrates the backup pipeline.
@@ -470,11 +466,16 @@ class BackupEngine:
                 raise RuntimeError(msg)
 
         elif is_local_encrypted:
+            from src.core.hashing import compute_sha256
+
             self._phase("Verifying encrypted backup...")
             self._check_cancel()
             size = ctx.backup_path.stat().st_size
             if size == 0:
                 raise RuntimeError(f"Encrypted archive is empty: {ctx.backup_path.name}")
+            # Store SHA-256 hash of the archive for future periodic verification
+            archive_hash = compute_sha256(ctx.backup_path)
+            ctx.config_manager.save_verify_hash(ctx.backup_path.name, archive_hash, size)
             self._log(
                 f"Verification OK: {ctx.backup_path.name} " f"({size:,} bytes, GCM-authenticated)"
             )
@@ -1224,4 +1225,4 @@ class BackupEngine:
 
 
 # Re-export for backward compatibility
-__all__ = ["BackupEngine", "BackupStats", "BackupResult", "CancelledError"]
+__all__ = ["BackupEngine", "BackupResult", "CancelledError"]

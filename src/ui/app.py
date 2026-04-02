@@ -22,6 +22,7 @@ from src.ui.tabs.retention_tab import RetentionTab
 from src.ui.tabs.run_tab import RunTab
 from src.ui.tabs.schedule_tab import ScheduleTab
 from src.ui.tabs.storage_tab import StorageTab
+from src.ui.tabs.verify_tab import VerifyTab
 from src.ui.theme import (
     APP_TITLE,
     MIN_SIZE,
@@ -60,6 +61,7 @@ class BackupManagerApp:
             self.config_manager.config_dir,
             get_profiles=self.config_manager.get_all_profiles,
             backup_callback=self._scheduled_backup,
+            config_manager=self.config_manager,
         )
 
         # Setup tray
@@ -72,6 +74,11 @@ class BackupManagerApp:
         # Build UI
         self._build_ui()
         self._load_profiles()
+
+        # Restore last verification timestamp
+        app_settings = self.config_manager.load_app_settings()
+        if "last_verify" in app_settings:
+            self.tab_verify.update_last_verify(app_settings["last_verify"])
 
         # After wizard: switch to Run tab, mark new profiles as
         # already triggered so the scheduler won't auto-run them
@@ -246,6 +253,7 @@ class BackupManagerApp:
         self.tab_schedule = ScheduleTab(self.notebook, scheduler=self.scheduler)
         self.tab_email = EmailTab(self.notebook)
         self.tab_recovery = RecoveryTab(self.notebook)
+        self.tab_verify = VerifyTab(self.notebook, events=self.events)
         self.tab_history = HistoryTab(self.notebook)
 
         # Add tabs to notebook
@@ -260,6 +268,7 @@ class BackupManagerApp:
             (self.tab_retention, "Retention"),
             (self.tab_email, "Email"),
             (self.tab_recovery, "Recovery"),
+            (self.tab_verify, "Verify"),
             (self.tab_history, "History"),
         ]
         for tab, label in tabs:
@@ -268,6 +277,10 @@ class BackupManagerApp:
         # Connect run tab buttons
         self.tab_run.start_btn.config(command=self._run_backup)
         self.tab_run.cancel_btn.config(command=self._cancel_backup)
+
+        # Connect verify tab buttons
+        self.tab_verify.start_btn.config(command=self._run_verify)
+        self.tab_verify.cancel_btn.config(command=self._cancel_verify)
 
         # Save button at bottom (hidden on Run and History tabs)
         self._save_frame = ttk.Frame(parent)
@@ -280,7 +293,12 @@ class BackupManagerApp:
         ).pack(side="right", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
         # Tabs where Save is not relevant
-        self._no_save_tabs = {str(self.tab_run), str(self.tab_history), str(self.tab_recovery)}
+        self._no_save_tabs = {
+            str(self.tab_run),
+            str(self.tab_history),
+            str(self.tab_recovery),
+            str(self.tab_verify),
+        }
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _on_tab_changed(self, event=None):
@@ -808,47 +826,34 @@ class BackupManagerApp:
 
                 # Send email notification
                 if profile.email.enabled:
-                    from src.notifications.email_notifier import send_backup_report
-
-                    send_backup_report(
-                        profile.email,
-                        profile.name,
+                    self._send_backup_email(
+                        profile,
                         True,
+                        stats,
                         f"{stats.files_processed} files backed up",
-                        details="\n".join(stats.log_lines),
                     )
 
             except CancelledError:
                 self.tray.set_state(TrayState.IDLE)
                 if profile.email.enabled:
-                    from src.notifications.email_notifier import send_backup_report
-
-                    log = ""
-                    if self.engine and self.engine._current_result:
-                        log = "\n".join(self.engine._current_result.log_lines)
-                    send_backup_report(
-                        profile.email,
-                        profile.name,
+                    result = self.engine._current_result if self.engine else None
+                    self._send_backup_email(
+                        profile,
                         False,
+                        result,
                         "Backup cancelled by user",
-                        details=log,
                         cancelled=True,
                     )
             except Exception as e:
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 self.tray.notify("Backup failed", str(e))
                 if profile.email.enabled:
-                    from src.notifications.email_notifier import send_backup_report
-
-                    log = ""
-                    if self.engine and self.engine._current_result:
-                        log = "\n".join(self.engine._current_result.log_lines)
-                    send_backup_report(
-                        profile.email,
-                        profile.name,
+                    result = self.engine._current_result if self.engine else None
+                    self._send_backup_email(
+                        profile,
                         False,
+                        result,
                         str(e),
-                        details=log,
                     )
 
         threading.Thread(target=_backup_thread, daemon=True, name="Backup").start()
@@ -856,6 +861,128 @@ class BackupManagerApp:
     def _cancel_backup(self):
         if self.engine:
             self.engine.cancel()
+
+    # --- Integrity Verification ---
+
+    _verifier = None
+
+    def _run_verify(self):
+        """Start integrity verification for the current profile."""
+        profile, _idx = self._get_selected_profile()
+        if profile is None:
+            return
+
+        from src.core.integrity_verifier import IntegrityVerifier
+
+        self.tab_verify.clear()
+        self.tab_verify.set_running(True)
+
+        self._verifier = IntegrityVerifier(profile, self.config_manager, self.events)
+
+        def _verify_thread():
+            try:
+                result = self._verifier.verify_all()
+                self.root.after(0, self._on_verify_done, result)
+            except Exception as e:
+                logger.exception("Verification failed: %s", e)
+                self.root.after(0, self._on_verify_error, str(e))
+
+        import threading
+
+        thread = threading.Thread(target=_verify_thread, daemon=True, name="IntegrityVerifier")
+        thread.start()
+
+    def _cancel_verify(self):
+        """Cancel a running verification."""
+        if self._verifier:
+            self._verifier.cancel()
+            self.tab_verify.set_running(False)
+            self.tab_verify.status_label.config(text="Cancelled", foreground=Colors.DANGER)
+
+    def _on_verify_done(self, result):
+        """Handle verification completion on the main thread."""
+        from datetime import datetime
+
+        for bvr in result.results:
+            self.tab_verify.add_result(bvr.destination, bvr.backup_name, bvr.status, bvr.message)
+
+        self.tab_verify.set_complete(result.ok_count, result.error_count, result.duration_seconds)
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.tab_verify.update_last_verify(ts)
+
+        # Persist last verify timestamp
+        settings = self.config_manager.load_app_settings()
+        settings["last_verify"] = ts
+        self.config_manager.save_app_settings(settings)
+
+        # Send email report if configured
+        profile, _idx = self._get_selected_profile()
+        if profile and profile.email.enabled:
+            self._send_verify_email(profile, result)
+
+        self._verifier = None
+
+    def _on_verify_error(self, error_msg: str):
+        """Handle verification error on the main thread."""
+        self.tab_verify.set_running(False)
+        self.tab_verify.add_result("—", "—", "error", error_msg)
+        self._verifier = None
+
+    def _send_backup_email(
+        self,
+        profile: BackupProfile,
+        success: bool,
+        result,
+        summary: str,
+        cancelled: bool = False,
+    ) -> None:
+        """Send backup report email with enriched metrics.
+
+        Args:
+            profile: Backup profile.
+            success: Whether backup succeeded.
+            result: BackupResult (may be None on early failure).
+            summary: Short summary text.
+            cancelled: Whether the backup was cancelled.
+        """
+        try:
+            from src.core.integrity_verifier import _build_backend
+            from src.notifications.email_notifier import send_backup_report
+
+            details = ""
+            free_space = None
+            if result:
+                details = "\n".join(result.log_lines)
+                # Try to get remaining disk space on primary destination
+                try:
+                    backend = _build_backend(profile.storage)
+                    free_space = backend.get_free_space()
+                except Exception:
+                    pass
+
+            send_backup_report(
+                profile.email,
+                profile.name,
+                success,
+                summary,
+                details=details,
+                cancelled=cancelled,
+                result=result,
+                backup_type=profile.backup_type.value.upper(),
+                free_space=free_space,
+            )
+        except Exception as e:
+            logger.warning("Could not send backup report: %s", e)
+
+    def _send_verify_email(self, profile, result):
+        """Send verification report email if configured."""
+        try:
+            from src.notifications.email_notifier import send_verify_report
+
+            send_verify_report(profile.email, profile.name, result)
+        except Exception as e:
+            logger.warning("Could not send verify report: %s", e)
 
     def _scheduled_backup(self, profile: BackupProfile):
         """Callback for scheduler-triggered backups.
@@ -905,30 +1032,22 @@ class BackupManagerApp:
             )
 
             if profile.email.enabled:
-                from src.notifications.email_notifier import send_backup_report
-
-                send_backup_report(
-                    profile.email,
-                    profile.name,
+                self._send_backup_email(
+                    profile,
                     True,
+                    stats,
                     f"{stats.files_processed} files backed up",
-                    details="\n".join(stats.log_lines),
                 )
 
         except CancelledError:
             self.tray.set_state(TrayState.IDLE)
             if profile.email.enabled:
-                from src.notifications.email_notifier import send_backup_report
-
-                log = ""
-                if self.engine and self.engine._current_result:
-                    log = "\n".join(self.engine._current_result.log_lines)
-                send_backup_report(
-                    profile.email,
-                    profile.name,
+                result = self.engine._current_result if self.engine else None
+                self._send_backup_email(
+                    profile,
                     False,
+                    result,
                     "Backup cancelled by user",
-                    details=log,
                     cancelled=True,
                 )
 
@@ -940,17 +1059,12 @@ class BackupManagerApp:
             )
 
             if profile.email.enabled:
-                from src.notifications.email_notifier import send_backup_report
-
-                log = ""
-                if self.engine and self.engine._current_result:
-                    log = "\n".join(self.engine._current_result.log_lines)
-                send_backup_report(
-                    profile.email,
-                    profile.name,
+                result = self.engine._current_result if self.engine else None
+                self._send_backup_email(
+                    profile,
                     False,
+                    result,
                     str(e),
-                    details=log,
                 )
 
             # Re-raise so the scheduler can trigger retry logic
@@ -1189,7 +1303,7 @@ class BackupManagerApp:
         messagebox.showinfo(
             "About",
             f"{APP_TITLE} v{__version__}\n\n"
-            f"Copyright (c) 2026 Loic Ader\n"
+            f"Copyright (c) 2026 Loic Ader loicata.com\n"
             f"GNU General Public License v3.0\n\n"
             f"Backup management system with encryption,\n"
             f"scheduling, and multi-destination support.",

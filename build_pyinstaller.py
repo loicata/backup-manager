@@ -9,12 +9,23 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Project root
+# Project root (resolve to main repo if running from a git worktree)
 ROOT = Path(__file__).resolve().parent
+_git_common = ROOT / ".git"
+if _git_common.is_file():
+    # Worktree: .git is a file pointing to the main repo
+    _main_root = Path(
+        _git_common.read_text(encoding="utf-8").split("gitdir: ")[1].strip()
+    ).resolve()
+    # Walk up from .git/worktrees/<name> to the repo root
+    while _main_root.name != ".git":
+        _main_root = _main_root.parent
+    DIST = _main_root.parent / "dist"
+else:
+    DIST = ROOT / "dist"
 SRC = ROOT / "src"
 ASSETS = ROOT / "assets"
 ICON = ASSETS / "backup_manager.ico"
-DIST = ROOT / "dist"
 
 
 def get_version() -> str:
@@ -72,6 +83,10 @@ def build():
         "--onedir",
         "--noconfirm",
         "--clean",
+        "--distpath",
+        str(DIST),
+        "--paths",
+        str(ROOT),
     ]
 
     # Icon

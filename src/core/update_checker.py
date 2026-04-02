@@ -1,11 +1,9 @@
-"""Background update checker.
+"""Background update checker using GitHub Releases API.
 
-Fetches version info from a remote URL and notifies
-if a newer version is available.  Optionally verifies
-a SHA-256 hash of the downloaded update payload.
+Fetches the latest release tag from the GitHub repository
+and notifies if a newer version is available.
 """
 
-import hashlib
 import json
 import logging
 import re
@@ -15,57 +13,66 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
-UPDATE_URL = "https://example.com/backup-manager/version.json"
+GITHUB_REPO = "loicata/backup-manager"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 CHECK_TIMEOUT = 10  # seconds
-MAX_RESPONSE_SIZE = 16 * 1024  # 16 KB
+MAX_RESPONSE_SIZE = 64 * 1024  # 64 KB
 
 
 def check_for_update(
     current_version: str,
     callback: Callable[[str, str], None],
-    url: str = UPDATE_URL,
+    url: str = GITHUB_API_URL,
 ) -> threading.Thread:
     """Check for updates in a background thread.
 
+    Queries the GitHub Releases API for the latest release.
+    If a newer version is found, calls the callback with the
+    version string and the release page URL.
+
     Args:
-        current_version: Current version string (e.g., "3.0").
-        callback: Called with (latest_version, download_url) if update available.
-        url: URL to fetch version info from.
+        current_version: Current version string (e.g., "3.2.1").
+        callback: Called with (latest_version, release_url) if
+            an update is available.
+        url: GitHub API URL to fetch release info from.
 
     Returns:
-        The background thread.
+        The background thread (daemon, already started).
     """
 
-    def _check():
+    def _check() -> None:
         try:
-            # Reject non-HTTPS check URLs
             if not url.startswith("https://"):
                 logger.warning("Update check URL is not HTTPS: %s", url)
                 return
 
             req = urllib.request.Request(url, method="GET")
             req.add_header("User-Agent", f"BackupManager/{current_version}")
+            req.add_header("Accept", "application/vnd.github+json")
 
             with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:
                 data = resp.read(MAX_RESPONSE_SIZE)
-                info = json.loads(data.decode("utf-8"))
+                release = json.loads(data.decode("utf-8"))
 
-            latest = info.get("latest", "")
-            download_url = info.get("url", "")
+            tag_name = release.get("tag_name", "")
+            release_url = release.get("html_url", "")
 
-            if not latest or not download_url:
+            if not tag_name or not release_url:
+                logger.debug("Incomplete release info from GitHub")
                 return
 
-            # Validate download URL
-            if not download_url.startswith("https://"):
-                logger.warning("Update URL is not HTTPS: %s", download_url)
-                return
+            # Strip leading 'v' from tag (e.g., "v3.2.1" -> "3.2.1")
+            latest = tag_name.lstrip("v")
 
             if _version_tuple(latest) > _version_tuple(current_version):
                 logger.info("Update available: %s -> %s", current_version, latest)
-                callback(latest, download_url)
+                callback(latest, release_url)
             else:
-                logger.debug("No update available (current=%s, latest=%s)", current_version, latest)
+                logger.debug(
+                    "No update available (current=%s, latest=%s)",
+                    current_version,
+                    latest,
+                )
 
         except Exception as e:
             logger.debug("Update check failed: %s", e)
@@ -75,40 +82,7 @@ def check_for_update(
     return thread
 
 
-def verify_update_hash(file_data: bytes, expected_hash: str | None) -> bool:
-    """Verify the SHA-256 hash of downloaded update data.
-
-    Args:
-        file_data: Raw bytes of the downloaded update file.
-        expected_hash: Expected lowercase hex SHA-256 digest from
-            the version.json ``sha256`` field.  If None or empty,
-            verification is skipped with a warning.
-
-    Returns:
-        True if the hash matches or is absent (backward compat).
-        False if the hash is present but does not match.
-    """
-    if not expected_hash:
-        logger.warning(
-            "No SHA-256 hash provided in version info — "
-            "skipping integrity check (backward compatibility)"
-        )
-        return True
-
-    actual_hash = hashlib.sha256(file_data).hexdigest()
-    if actual_hash != expected_hash.lower():
-        logger.error(
-            "SHA-256 mismatch: expected %s, got %s",
-            expected_hash,
-            actual_hash,
-        )
-        return False
-
-    logger.info("SHA-256 hash verified: %s", actual_hash)
-    return True
-
-
-def _version_tuple(version: str) -> tuple:
+def _version_tuple(version: str) -> tuple[int, ...]:
     """Convert version string to comparable tuple.
 
     Args:

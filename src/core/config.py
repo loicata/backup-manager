@@ -150,6 +150,8 @@ class ScheduleConfig:
     enabled: bool = True
     retry_enabled: bool = True
     retry_delay_minutes: list[int] = field(default_factory=lambda: [2, 10, 30, 90, 240])
+    verify_enabled: bool = False
+    verify_interval_days: int = 7
 
 
 @dataclass
@@ -399,6 +401,46 @@ class ConfigManager:
         """Generate a timestamped log path for a backup run."""
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return self.log_dir / f"backup_{profile_id}_{ts}.log"
+
+    # --- Verify hashes (for encrypted archive integrity checks) ---
+
+    def _verify_hashes_path(self) -> Path:
+        """Path to the verify hashes JSON file."""
+        return self.config_dir / "verify_hashes.json"
+
+    def load_verify_hashes(self) -> dict:
+        """Load stored SHA-256 hashes of encrypted archives.
+
+        Returns:
+            Dict mapping archive_name to {sha256, size, created_at}.
+        """
+        path = self._verify_hashes_path()
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                logger.warning("Failed to load verify hashes")
+        return {}
+
+    def save_verify_hash(self, archive_name: str, sha256: str, size: int) -> None:
+        """Store the SHA-256 hash of an encrypted archive for later verification.
+
+        Args:
+            archive_name: Name of the .tar.wbenc file.
+            sha256: Hex digest of the archive.
+            size: File size in bytes.
+        """
+        hashes = self.load_verify_hashes()
+        hashes[archive_name] = {
+            "sha256": sha256,
+            "size": size,
+            "created_at": datetime.now().isoformat(),
+        }
+        path = self._verify_hashes_path()
+        path.write_text(
+            json.dumps(hashes, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     # --- App settings ---
 

@@ -12,9 +12,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Project root (resolve to main repo if running from a git worktree)
 ROOT = Path(__file__).resolve().parent
+_git_common = ROOT / ".git"
+if _git_common.is_file():
+    # Worktree: .git is a file pointing to the main repo
+    _main_root = Path(
+        _git_common.read_text(encoding="utf-8").split("gitdir: ")[1].strip()
+    ).resolve()
+    while _main_root.name != ".git":
+        _main_root = _main_root.parent
+    DIST = _main_root.parent / "dist"
+else:
+    DIST = ROOT / "dist"
 SRC = ROOT / "src"
-DIST = ROOT / "dist"
 BUILD_DIR = DIST / "BackupManager"
 ASSETS = ROOT / "assets"
 
@@ -68,7 +79,7 @@ def _build_wxs(version: str) -> str:
            Name="Backup Manager"
            Language="1033"
            Version="{version}.0"
-           Manufacturer="Loic Ader"
+           Manufacturer="Loic Ader loicata.com"
            UpgradeCode="{UPGRADE_CODE}">
 
     <Package InstallerVersion="500"

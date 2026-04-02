@@ -10,10 +10,10 @@ import subprocess
 import threading
 from pathlib import Path
 
+from src.storage.local import LocalStorage
+
 # Hide console window on Windows when running net use
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
-
-from src.storage.local import LocalStorage
 
 logger = logging.getLogger(__name__)
 

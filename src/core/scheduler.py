@@ -175,6 +175,35 @@ class SchedulerState:
             self._state[profile_id] = dt.isoformat()
             self._save()
 
+    def get_last_verify(self, profile_id: str) -> datetime | None:
+        """Get the last verify time for a profile (thread-safe).
+
+        Args:
+            profile_id: Profile to look up.
+
+        Returns:
+            The datetime of the last verify, or None.
+        """
+        with self._lock:
+            ts = self._state.get(f"verify_{profile_id}")
+            if ts:
+                try:
+                    return datetime.fromisoformat(ts)
+                except ValueError:
+                    pass
+            return None
+
+    def set_last_verify(self, profile_id: str, dt: datetime) -> None:
+        """Record a verify time for a profile (thread-safe).
+
+        Args:
+            profile_id: Profile that was verified.
+            dt: Timestamp of the verification.
+        """
+        with self._lock:
+            self._state[f"verify_{profile_id}"] = dt.isoformat()
+            self._save()
+
 
 class InAppScheduler:
     """Daemon thread that checks for due backups."""
@@ -184,10 +213,12 @@ class InAppScheduler:
         config_dir: Path,
         get_profiles: Callable[[], list[BackupProfile]],
         backup_callback: Callable[[BackupProfile], None],
+        config_manager=None,
     ):
         self._config_dir = config_dir
         self._get_profiles = get_profiles
         self._backup_callback = backup_callback
+        self._config_manager = config_manager
         self._journal = ScheduleJournal(config_dir)
         self._state = SchedulerState(config_dir)
         self._thread: threading.Thread | None = None
@@ -288,6 +319,10 @@ class InAppScheduler:
                 continue
             if self._is_due(profile, now):
                 self._trigger_backup(profile, now)
+
+            # Periodic integrity verification
+            if profile.schedule.verify_enabled:
+                self._check_verify_due(profile, now)
 
     def _is_due(self, profile: BackupProfile, now: datetime) -> bool:
         sched = profile.schedule
@@ -450,6 +485,65 @@ class InAppScheduler:
             len(delays),
             profile.name,
         )
+
+    def _check_verify_due(self, profile: BackupProfile, now: datetime) -> None:
+        """Check if periodic integrity verification is due for a profile.
+
+        Args:
+            profile: Profile with verify_enabled and verify_interval_days.
+            now: Current timestamp.
+        """
+        interval_days = profile.schedule.verify_interval_days
+        last_verify = self._state.get_last_verify(profile.id)
+        if last_verify and (now - last_verify).days < interval_days:
+            return
+
+        logger.info(
+            "Triggering periodic verification for '%s' (interval=%dd)",
+            profile.name,
+            interval_days,
+        )
+        self._state.set_last_verify(profile.id, now)
+        self._journal.add(
+            ScheduleLogEntry(
+                profile_id=profile.id,
+                profile_name=profile.name,
+                trigger="verify",
+                status="started",
+                detail="Periodic integrity verification",
+            )
+        )
+
+        try:
+            from src.core.config import ConfigManager
+            from src.core.integrity_verifier import IntegrityVerifier
+
+            cm = self._config_manager or ConfigManager(self._config_dir)
+            verifier = IntegrityVerifier(profile, cm, events=None)
+            result = verifier.verify_all()
+
+            if result.success:
+                self._journal.update_last(
+                    status="success",
+                    detail=f"Verified {result.ok_count} backups OK",
+                )
+            else:
+                self._journal.update_last(
+                    status="failed",
+                    detail=f"{result.error_count} error(s), {result.ok_count} OK",
+                )
+            logger.info(
+                "Verification for '%s': %d OK, %d errors",
+                profile.name,
+                result.ok_count,
+                result.error_count,
+            )
+        except Exception as e:
+            logger.exception("Verification failed for '%s'", profile.name)
+            self._journal.update_last(
+                status="failed",
+                detail=f"Verify error: {type(e).__name__}: {e}",
+            )
 
     def _check_missed_backups(self, now: datetime) -> None:
         for profile in self._get_profiles():

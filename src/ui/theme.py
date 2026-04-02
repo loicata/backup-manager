@@ -1,17 +1,21 @@
 """UI theme: colors, styles, fonts, and ttk configuration.
 
 Centralized theming for a modern, consistent look.
-Uses ttk.Style() for all widget styling.
+Uses sv_ttk (Sun Valley) for Windows 11-style widgets,
+with custom overrides for accent colors and special styles.
 """
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
+
+import sv_ttk
 
 # --- Color palette ---
 
 
 class Colors:
-    BG = "#f0f2f5"  # Main background (soft gray)
+    BG = "#fafafa"  # Main background (sv_ttk light base)
     SIDEBAR_BG = "#2c3e50"  # Sidebar (dark blue-gray)
     SIDEBAR_TEXT = "#ecf0f1"  # Sidebar text (light)
     SIDEBAR_HOVER = "#34495e"  # Sidebar hover
@@ -24,8 +28,8 @@ class Colors:
     DANGER = "#e74c3c"  # Red
 
     CARD_BG = "#ffffff"  # Card/panel background
-    CARD_BORDER = "#dfe6e9"  # Card border
-    TEXT = "#2d3436"  # Primary text
+    CARD_BORDER = "#e0e0e0"  # Card border (slightly lighter for sv_ttk)
+    TEXT = "#1a1a1a"  # Primary text (darker for sv_ttk contrast)
     TEXT_SECONDARY = "#636e72"  # Secondary text
     TEXT_DISABLED = "#b2bec3"  # Disabled text
 
@@ -36,10 +40,10 @@ class Colors:
     LOG_BG = "#1e272e"  # Log area background (dark)
     LOG_TEXT = "#a4de6c"  # Log text (green)
 
-    TAB_BG = "#dfe6e9"  # Inactive tab
+    TAB_BG = "#e8e8e8"  # Inactive tab
     TAB_ACTIVE = "#ffffff"  # Active tab
 
-    PROGRESS_BG = "#dfe6e9"  # Progress bar background
+    PROGRESS_BG = "#e0e0e0"  # Progress bar background
     PROGRESS_FG = "#3498db"  # Progress bar fill
 
 
@@ -100,13 +104,13 @@ class Spacing:
 # --- App constants ---
 
 APP_TITLE = "Backup Manager"
-APP_VERSION = "3.1.5"
+APP_VERSION = "3.2.0"
 WINDOW_SIZE = "1400x900"
 MIN_SIZE = (1280, 830)
 
 
 def setup_theme(root: tk.Tk) -> ttk.Style:
-    """Configure ttk styles for the application.
+    """Configure sv_ttk Sun Valley theme with custom overrides.
 
     Args:
         root: Tk root window.
@@ -115,29 +119,42 @@ def setup_theme(root: tk.Tk) -> ttk.Style:
         Configured ttk.Style instance.
     """
     style = ttk.Style(root)
-    style.theme_use("clam")
 
-    # General
-    style.configure(".", font=Fonts.normal(), background=Colors.BG)
-    style.configure("TFrame", background=Colors.BG)
-    style.configure("TLabel", background=Colors.BG, foreground=Colors.TEXT)
-    style.configure("TLabelframe", background=Colors.CARD_BG)
-    style.configure(
-        "TLabelframe.Label", background=Colors.BG, foreground=Colors.TEXT, font=Fonts.bold()
-    )
+    # Apply Sun Valley theme (Windows 11 style)
+    # Only load once per Tk instance to avoid Tcl reload errors
+    if not hasattr(root, "_sv_ttk_loaded"):
+        try:
+            sv_ttk.set_theme("light")
+        except tk.TclError:
+            # Tcl source may report a spurious error on some Windows drives
+            # (mapped, external) even though the theme file was loaded.
+            # Also handles "Theme already exists" on repeated calls.
+            # If the theme was partially loaded, just activate it.
+            try:
+                style.theme_use("sun-valley-light")
+            except tk.TclError:
+                # Theme truly not available — source it with forward slashes
+                tcl_path = str(sv_ttk.TCL_THEME_FILE_PATH).replace("\\", "/")
+                root.tk.call("source", tcl_path)
+                style.theme_use("sun-valley-light")
+        root._sv_ttk_loaded = True
 
-    # Buttons
-    style.configure("TButton", padding=(Spacing.LARGE, Spacing.MEDIUM), font=Fonts.normal())
+    # --- Custom style overrides on top of sv_ttk ---
 
+    style.configure("TLabelframe", borderwidth=3)
+    style.configure("TLabelframe.Label", font=Fonts.bold())
+    style.configure("TNotebook.Tab", font=Fonts.normal())
+    style.configure("Treeview", font=Fonts.normal(), rowheight=28)
+    style.configure("Treeview.Heading", font=Fonts.bold())
+    style.configure("TProgressbar", thickness=20)
+
+    # Accent button (blue) — sv_ttk provides Accent.TButton natively
     style.configure(
         "Accent.TButton",
-        background=Colors.ACCENT,
-        foreground="white",
-        padding=(Spacing.XLARGE, Spacing.MEDIUM),
         font=Fonts.bold(),
     )
-    style.map("Accent.TButton", background=[("active", Colors.ACCENT_HOVER)])
 
+    # Success button (green)
     style.configure(
         "Success.TButton",
         background=Colors.SUCCESS,
@@ -145,7 +162,12 @@ def setup_theme(root: tk.Tk) -> ttk.Style:
         padding=(Spacing.XLARGE, Spacing.MEDIUM),
         font=Fonts.bold(),
     )
+    style.map(
+        "Success.TButton",
+        background=[("active", "#219a52"), ("disabled", "#b2bec3")],
+    )
 
+    # Danger button (red)
     style.configure(
         "Danger.TButton",
         background=Colors.DANGER,
@@ -153,50 +175,79 @@ def setup_theme(root: tk.Tk) -> ttk.Style:
         padding=(Spacing.LARGE, Spacing.MEDIUM),
         font=Fonts.bold(),
     )
-
-    # Notebook (tabs)
-    style.configure("TNotebook", background=Colors.BG)
-    style.configure("TNotebook.Tab", padding=(Spacing.LARGE, Spacing.MEDIUM), font=Fonts.normal())
     style.map(
-        "TNotebook.Tab",
-        background=[("selected", Colors.TAB_ACTIVE)],
-        foreground=[("selected", Colors.TEXT)],
+        "Danger.TButton",
+        background=[("active", "#c0392b"), ("disabled", "#b2bec3")],
     )
-
-    # Entries
-    style.configure("TEntry", fieldbackground=Colors.INPUT_BG, padding=Spacing.MEDIUM)
-
-    # Combobox
-    style.configure("TCombobox", fieldbackground=Colors.INPUT_BG, padding=Spacing.SMALL)
-
-    # Progressbar
-    style.configure(
-        "TProgressbar", troughcolor=Colors.PROGRESS_BG, background=Colors.PROGRESS_FG, thickness=20
-    )
-
-    # Treeview
-    style.configure("Treeview", font=Fonts.normal(), rowheight=28, fieldbackground=Colors.CARD_BG)
-    style.configure("Treeview.Heading", font=Fonts.bold())
-
-    # Checkbutton
-    style.configure("TCheckbutton", background=Colors.BG, font=Fonts.normal())
-
-    # Radiobutton
-    style.configure("TRadiobutton", background=Colors.BG, font=Fonts.normal())
-
-    # Spinbox
-    style.configure("TSpinbox", fieldbackground=Colors.INPUT_BG, padding=Spacing.SMALL)
-
-    # Separator
-    style.configure("TSeparator", background=Colors.CARD_BORDER)
 
     # Card style for LabelFrame
-    style.configure("Card.TLabelframe", background=Colors.CARD_BG, borderwidth=1, relief="solid")
+    style.configure(
+        "Card.TLabelframe",
+        background=Colors.CARD_BG,
+        borderwidth=1,
+        relief="solid",
+    )
     style.configure(
         "Card.TLabelframe.Label",
         background=Colors.CARD_BG,
         foreground=Colors.ACCENT,
         font=Fonts.bold(),
     )
+
+    # --- Font overrides (MUST be last — after sv_ttk theme is fully applied) ---
+
+    # Override Tk named fonts so all widgets use Segoe UI 10pt,
+    # including Entry/Combobox/Spinbox text content (which use TkTextFont).
+    for named in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
+        tkfont.nametofont(named).configure(
+            family=Fonts.FAMILY, size=Fonts.SIZE_NORMAL
+        )
+    tkfont.nametofont("TkHeadingFont").configure(
+        family=Fonts.FAMILY, size=Fonts.SIZE_NORMAL, weight="bold"
+    )
+    tkfont.nametofont("TkFixedFont").configure(
+        family=Fonts.FAMILY_MONO, size=Fonts.SIZE_SMALL
+    )
+
+    # Explicit ttk style font for widgets that ignore named fonts
+    style.configure(".", font=Fonts.normal())
+    style.configure("TLabel", font=Fonts.normal(), padding=(0, 3))
+    style.configure("TButton", font=Fonts.normal())
+    style.configure("TCheckbutton", font=Fonts.normal())
+    style.configure("TRadiobutton", font=Fonts.normal())
+    style.configure("TEntry", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6))
+    style.configure("TCombobox", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6))
+    style.configure("TSpinbox", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6))
+
+    # Combobox dropdown listbox font
+    root.option_add("*TCombobox*Listbox.font", Fonts.normal())
+
+    # Patch ttk input widgets to always use our font for text content.
+    # style.configure only affects the ttk layout, not the internal text,
+    # and nametofont may not stick on all Windows drive configurations.
+    _input_font = Fonts.normal()
+    _orig_entry_init = ttk.Entry.__init__
+    _orig_combo_init = ttk.Combobox.__init__
+    _orig_spin_init = ttk.Spinbox.__init__
+
+    def _entry_init(self, *args, **kwargs):
+        kwargs.setdefault("font", _input_font)
+        _orig_entry_init(self, *args, **kwargs)
+
+    def _combo_init(self, *args, **kwargs):
+        kwargs.setdefault("font", _input_font)
+        _orig_combo_init(self, *args, **kwargs)
+
+    def _spin_init(self, *args, **kwargs):
+        kwargs.setdefault("font", _input_font)
+        _orig_spin_init(self, *args, **kwargs)
+
+    ttk.Entry.__init__ = _entry_init
+    ttk.Combobox.__init__ = _combo_init
+    ttk.Spinbox.__init__ = _spin_init
+
+    # Treeview must keep its own size (option_add makes it too large)
+    style.configure("Treeview", font=Fonts.normal(), rowheight=28)
+    style.configure("Treeview.Heading", font=Fonts.bold())
 
     return style

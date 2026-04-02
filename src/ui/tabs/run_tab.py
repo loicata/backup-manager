@@ -84,18 +84,29 @@ class RunTab(ttk.Frame):
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
-        self.start_btn = ttk.Button(
+        self.start_btn = tk.Button(
             btn_frame,
             text="▶ Start backup",
-            style="Success.TButton",
+            bg=Colors.ACCENT,
+            fg="white",
+            activebackground=Colors.ACCENT_HOVER,
+            activeforeground="white",
+            relief="flat",
+            font=Fonts.normal(),
         )
         self.start_btn.pack(side="left")
 
-        self.cancel_btn = ttk.Button(
+        self.cancel_btn = tk.Button(
             btn_frame,
             text="■ Cancel",
-            style="Danger.TButton",
+            bg=Colors.DANGER,
+            fg="white",
+            activebackground="#c0392b",
+            activeforeground="white",
+            relief="flat",
+            font=Fonts.normal(),
             state="disabled",
+            disabledforeground=Colors.TEXT_DISABLED,
         )
         self.cancel_btn.pack(side="left", padx=Spacing.MEDIUM)
 
@@ -177,22 +188,22 @@ class RunTab(ttk.Frame):
     def _on_status(self, state="", **kw):
         try:
             if state == "running":
-                self.start_btn.state(["disabled"])
-                self.cancel_btn.state(["!disabled"])
+                self.start_btn.config(state="disabled")
+                self.cancel_btn.config(state="normal")
                 self.status_label.config(text="Running...")
             elif state == "success":
-                self.start_btn.state(["!disabled"])
-                self.cancel_btn.state(["disabled"])
+                self.start_btn.config(state="normal")
+                self.cancel_btn.config(state="disabled")
                 self.progress_bar["value"] = 100
                 self.percent_label.config(text="100%")
                 self.status_label.config(text="Backup complete!", foreground=Colors.SUCCESS)
             elif state == "error":
-                self.start_btn.state(["!disabled"])
-                self.cancel_btn.state(["disabled"])
+                self.start_btn.config(state="normal")
+                self.cancel_btn.config(state="disabled")
                 self.status_label.config(text="Backup failed!", foreground=Colors.DANGER)
             elif state == "idle":
-                self.start_btn.state(["!disabled"])
-                self.cancel_btn.state(["disabled"])
+                self.start_btn.config(state="normal")
+                self.cancel_btn.config(state="disabled")
                 self.status_label.config(text="Waiting...", foreground=Colors.TEXT_SECONDARY)
         except tk.TclError:
             pass

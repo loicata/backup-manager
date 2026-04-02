@@ -96,9 +96,9 @@ class TestSFTPStorageWithMock:
             mock_sock = MagicMock()
             with patch("src.storage.sftp.socket.socket", return_value=mock_sock):
                 transport = storage._get_transport()
-            # settimeout called twice: 30s for connect, then 120s for operations
+            # settimeout called twice: 60s for connect, then 600s for operations
             assert mock_sock.settimeout.call_count == 2
-            mock_sock.settimeout.assert_any_call(30)
+            mock_sock.settimeout.assert_any_call(60)
             mock_sock.settimeout.assert_any_call(600)
             mock_sock.connect.assert_called_once_with(("192.168.1.100", 22))
             mp.Transport.assert_called_once_with(mock_sock)

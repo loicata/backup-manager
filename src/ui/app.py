@@ -269,15 +269,27 @@ class BackupManagerApp:
         self.tab_run.start_btn.config(command=self._run_backup)
         self.tab_run.cancel_btn.config(command=self._cancel_backup)
 
-        # Save button at bottom
-        save_frame = ttk.Frame(parent)
-        save_frame.pack(fill="x", side="bottom")
+        # Save button at bottom (hidden on Run and History tabs)
+        self._save_frame = ttk.Frame(parent)
+        self._save_frame.pack(fill="x", side="bottom")
         ttk.Button(
-            save_frame,
+            self._save_frame,
             text="Save",
             style="Accent.TButton",
             command=self._save_profile,
         ).pack(side="right", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
+
+        # Tabs where Save is not relevant
+        self._no_save_tabs = {str(self.tab_run), str(self.tab_history), str(self.tab_recovery)}
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _on_tab_changed(self, event=None):
+        """Show or hide the Save button depending on the active tab."""
+        current = self.notebook.select()
+        if current in self._no_save_tabs:
+            self._save_frame.pack_forget()
+        else:
+            self._save_frame.pack(fill="x", side="bottom")
 
     # --- Profile management ---
 
@@ -392,6 +404,7 @@ class BackupManagerApp:
         # Validate encryption
         enc_error = self.tab_encryption.validate()
         if enc_error:
+            self.notebook.select(self.tab_encryption)
             messagebox.showwarning("Validation", enc_error)
             return False
 
@@ -404,6 +417,7 @@ class BackupManagerApp:
         new_name = general["name"]
         for p in self._profiles:
             if p.id != profile.id and p.name.lower() == new_name.lower():
+                self.notebook.select(self.tab_general)
                 messagebox.showwarning(
                     "Validation",
                     f"A profile named '{p.name}' already exists. "
@@ -431,6 +445,7 @@ class BackupManagerApp:
         # Check for duplicate destinations
         dup_error = self._check_duplicate_destinations(storage["storage"], mirrors)
         if dup_error:
+            self.notebook.select(self.tab_storage)
             messagebox.showwarning("Validation", dup_error)
             return False
 
@@ -443,6 +458,7 @@ class BackupManagerApp:
             gfs_d = profile.retention.gfs_daily
 
             if cycle > gfs_d:
+                self.notebook.select(self.tab_general)
                 messagebox.showwarning(
                     "Validation",
                     f"Full backup cycle ({cycle}) must not exceed "
@@ -679,11 +695,19 @@ class BackupManagerApp:
         # Validate config before attempting connectivity check
         try:
             profile.storage.validate()
-            for mirror in profile.mirror_destinations:
-                mirror.validate()
         except ValueError as e:
+            self.notebook.select(self.tab_storage)
             messagebox.showwarning("Backup", f"Invalid configuration: {e}")
             return
+
+        mirror_tabs = [self.tab_mirror1, self.tab_mirror2]
+        for i, mirror in enumerate(profile.mirror_destinations):
+            try:
+                mirror.validate()
+            except ValueError as e:
+                self.notebook.select(mirror_tabs[i])
+                messagebox.showwarning("Backup", f"Invalid configuration: {e}")
+                return
 
         self.engine = BackupEngine(self.config_manager, events=self.events)
 

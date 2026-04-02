@@ -24,7 +24,7 @@ from src.storage.base import StorageBackend, long_path_mkdir, long_path_str, wit
 
 logger = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT = 30  # Seconds for SSH/SFTP connection (LAN + internet)
+_CONNECT_TIMEOUT = 60  # Seconds for SSH/SFTP connection (aligned with S3)
 _OPERATION_TIMEOUT = 600  # Seconds for SFTP operations (delete, list, etc.)
 _EXEC_PROBE_TIMEOUT = 10  # Seconds for exec channel probe
 _KEEPALIVE_INTERVAL = 30  # Seconds between SSH keepalive packets

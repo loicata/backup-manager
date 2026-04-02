@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 from src.core.config import BackupProfile, StorageConfig, StorageType
 from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
 from src.security.encryption import DecryptingReader
+from src.storage.base import long_path_mkdir, long_path_str
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 
@@ -527,8 +528,20 @@ class RecoveryTab(ScrollableTab):
     # ------------------------------------------------------------------
 
     def _browse_backup(self) -> None:
-        """Browse for a local backup folder."""
-        path = filedialog.askdirectory(title="Select backup folder")
+        """Browse for a backup folder or encrypted .tar.wbenc file.
+
+        Opens a file dialog first (to allow selecting .tar.wbenc files).
+        If the user cancels, falls back to a folder dialog.
+        """
+        path = filedialog.askopenfilename(
+            title="Select backup (.tar.wbenc) or cancel for folder",
+            filetypes=[
+                ("Encrypted backups", "*.wbenc"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path:
+            path = filedialog.askdirectory(title="Select backup folder")
         if path:
             self.backup_path_var.set(path)
 
@@ -682,9 +695,12 @@ class RecoveryTab(ScrollableTab):
                 self._restore_encrypted_tar(tar_wbenc, dst, password)
                 return
 
-            # Plain directory: copy files
+            # Plain directory: copy files (skip internal .wbverify manifests)
             copied = 0
-            files = [f for f in src.rglob("*") if f.is_file()]
+            files = [
+                f for f in src.rglob("*")
+                if f.is_file() and not f.name.endswith(".wbverify")
+            ]
             if not files:
                 self.after(
                     0,
@@ -729,13 +745,43 @@ class RecoveryTab(ScrollableTab):
             return
 
         try:
+            # Create a subfolder named after the backup file
+            # e.g. "loicata_FULL_2026-04-01_215315.tar.wbenc" → "loicata_FULL_2026-04-01_215315"
+            backup_name = tar_path.name
+            if backup_name.endswith(".tar.wbenc"):
+                backup_name = backup_name[: -len(".tar.wbenc")]
+            restore_dir = dst / backup_name
+            long_path_mkdir(restore_dir)
+
+            count = 0
+            strip_prefix = ""
             with open(tar_path, "rb") as f:
                 reader = DecryptingReader(f, password)
                 with tarfile.open(fileobj=reader, mode="r|") as tar:
-                    tar.extractall(path=dst, filter="data")
+                    for member in tar:
+                        if member.name.endswith(".wbverify"):
+                            continue
+                        # Strip the first directory level from tar paths
+                        # e.g. "loicata/Documents/file.txt" → "Documents/file.txt"
+                        if not strip_prefix and "/" in member.name:
+                            strip_prefix = member.name.split("/")[0] + "/"
+                        name = member.name
+                        if strip_prefix and name.startswith(strip_prefix):
+                            name = name[len(strip_prefix):]
+                        if not name:
+                            continue
+                        if member.isdir():
+                            long_path_mkdir(restore_dir / name)
+                            continue
+                        # Extract file with long path support
+                        target = restore_dir / name
+                        long_path_mkdir(target.parent)
+                        fileobj = tar.extractfile(member)
+                        if fileobj is not None:
+                            with open(long_path_str(target), "wb") as out:
+                                shutil.copyfileobj(fileobj, out)
+                            count += 1
 
-            # Count extracted files
-            count = sum(1 for _ in dst.rglob("*") if _.is_file())
             msg = f"Restore complete — {count} files decrypted"
             self.after(0, lambda: self._restore_done(True, msg))
 

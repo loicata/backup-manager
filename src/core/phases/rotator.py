@@ -78,14 +78,10 @@ def _rotate_gfs(
 
     dated_backups.sort(key=lambda x: x[1], reverse=True)
 
-    # Keep daily backups (last N days) — any type (full or diff)
-    daily_dates = set()
+    # Keep daily backups (last N days) — all backups within the window
     for backup, dt in dated_backups:
         if (now - dt).days < retention.gfs_daily:
-            date_key = dt.strftime("%Y-%m-%d")
-            if date_key not in daily_dates:
-                daily_dates.add(date_key)
-                keep.add(backup["name"])
+            keep.add(backup["name"])
 
     # Keep weekly backups (last N weeks) — FULL only
     weekly_dates = set()

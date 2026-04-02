@@ -178,6 +178,7 @@ class ScheduleTab(ScrollableTab):
         self.verify_enabled_var.set(s.verify_enabled)
         self.verify_interval_var.set(s.verify_interval_days)
         self._toggle_enabled()
+        self._refresh_journal()
 
     def collect_config(self) -> dict:
         """Collect schedule configuration.

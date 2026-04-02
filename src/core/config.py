@@ -150,7 +150,7 @@ class ScheduleConfig:
     enabled: bool = True
     retry_enabled: bool = True
     retry_delay_minutes: list[int] = field(default_factory=lambda: [2, 10, 30, 90, 240])
-    verify_enabled: bool = False
+    verify_enabled: bool = True
     verify_interval_days: int = 7
 
 

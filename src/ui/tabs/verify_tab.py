@@ -75,7 +75,7 @@ class VerifyTab(ttk.Frame):
             results_frame,
             columns=columns,
             show="headings",
-            height=10,
+            height=9,
         )
         self.results_tree.heading("destination", text="Destination")
         self.results_tree.heading("backup", text="Backup")
@@ -127,7 +127,7 @@ class VerifyTab(ttk.Frame):
             font=Fonts.mono(),
             wrap="word",
             state="disabled",
-            height=8,
+            height=9,
         )
         log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=log_scroll.set)

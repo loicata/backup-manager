@@ -106,7 +106,7 @@ class ScheduleTab(ScrollableTab):
         )
         verify_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
 
-        self.verify_enabled_var = tk.BooleanVar(value=False)
+        self.verify_enabled_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(
             verify_frame,
             text="Enable periodic integrity verification",

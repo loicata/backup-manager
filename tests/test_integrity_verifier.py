@@ -380,6 +380,95 @@ class TestVerifyMultipleBackups:
         assert result.error_count == 1
 
 
+class TestVerifyIter:
+    """Tests for verify_iter() — incremental result yielding."""
+
+    def test_iter_yields_each_result(self, tmp_path: Path) -> None:
+        """verify_iter yields one BackupVerifyResult per backup."""
+        dest = tmp_path / "backups"
+        dest.mkdir()
+        _create_flat_backup(dest, "Backup_A", {"a.txt": b"alpha"})
+        _create_flat_backup(dest, "Backup_B", {"b.txt": b"beta"})
+
+        profile = BackupProfile(
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(dest),
+            )
+        )
+        mgr = ConfigManager(config_dir=tmp_path / "config")
+        verifier = IntegrityVerifier(profile, mgr)
+
+        results = list(verifier.verify_iter())
+
+        assert len(results) == 2
+        assert all(r.status == "ok" for r in results)
+
+    def test_get_result_after_iter(self, tmp_path: Path) -> None:
+        """get_result returns aggregated totals after iteration."""
+        dest = tmp_path / "backups"
+        dest.mkdir()
+        _create_flat_backup(dest, "Backup_A", {"a.txt": b"alpha"})
+        _create_flat_backup(dest, "Backup_B", {"b.txt": b"beta"})
+
+        # Corrupt one
+        (dest / "Backup_B" / "b.txt").write_bytes(b"CORRUPTED")
+
+        profile = BackupProfile(
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(dest),
+            )
+        )
+        mgr = ConfigManager(config_dir=tmp_path / "config")
+        verifier = IntegrityVerifier(profile, mgr)
+
+        for _ in verifier.verify_iter():
+            pass
+
+        result = verifier.get_result()
+        assert result.ok_count == 1
+        assert result.error_count == 1
+        assert result.total_backups == 2
+        assert result.duration_seconds > 0
+
+    def test_verify_all_still_works(self, tmp_path: Path) -> None:
+        """verify_all() backward compat — delegates to verify_iter."""
+        dest = tmp_path / "backups"
+        dest.mkdir()
+        _create_flat_backup(dest, "Backup_A", {"a.txt": b"alpha"})
+
+        profile = BackupProfile(
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(dest),
+            )
+        )
+        mgr = ConfigManager(config_dir=tmp_path / "config")
+        verifier = IntegrityVerifier(profile, mgr)
+        result = verifier.verify_all()
+
+        assert result.success
+        assert result.ok_count == 1
+
+    def test_iter_yields_connection_errors(self, tmp_path: Path) -> None:
+        """Connection errors are yielded as results too."""
+        profile = BackupProfile(
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(tmp_path / "nonexistent"),
+            )
+        )
+        mgr = ConfigManager(config_dir=tmp_path / "config")
+        verifier = IntegrityVerifier(profile, mgr)
+
+        list(verifier.verify_iter())
+        final = verifier.get_result()
+
+        # Empty dir that doesn't exist → list_backups returns []
+        assert final.total_backups == 0
+
+
 class TestVerifyAllResult:
     """Tests for VerifyAllResult dataclass."""
 

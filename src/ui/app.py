@@ -870,6 +870,12 @@ class BackupManagerApp:
         """Start integrity verification for the current profile."""
         profile, _idx = self._get_selected_profile()
         if profile is None:
+            from tkinter import messagebox
+
+            messagebox.showwarning(
+                "No profile selected",
+                "Please select a profile in the sidebar before verifying.",
+            )
             return
 
         from src.core.integrity_verifier import IntegrityVerifier
@@ -877,11 +883,13 @@ class BackupManagerApp:
         self.tab_verify.clear()
         self.tab_verify.set_running(True)
 
-        self._verifier = IntegrityVerifier(profile, self.config_manager, self.events)
+        self._verifier = IntegrityVerifier(profile, self.config_manager, events=None)
 
         def _verify_thread():
             try:
-                result = self._verifier.verify_all()
+                for bvr in self._verifier.verify_iter():
+                    self.root.after(0, self._on_verify_result, bvr)
+                result = self._verifier.get_result()
                 self.root.after(0, self._on_verify_done, result)
             except Exception as e:
                 logger.exception("Verification failed: %s", e)
@@ -899,12 +907,13 @@ class BackupManagerApp:
             self.tab_verify.set_running(False)
             self.tab_verify.status_label.config(text="Cancelled", foreground=Colors.DANGER)
 
+    def _on_verify_result(self, bvr):
+        """Handle a single verification result on the main thread."""
+        self.tab_verify.add_result(bvr.destination, bvr.backup_name, bvr.status, bvr.message)
+
     def _on_verify_done(self, result):
         """Handle verification completion on the main thread."""
         from datetime import datetime
-
-        for bvr in result.results:
-            self.tab_verify.add_result(bvr.destination, bvr.backup_name, bvr.status, bvr.message)
 
         self.tab_verify.set_complete(result.ok_count, result.error_count, result.duration_seconds)
 

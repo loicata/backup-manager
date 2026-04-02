@@ -99,8 +99,30 @@ class IntegrityVerifier:
         Returns:
             Aggregated verification result.
         """
+        for _ in self.verify_iter():
+            pass
+        return self.get_result()
+
+    def get_result(self) -> VerifyAllResult:
+        """Return the aggregated result after iteration completes.
+
+        Returns:
+            Aggregated verification result.
+        """
+        return self._result
+
+    def verify_iter(self):
+        """Yield each BackupVerifyResult as it completes.
+
+        This allows callers to process results incrementally
+        (e.g. schedule UI updates on the main thread) instead of
+        waiting for the entire verification to finish.
+
+        Yields:
+            BackupVerifyResult for each backup checked.
+        """
         start = time.monotonic()
-        result = VerifyAllResult()
+        self._result = VerifyAllResult()
         self._cancelled = False
 
         # Build list of (role, storage_config)
@@ -117,19 +139,19 @@ class IntegrityVerifier:
                 backend = _build_backend(config)
                 backups = backend.list_backups()
                 backends_and_backups.append((role, config, backend, backups))
-                result.total_backups += len(backups)
+                self._result.total_backups += len(backups)
             except Exception as e:
                 self._log.warning(f"Could not list backups on {role}: {e}")
-                result.results.append(
-                    BackupVerifyResult(
-                        backup_name="(connection)",
-                        destination=role,
-                        storage_type=config.storage_type.value,
-                        status="error",
-                        message=f"Connection failed: {e}",
-                    )
+                bvr = BackupVerifyResult(
+                    backup_name="(connection)",
+                    destination=role,
+                    storage_type=config.storage_type.value,
+                    status="error",
+                    message=f"Connection failed: {e}",
                 )
-                result.error_count += 1
+                self._result.results.append(bvr)
+                self._result.error_count += 1
+                yield bvr
 
         # Verify each backup
         checked = 0
@@ -145,22 +167,22 @@ class IntegrityVerifier:
                     continue
 
                 bvr = self._verify_single(backend, config, role, name, verify_hashes)
-                result.results.append(bvr)
+                self._result.results.append(bvr)
                 if bvr.status == "ok":
-                    result.ok_count += 1
+                    self._result.ok_count += 1
                 else:
-                    result.error_count += 1
+                    self._result.error_count += 1
 
                 checked += 1
                 self._log.progress(
                     current=checked,
-                    total=result.total_backups,
+                    total=self._result.total_backups,
                     filename=f"{role}: {name}",
                     phase="verification",
                 )
+                yield bvr
 
-        result.duration_seconds = time.monotonic() - start
-        return result
+        self._result.duration_seconds = time.monotonic() - start
 
     def _verify_single(
         self,

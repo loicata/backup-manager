@@ -4,7 +4,7 @@ import contextlib
 import tkinter as tk
 from tkinter import ttk
 
-from src.core.events import LOG, PROGRESS, EventBus
+from src.core.events import EventBus
 from src.ui.theme import Colors, Fonts, Spacing
 
 
@@ -135,33 +135,7 @@ class VerifyTab(ttk.Frame):
         log_scroll.pack(side="right", fill="y")
 
     def _subscribe_events(self) -> None:
-        self._events.subscribe(PROGRESS, self._on_progress)
-        self._events.subscribe(LOG, self._on_log)
-
-    def _on_progress(self, current=0, total=0, filename="", phase="", **kw):
-        if phase != "verification" or not self._running:
-            return
-        if total <= 0:
-            return
-        pct = min(int(current / total * 100), 99)
-        try:
-            self.progress_bar["value"] = pct
-            self.percent_label.config(text=f"{pct}%")
-            if filename:
-                self.status_label.config(text=filename)
-        except tk.TclError:
-            pass
-
-    def _on_log(self, message="", level="info", phase="", **kw):
-        if phase != "verify" or not self._running:
-            return
-        try:
-            self.log_text.config(state="normal")
-            self.log_text.insert("end", f"  {message}\n")
-            self.log_text.see("end")
-            self.log_text.config(state="disabled")
-        except tk.TclError:
-            pass
+        """Subscribe to events — currently unused (updates via add_result)."""
 
     def set_running(self, running: bool) -> None:
         """Update button states based on running status.
@@ -207,7 +181,10 @@ class VerifyTab(ttk.Frame):
             pass
 
     def add_result(self, destination: str, backup_name: str, status: str, message: str) -> None:
-        """Add a result row to the treeview.
+        """Add a result row to the treeview and update progress.
+
+        This is called on the main thread via root.after(), so all
+        Tkinter updates are safe.
 
         Args:
             destination: Destination role (e.g., "primary").
@@ -229,6 +206,17 @@ class VerifyTab(ttk.Frame):
                 values=(destination, backup_name, status_display, message),
                 tags=(status,),
             )
+            self.results_tree.yview_moveto(1.0)
+
+            self.status_label.config(text=f"{destination}: {backup_name}")
+
+            # Append to log
+            self.log_text.config(state="normal")
+            self.log_text.insert(
+                "end", f"  [{status_display}] {destination}/{backup_name}: {message}\n"
+            )
+            self.log_text.see("end")
+            self.log_text.config(state="disabled")
 
     def clear(self) -> None:
         """Reset the tab for a new verification run."""

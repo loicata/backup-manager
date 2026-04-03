@@ -1373,9 +1373,9 @@ class BackupManagerApp:
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.grab_set()
-        dlg.geometry("420x320")
+        dlg.geometry("420x240")
 
-        frame = ttk.Frame(dlg, padding=20)
+        frame = ttk.Frame(dlg, padding=(20, 20, 20, 20))
         frame.pack(fill="both", expand=True)
 
         ttk.Label(
@@ -1403,21 +1403,13 @@ class BackupManagerApp:
             lambda e: webbrowser.open("https://loicata.com"),
         )
 
+        # Spacer pushes license to the bottom
+        frame.rowconfigure(0, weight=1)
+        spacer = ttk.Frame(frame)
+        spacer.pack(fill="both", expand=True)
+
         ttk.Label(
             frame,
-            text="\nGNU General Public License v3.0\n",
+            text="GNU General Public License v3.0",
             foreground=Colors.TEXT_SECONDARY,
         ).pack(anchor="w")
-
-        ttk.Label(
-            frame,
-            text="Backup management system with encryption,\n"
-            "scheduling, and multi-destination support.",
-        ).pack(anchor="w")
-
-        ttk.Button(
-            frame,
-            text="OK",
-            style="Accent.TButton",
-            command=dlg.destroy,
-        ).pack(side="right", pady=(15, 0))

@@ -127,6 +127,10 @@ class RunTab(ttk.Frame):
             self._phase_weights = dict(weights)
 
     def _on_progress(self, current=0, total=0, filename="", phase="", **kw):
+        """Schedule progress update on the main thread."""
+        self.after(0, self._update_progress, current, total, filename, phase)
+
+    def _update_progress(self, current, total, filename, phase):
         if total <= 0:
             return
 
@@ -164,29 +168,37 @@ class RunTab(ttk.Frame):
         if pct_int >= self._last_pct:
             self._last_pct = pct_int
 
-        try:
+        with contextlib.suppress(tk.TclError):
             self.progress_bar["value"] = self._last_pct
             self.percent_label.config(text=f"{self._last_pct}%")
             if filename:
                 self.status_label.config(text=f"{phase}: {filename}")
-        except tk.TclError:
-            pass
 
     def _on_phase(self, phase="", **kw):
+        """Schedule phase label update on the main thread."""
+        self.after(0, self._update_phase, phase)
+
+    def _update_phase(self, phase):
         with contextlib.suppress(tk.TclError):
             self.status_label.config(text=phase, foreground=Colors.ACCENT)
 
     def _on_log(self, message="", level="info", **kw):
-        try:
+        """Schedule log append on the main thread."""
+        self.after(0, self._append_log, message)
+
+    def _append_log(self, message):
+        with contextlib.suppress(tk.TclError):
             self.log_text.config(state="normal")
             self.log_text.insert("end", f"  {message}\n")
             self.log_text.see("end")
             self.log_text.config(state="disabled")
-        except tk.TclError:
-            pass
 
     def _on_status(self, state="", **kw):
-        try:
+        """Schedule status update on the main thread."""
+        self.after(0, self._update_status, state)
+
+    def _update_status(self, state):
+        with contextlib.suppress(tk.TclError):
             if state == "running":
                 self.start_btn.config(state="disabled")
                 self.cancel_btn.config(state="normal")
@@ -205,8 +217,6 @@ class RunTab(ttk.Frame):
                 self.start_btn.config(state="normal")
                 self.cancel_btn.config(state="disabled")
                 self.status_label.config(text="Waiting...", foreground=Colors.TEXT_SECONDARY)
-        except tk.TclError:
-            pass
 
     def update_profile_info(self, name: str, backup_type: str, last_backup: str):
         last = last_backup or "Never"

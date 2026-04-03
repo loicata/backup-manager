@@ -50,6 +50,7 @@ from src.core.phases.mirror import mirror_backup
 from src.core.phases.rotator import rotate_backups
 from src.core.phases.verifier import verify_backup
 from src.core.phases.writer import write_backup
+from src.security.secure_memory import SecurePassword
 from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -790,30 +791,35 @@ class BackupEngine:
                 ctx.profile.encrypt_mirror1,
                 ctx.profile.encrypt_mirror2,
             ]
-            encrypt_pw = ""
+            secure_pw = None
             if ctx.profile.encryption.enabled and ctx.profile.encryption.stored_password:
-                encrypt_pw = ctx.profile.encryption.stored_password
-            logger.info(
-                "Mirror phase: encrypt_flags=%s, encryption_enabled=%s, "
-                "has_stored_password=%s, encrypt_pw_set=%s",
-                encrypt_flags,
-                ctx.profile.encryption.enabled,
-                bool(ctx.profile.encryption.stored_password),
-                bool(encrypt_pw),
-            )
+                secure_pw = SecurePassword(ctx.profile.encryption.stored_password)
+            try:
+                encrypt_pw = secure_pw.get() if secure_pw else ""
+                logger.info(
+                    "Mirror phase: encrypt_flags=%s, encryption_enabled=%s, "
+                    "has_stored_password=%s, encrypt_pw_set=%s",
+                    encrypt_flags,
+                    ctx.profile.encryption.enabled,
+                    bool(ctx.profile.encryption.stored_password),
+                    bool(encrypt_pw),
+                )
 
-            ctx.result.mirror_results = mirror_backup(
-                mirror_path,
-                ctx.files,
-                ctx.profile.mirror_destinations,
-                ctx.backup_name,
-                self._get_backend,
-                self._events,
-                encrypt_password=encrypt_pw,
-                encrypt_flags=encrypt_flags,
-                cancel_check=self._check_cancel,
-                integrity_manifest=ctx.integrity_manifest,
-            )
+                ctx.result.mirror_results = mirror_backup(
+                    mirror_path,
+                    ctx.files,
+                    ctx.profile.mirror_destinations,
+                    ctx.backup_name,
+                    self._get_backend,
+                    self._events,
+                    encrypt_password=encrypt_pw,
+                    encrypt_flags=encrypt_flags,
+                    cancel_check=self._check_cancel,
+                    integrity_manifest=ctx.integrity_manifest,
+                )
+            finally:
+                if secure_pw:
+                    secure_pw.clear()
 
     def _phase_verify_mirrors(self, ctx: PipelineContext) -> None:
         """Phase 10: Verify mirror uploads.

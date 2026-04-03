@@ -1,6 +1,6 @@
 """Tests for src.core.backup_result — error accumulation and stats."""
 
-from src.core.backup_result import BackupResult, PhaseError
+from src.core.backup_result import BackupResult, ErrorSeverity, PhaseError
 
 
 class TestPhaseError:
@@ -144,3 +144,135 @@ class TestBackupResultFields:
         """errors property returns an int (not a list)."""
         result = BackupResult()
         assert isinstance(result.errors, int)
+
+
+class TestErrorSeverity:
+    """Tests for the ErrorSeverity enum."""
+
+    def test_enum_values_exist(self) -> None:
+        """All three severity levels are defined."""
+        assert ErrorSeverity.WARNING.value == "warning"
+        assert ErrorSeverity.ERROR.value == "error"
+        assert ErrorSeverity.FATAL.value == "fatal"
+
+    def test_enum_members_count(self) -> None:
+        """Exactly three severity levels."""
+        assert len(ErrorSeverity) == 3
+
+
+class TestPhaseErrorSeverity:
+    """Tests for severity field on PhaseError."""
+
+    def test_default_severity_is_error(self) -> None:
+        """PhaseError defaults to ERROR severity."""
+        error = PhaseError(phase="writer", file_path="a.txt", message="fail")
+        assert error.severity == ErrorSeverity.ERROR
+
+    def test_explicit_severity(self) -> None:
+        """PhaseError accepts explicit severity."""
+        error = PhaseError(
+            phase="collector",
+            file_path="b.txt",
+            message="skipped",
+            severity=ErrorSeverity.WARNING,
+        )
+        assert error.severity == ErrorSeverity.WARNING
+
+    def test_fatal_severity(self) -> None:
+        """PhaseError accepts FATAL severity."""
+        error = PhaseError(
+            phase="writer",
+            file_path="",
+            message="disk gone",
+            severity=ErrorSeverity.FATAL,
+        )
+        assert error.severity == ErrorSeverity.FATAL
+
+
+class TestBackupResultWarnings:
+    """Tests for warning-level errors in BackupResult."""
+
+    def test_add_warning_does_not_fail_backup(self) -> None:
+        """Warnings do not make success False."""
+        result = BackupResult()
+        result.add_warning("collector", "a.txt", "access slow")
+        assert result.success is True
+
+    def test_warnings_count(self) -> None:
+        """warnings property counts WARNING entries."""
+        result = BackupResult()
+        result.add_warning("collector", "a.txt", "slow")
+        result.add_warning("collector", "b.txt", "slow")
+        assert result.warnings == 2
+
+    def test_errors_excludes_warnings(self) -> None:
+        """errors property does not count warnings."""
+        result = BackupResult()
+        result.add_warning("collector", "a.txt", "slow")
+        result.add_error("writer", "b.txt", "fail")
+        assert result.errors == 1
+        assert result.warnings == 1
+
+    def test_success_with_only_warnings(self) -> None:
+        """Backup with only warnings is still successful."""
+        result = BackupResult(files_processed=5)
+        result.add_warning("collector", "a.txt", "retried")
+        result.add_warning("collector", "b.txt", "retried")
+        assert result.success is True
+        assert "successful" in result.error_summary().lower()
+        assert "warning" in result.error_summary().lower()
+
+    def test_add_error_with_explicit_severity(self) -> None:
+        """add_error accepts severity parameter."""
+        result = BackupResult()
+        result.add_error("writer", "x.txt", "fail", severity=ErrorSeverity.FATAL)
+        assert result.phase_errors[0].severity == ErrorSeverity.FATAL
+
+
+class TestBackupResultFatal:
+    """Tests for FATAL severity in BackupResult."""
+
+    def test_has_fatal_errors_false_by_default(self) -> None:
+        """No fatal errors when result is empty."""
+        result = BackupResult()
+        assert result.has_fatal_errors is False
+
+    def test_has_fatal_errors_true(self) -> None:
+        """has_fatal_errors is True when FATAL error exists."""
+        result = BackupResult()
+        result.add_error("writer", "", "disk removed", severity=ErrorSeverity.FATAL)
+        assert result.has_fatal_errors is True
+
+    def test_success_false_with_fatal(self) -> None:
+        """success is False with a FATAL error."""
+        result = BackupResult()
+        result.add_error("writer", "", "boom", severity=ErrorSeverity.FATAL)
+        assert result.success is False
+
+    def test_has_fatal_errors_false_with_only_warnings(self) -> None:
+        """has_fatal_errors is False with only warnings."""
+        result = BackupResult()
+        result.add_warning("collector", "a.txt", "retried")
+        assert result.has_fatal_errors is False
+
+
+class TestErrorSummaryWithSeverity:
+    """Tests for error_summary with mixed severity levels."""
+
+    def test_summary_shows_severity_tags(self) -> None:
+        """Error summary includes severity tags for non-warning errors."""
+        result = BackupResult(files_processed=10)
+        result.add_error("writer", "a.txt", "fail A")
+        result.add_error("writer", "", "disk full", severity=ErrorSeverity.FATAL)
+        summary = result.error_summary()
+        assert "ERROR" in summary
+        assert "FATAL" in summary
+
+    def test_summary_warnings_not_shown_as_errors(self) -> None:
+        """Warnings are summarized separately, not listed with errors."""
+        result = BackupResult(files_processed=10)
+        result.add_error("writer", "a.txt", "fail")
+        result.add_warning("collector", "b.txt", "slow read")
+        summary = result.error_summary()
+        assert "1 error" in summary.lower()
+        assert "warning" in summary.lower()

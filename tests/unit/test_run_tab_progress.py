@@ -2,6 +2,9 @@
 
 Verifies that the weighted progress bar correctly computes percentages
 when phases report progress at different times.
+
+Note: _on_progress() schedules via Tk.after(0, ...) so we must call
+update_idletasks() to flush the queue before asserting on _last_pct.
 """
 
 import pytest
@@ -19,6 +22,21 @@ def run_tab(tk_root):
     tab.destroy()
 
 
+def _progress(run_tab, **kwargs):
+    """Call _update_progress directly, bypassing Tk.after() scheduling.
+
+    In production, _on_progress() defers to _update_progress() via
+    self.after(0, ...). In tests, the Tk event loop is not running,
+    so we call the underlying method directly.
+    """
+    run_tab._update_progress(
+        kwargs.get("current", 0),
+        kwargs.get("total", 0),
+        kwargs.get("filename", ""),
+        kwargs.get("phase", ""),
+    )
+
+
 class TestProgressCalculation:
     """Test the weighted progress bar logic."""
 
@@ -33,7 +51,7 @@ class TestProgressCalculation:
 
         # Simulate hashing completing all 10 files
         for i in range(1, 11):
-            run_tab._on_progress(current=i, total=10, filename=f"file{i}", phase="hashing")
+            _progress(run_tab, current=i, total=10, filename=f"file{i}", phase="hashing")
 
         # Hashing weight=1, total_weight=1+2+1=4 → max 25%
         assert run_tab._last_pct == 25
@@ -44,17 +62,17 @@ class TestProgressCalculation:
 
         # Hashing: 5 files → 1/4 = 25%
         for i in range(1, 6):
-            run_tab._on_progress(current=i, total=5, filename=f"f{i}", phase="hashing")
+            _progress(run_tab, current=i, total=5, filename=f"f{i}", phase="hashing")
         assert run_tab._last_pct == 25
 
         # Backup: 5 files → 25 + 2/4*100 = 75%
         for i in range(1, 6):
-            run_tab._on_progress(current=i, total=5, filename=f"f{i}", phase="backup")
+            _progress(run_tab, current=i, total=5, filename=f"f{i}", phase="backup")
         assert run_tab._last_pct == 75
 
         # Verification: 5 files → 75 + 1/4*100 = 99% (capped)
         for i in range(1, 6):
-            run_tab._on_progress(current=i, total=5, filename=f"f{i}", phase="verification")
+            _progress(run_tab, current=i, total=5, filename=f"f{i}", phase="verification")
         assert run_tab._last_pct == 99
 
     def test_remote_backup_progress_flow(self, run_tab):
@@ -62,29 +80,29 @@ class TestProgressCalculation:
         run_tab._on_phase_count(weights={"hashing": 1, "upload": 5, "verification": 1})
 
         # Hashing: 100% → 1/7 ≈ 14%
-        run_tab._on_progress(current=3, total=3, filename="f", phase="hashing")
+        _progress(run_tab, current=3, total=3, filename="f", phase="hashing")
         assert run_tab._last_pct == 14
 
         # Upload halfway: 1/7*100 + 5/7*50 = 14.28 + 35.71 = 50%
-        run_tab._on_progress(current=5, total=10, filename="f", phase="upload")
+        _progress(run_tab, current=5, total=10, filename="f", phase="upload")
         assert run_tab._last_pct == 50
 
     def test_progress_monotonic(self, run_tab):
         """Progress never goes backwards."""
         run_tab._on_phase_count(weights={"hashing": 1, "backup": 2})
 
-        run_tab._on_progress(current=5, total=10, filename="f", phase="hashing")
+        _progress(run_tab, current=5, total=10, filename="f", phase="hashing")
         pct_after_half = run_tab._last_pct
 
         # Even with weird lower values, monotonic holds
-        run_tab._on_progress(current=3, total=10, filename="f", phase="hashing")
+        _progress(run_tab, current=3, total=10, filename="f", phase="hashing")
         assert run_tab._last_pct >= pct_after_half
 
     def test_no_weights_declared_fallback(self, run_tab):
         """Without PHASE_COUNT, each seen phase gets weight=1."""
         # No _on_phase_count call — simulate missing event
 
-        run_tab._on_progress(current=10, total=10, filename="f", phase="hashing")
+        _progress(run_tab, current=10, total=10, filename="f", phase="hashing")
         # Only one phase known, weight=1/1 → 99% (capped)
         assert run_tab._last_pct == 99
 
@@ -94,7 +112,7 @@ class TestProgressCalculation:
 
         # "unknown_phase" not declared — should get weight=1
         # total_weight = 1 + 2 + 1 = 4
-        run_tab._on_progress(current=10, total=10, filename="f", phase="unknown_phase")
+        _progress(run_tab, current=10, total=10, filename="f", phase="unknown_phase")
         assert run_tab._last_pct == 25  # 1/4 * 100
 
     def test_mirror_upload_weight(self, run_tab):
@@ -109,7 +127,7 @@ class TestProgressCalculation:
         )
 
         # Hashing done → 1/9 ≈ 11%
-        run_tab._on_progress(current=5, total=5, filename="f", phase="hashing")
+        _progress(run_tab, current=5, total=5, filename="f", phase="hashing")
         assert run_tab._last_pct == 11
 
     def test_remote_with_rotation_progress(self, run_tab):
@@ -119,27 +137,27 @@ class TestProgressCalculation:
         )
 
         # Hashing done → 1/8 = 12%
-        run_tab._on_progress(current=10, total=10, filename="f", phase="hashing")
+        _progress(run_tab, current=10, total=10, filename="f", phase="hashing")
         assert run_tab._last_pct == 12
 
         # Upload done → (1+5)/8 = 75%
-        run_tab._on_progress(current=100, total=100, filename="f", phase="upload")
+        _progress(run_tab, current=100, total=100, filename="f", phase="upload")
         assert run_tab._last_pct == 75
 
         # Verification done → (1+5+1)/8 = 87%
-        run_tab._on_progress(current=5, total=5, filename="f", phase="verification")
+        _progress(run_tab, current=5, total=5, filename="f", phase="verification")
         assert run_tab._last_pct == 87
 
         # Rotation halfway → 87 + 1/8*50 = 93%
-        run_tab._on_progress(current=3, total=6, filename="old", phase="rotation")
+        _progress(run_tab, current=3, total=6, filename="old", phase="rotation")
         assert run_tab._last_pct == 93
 
         # Rotation done → 99% (capped)
-        run_tab._on_progress(current=6, total=6, filename="old", phase="rotation")
+        _progress(run_tab, current=6, total=6, filename="old", phase="rotation")
         assert run_tab._last_pct == 99
 
     def test_zero_total_ignored(self, run_tab):
         """Progress with total=0 is silently ignored."""
         run_tab._on_phase_count(weights={"hashing": 1})
-        run_tab._on_progress(current=0, total=0, filename="f", phase="hashing")
+        _progress(run_tab, current=0, total=0, filename="f", phase="hashing")
         assert run_tab._last_pct == 0

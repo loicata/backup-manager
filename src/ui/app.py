@@ -1088,11 +1088,12 @@ class BackupManagerApp:
                 f"[{profile.name}] {stats.files_processed} files "
                 f"in {stats.duration_seconds:.0f}s",
             )
-            self.scheduler.journal.update_last(
-                status="success",
-                files_count=stats.files_processed,
-                duration_seconds=stats.duration_seconds,
-            )
+            with self.scheduler.op_lock:
+                self.scheduler.journal.update_last(
+                    status="success",
+                    files_count=stats.files_processed,
+                    duration_seconds=stats.duration_seconds,
+                )
 
             self._save_backup_log(profile, stats)
 

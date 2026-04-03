@@ -363,6 +363,121 @@ class TestStartupMissedBackup:
         assert entries[-1]["trigger"] == "missed_recovery"
 
 
+class TestOpLockAtomicity:
+    """Tests for the compound operation lock in InAppScheduler."""
+
+    def _make_profile(self, freq=ScheduleFrequency.DAILY, time="00:00"):
+        return BackupProfile(
+            name="OpLockTest",
+            schedule=ScheduleConfig(enabled=True, frequency=freq, time=time),
+        )
+
+    def test_op_lock_property_exists(self, tmp_path):
+        """InAppScheduler exposes op_lock property."""
+        scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
+        assert isinstance(scheduler.op_lock, type(threading.Lock()))
+
+    def test_trigger_backup_state_and_journal_consistent(self, tmp_path):
+        """After _trigger_backup, state and journal are both updated."""
+        profile = self._make_profile()
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=lambda p: None,
+        )
+        now = datetime.now()
+        scheduler._trigger_backup(profile, now)
+
+        # State should have the trigger time
+        last = scheduler._state.get_last_trigger(profile.id)
+        assert last is not None
+
+        # Journal should have a corresponding entry
+        entries = scheduler.journal.get_entries(profile_id=profile.id)
+        assert len(entries) >= 1
+        assert entries[-1]["status"] == "success"
+
+    def test_trigger_backup_failed_state_and_journal_consistent(self, tmp_path):
+        """On callback failure, both state and journal reflect the failure."""
+        profile = self._make_profile()
+        profile.schedule.retry_enabled = False
+
+        def failing_callback(p):
+            raise RuntimeError("Simulated failure")
+
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=failing_callback,
+        )
+        now = datetime.now()
+        scheduler._trigger_backup(profile, now)
+
+        # State should have the trigger time (set before callback)
+        last = scheduler._state.get_last_trigger(profile.id)
+        assert last is not None
+
+        # Journal should show failed status
+        entries = scheduler.journal.get_entries(profile_id=profile.id)
+        assert len(entries) >= 1
+        assert entries[-1]["status"] == "failed"
+
+    def test_concurrent_trigger_and_read(self, tmp_path):
+        """Reading journal while trigger is in progress is safe."""
+        profile = self._make_profile()
+        barrier = threading.Barrier(2)
+        read_results: list[list] = []
+
+        def slow_callback(p):
+            barrier.wait(timeout=5)
+
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=slow_callback,
+        )
+
+        def trigger_thread():
+            scheduler._trigger_backup(profile, datetime.now())
+
+        def read_thread():
+            barrier.wait(timeout=5)
+            entries = scheduler.journal.get_entries()
+            read_results.append(entries)
+
+        t1 = threading.Thread(target=trigger_thread)
+        t2 = threading.Thread(target=read_thread)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        # Read should have seen at least the "started" entry
+        assert len(read_results) == 1
+        assert len(read_results[0]) >= 1
+
+    def test_op_lock_not_held_during_callback(self, tmp_path):
+        """op_lock should NOT be held while backup_callback runs."""
+        profile = self._make_profile()
+        lock_was_available = []
+
+        def probe_callback(p):
+            # Try to acquire op_lock — should succeed if not held
+            acquired = scheduler.op_lock.acquire(timeout=1)
+            lock_was_available.append(acquired)
+            if acquired:
+                scheduler.op_lock.release()
+
+        scheduler = InAppScheduler(
+            tmp_path,
+            get_profiles=lambda: [profile],
+            backup_callback=probe_callback,
+        )
+        scheduler._trigger_backup(profile, datetime.now())
+
+        assert lock_was_available == [True]
+
+
 class TestAutoStart:
     def test_is_enabled_when_no_file(self):
         assert AutoStart.is_enabled() is True or AutoStart.is_enabled() is False

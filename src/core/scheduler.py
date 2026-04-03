@@ -221,6 +221,7 @@ class InAppScheduler:
         self._config_manager = config_manager
         self._journal = ScheduleJournal(config_dir)
         self._state = SchedulerState(config_dir)
+        self._op_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._running = False
         self._last_check_time = time.monotonic()
@@ -229,6 +230,16 @@ class InAppScheduler:
     @property
     def journal(self) -> ScheduleJournal:
         return self._journal
+
+    @property
+    def op_lock(self) -> threading.Lock:
+        """Lock for compound state+journal operations.
+
+        External callers (e.g. UI thread updating journal after a
+        scheduled backup) should acquire this lock to participate
+        in the same atomicity scheme as the scheduler daemon thread.
+        """
+        return self._op_lock
 
     def start(self) -> None:
         if self._running:
@@ -380,26 +391,30 @@ class InAppScheduler:
             trigger: Trigger source for journal logging.
         """
         logger.info("Triggering scheduled backup: %s", profile.name)
-        self._state.set_last_trigger(profile.id, now)
-        self._journal.add(
-            ScheduleLogEntry(
-                profile_id=profile.id,
-                profile_name=profile.name,
-                trigger=trigger,
-                status="started",
+        with self._op_lock:
+            self._state.set_last_trigger(profile.id, now)
+            self._journal.add(
+                ScheduleLogEntry(
+                    profile_id=profile.id,
+                    profile_name=profile.name,
+                    trigger=trigger,
+                    status="started",
+                )
             )
-        )
 
+        # Callback runs OUTSIDE the lock (can take minutes)
         try:
             self._backup_callback(profile)
-            self._journal.update_last(status="success")
+            with self._op_lock:
+                self._journal.update_last(status="success")
             logger.info("Scheduled backup succeeded: %s", profile.name)
         except Exception as e:
             logger.exception("Scheduled backup failed: %s", profile.name)
-            self._journal.update_last(
-                status="failed",
-                detail=f"{type(e).__name__}: {e}",
-            )
+            with self._op_lock:
+                self._journal.update_last(
+                    status="failed",
+                    detail=f"{type(e).__name__}: {e}",
+                )
 
             # Retry logic
             if profile.schedule.retry_enabled:
@@ -428,15 +443,16 @@ class InAppScheduler:
                 profile.name,
                 delay_minutes,
             )
-            self._journal.add(
-                ScheduleLogEntry(
-                    profile_id=profile.id,
-                    profile_name=profile.name,
-                    trigger=f"retry_{attempt}",
-                    status="waiting",
-                    detail=f"Retry {attempt}/{total_attempts} in {delay_minutes}min",
+            with self._op_lock:
+                self._journal.add(
+                    ScheduleLogEntry(
+                        profile_id=profile.id,
+                        profile_name=profile.name,
+                        trigger=f"retry_{attempt}",
+                        status="waiting",
+                        detail=f"Retry {attempt}/{total_attempts} in {delay_minutes}min",
+                    )
                 )
-            )
 
             # Sleep in small increments to allow scheduler stop
             sleep_seconds = delay_minutes * 60
@@ -456,11 +472,14 @@ class InAppScheduler:
                 total_attempts,
                 profile.name,
             )
-            self._journal.update_last(status="started")
+            with self._op_lock:
+                self._journal.update_last(status="started")
 
+            # Callback runs OUTSIDE the lock
             try:
                 self._backup_callback(profile)
-                self._journal.update_last(status="success")
+                with self._op_lock:
+                    self._journal.update_last(status="success")
                 logger.info(
                     "Retry %d/%d succeeded for '%s'",
                     attempt,
@@ -475,10 +494,11 @@ class InAppScheduler:
                     total_attempts,
                     profile.name,
                 )
-                self._journal.update_last(
-                    status="failed",
-                    detail=f"Retry {attempt}/{total_attempts}: {type(e).__name__}: {e}",
-                )
+                with self._op_lock:
+                    self._journal.update_last(
+                        status="failed",
+                        detail=f"Retry {attempt}/{total_attempts}: {type(e).__name__}: {e}",
+                    )
 
         logger.error(
             "All %d retries exhausted for '%s'",
@@ -503,16 +523,17 @@ class InAppScheduler:
             profile.name,
             interval_days,
         )
-        self._state.set_last_verify(profile.id, now)
-        self._journal.add(
-            ScheduleLogEntry(
-                profile_id=profile.id,
-                profile_name=profile.name,
-                trigger="verify",
-                status="started",
-                detail="Periodic integrity verification",
+        with self._op_lock:
+            self._state.set_last_verify(profile.id, now)
+            self._journal.add(
+                ScheduleLogEntry(
+                    profile_id=profile.id,
+                    profile_name=profile.name,
+                    trigger="verify",
+                    status="started",
+                    detail="Periodic integrity verification",
+                )
             )
-        )
 
         try:
             from src.core.config import ConfigManager
@@ -522,16 +543,17 @@ class InAppScheduler:
             verifier = IntegrityVerifier(profile, cm, events=None)
             result = verifier.verify_all()
 
-            if result.success:
-                self._journal.update_last(
-                    status="success",
-                    detail=f"Verified {result.ok_count} backups OK",
-                )
-            else:
-                self._journal.update_last(
-                    status="failed",
-                    detail=f"{result.error_count} error(s), {result.ok_count} OK",
-                )
+            with self._op_lock:
+                if result.success:
+                    self._journal.update_last(
+                        status="success",
+                        detail=f"Verified {result.ok_count} backups OK",
+                    )
+                else:
+                    self._journal.update_last(
+                        status="failed",
+                        detail=f"{result.error_count} error(s), {result.ok_count} OK",
+                    )
             logger.info(
                 "Verification for '%s': %d OK, %d errors",
                 profile.name,
@@ -540,10 +562,11 @@ class InAppScheduler:
             )
         except Exception as e:
             logger.exception("Verification failed for '%s'", profile.name)
-            self._journal.update_last(
-                status="failed",
-                detail=f"Verify error: {type(e).__name__}: {e}",
-            )
+            with self._op_lock:
+                self._journal.update_last(
+                    status="failed",
+                    detail=f"Verify error: {type(e).__name__}: {e}",
+                )
 
     def _check_missed_backups(self, now: datetime) -> None:
         for profile in self._get_profiles():

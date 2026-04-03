@@ -7,8 +7,22 @@ notifications.
 
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+class ErrorSeverity(Enum):
+    """Severity level for pipeline phase errors.
+
+    WARNING: Non-critical issue that does not fail the backup.
+    ERROR: File-level or phase-level failure.
+    FATAL: Unrecoverable error that should stop the pipeline.
+    """
+
+    WARNING = "warning"
+    ERROR = "error"
+    FATAL = "fatal"
 
 
 @dataclass
@@ -26,6 +40,7 @@ class PhaseError:
     file_path: str
     message: str
     exception: Exception | None = None
+    severity: ErrorSeverity = ErrorSeverity.ERROR
 
 
 @dataclass
@@ -59,13 +74,30 @@ class BackupResult:
 
     @property
     def errors(self) -> int:
-        """Total error count."""
-        return len(self.phase_errors)
+        """Count of ERROR and FATAL severity errors."""
+        return sum(
+            1 for e in self.phase_errors if e.severity in (ErrorSeverity.ERROR, ErrorSeverity.FATAL)
+        )
+
+    @property
+    def warnings(self) -> int:
+        """Count of WARNING severity errors."""
+        return sum(1 for e in self.phase_errors if e.severity == ErrorSeverity.WARNING)
 
     @property
     def success(self) -> bool:
-        """True if the backup completed without any errors."""
-        return len(self.phase_errors) == 0
+        """True if the backup completed without ERROR or FATAL errors.
+
+        Warnings do not cause the backup to be considered failed.
+        """
+        return not any(
+            e.severity in (ErrorSeverity.ERROR, ErrorSeverity.FATAL) for e in self.phase_errors
+        )
+
+    @property
+    def has_fatal_errors(self) -> bool:
+        """True if any FATAL error was recorded."""
+        return any(e.severity == ErrorSeverity.FATAL for e in self.phase_errors)
 
     def add_error(
         self,
@@ -73,6 +105,7 @@ class BackupResult:
         file_path: str,
         message: str,
         exception: Exception | None = None,
+        severity: ErrorSeverity = ErrorSeverity.ERROR,
     ) -> None:
         """Record an error from a pipeline phase.
 
@@ -81,15 +114,37 @@ class BackupResult:
             file_path: File that caused the error, or "" for phase-level.
             message: Human-readable error description.
             exception: Original exception, if available.
+            severity: Error severity level (default ERROR).
         """
         error = PhaseError(
             phase=phase,
             file_path=file_path,
             message=message,
             exception=exception,
+            severity=severity,
         )
         self.phase_errors.append(error)
-        logger.error("[%s] %s: %s", phase, file_path or "(phase)", message)
+        log_fn = logger.warning if severity == ErrorSeverity.WARNING else logger.error
+        log_fn("[%s] %s: %s", phase, file_path or "(phase)", message)
+
+    def add_warning(
+        self,
+        phase: str,
+        file_path: str,
+        message: str,
+        exception: Exception | None = None,
+    ) -> None:
+        """Record a warning from a pipeline phase.
+
+        Warnings do not cause the backup to be considered failed.
+
+        Args:
+            phase: Phase identifier (e.g. "collector", "writer").
+            file_path: File that caused the warning, or "" for phase-level.
+            message: Human-readable warning description.
+            exception: Original exception, if available.
+        """
+        self.add_error(phase, file_path, message, exception, severity=ErrorSeverity.WARNING)
 
     def error_summary(self) -> str:
         """Human-readable error summary for the user.
@@ -97,26 +152,43 @@ class BackupResult:
         Returns:
             A string describing the backup outcome.
         """
-        if self.success:
+        warn_count = self.warnings
+        err_count = self.errors
+
+        if self.success and warn_count == 0:
             return f"Backup successful: {self.files_processed} files, no errors"
 
-        error_count = len(self.phase_errors)
-        ok_count = self.files_processed - error_count
+        if self.success and warn_count > 0:
+            return (
+                f"Backup successful with {warn_count} warning(s): " f"{self.files_processed} files"
+            )
+
+        ok_count = self.files_processed - err_count
         lines = [
-            f"Backup completed with {error_count} error(s) "
+            f"Backup completed with {err_count} error(s) "
             f"({ok_count}/{self.files_processed} files OK):"
         ]
 
-        # Show up to 10 errors
+        # Show up to 10 non-warning errors first
         display_limit = 10
-        for error in self.phase_errors[:display_limit]:
+        shown = 0
+        for error in self.phase_errors:
+            if error.severity == ErrorSeverity.WARNING:
+                continue
+            if shown >= display_limit:
+                break
+            tag = error.severity.value.upper()
             if error.file_path:
-                lines.append(f"  [{error.phase}] {error.file_path}: {error.message}")
+                lines.append(f"  [{tag}][{error.phase}] {error.file_path}: {error.message}")
             else:
-                lines.append(f"  [{error.phase}] {error.message}")
+                lines.append(f"  [{tag}][{error.phase}] {error.message}")
+            shown += 1
 
-        remaining = error_count - display_limit
+        remaining = err_count - shown
         if remaining > 0:
             lines.append(f"  ...and {remaining} more error(s)")
+
+        if warn_count > 0:
+            lines.append(f"  ({warn_count} warning(s) not shown)")
 
         return "\n".join(lines)

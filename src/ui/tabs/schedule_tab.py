@@ -101,13 +101,11 @@ class ScheduleTab(ttk.Frame):
         self.journal_tree.pack(side="left", fill="both", expand=True)
         journal_scroll.pack(side="right", fill="y")
 
-        journal_btn_row = ttk.Frame(journal_frame)
-        journal_btn_row.pack(anchor="e", pady=(Spacing.SMALL, 0))
-        ttk.Button(journal_btn_row, text="Refresh", command=self._refresh_journal).pack(
-            side="left", padx=(0, Spacing.SMALL)
+        ttk.Button(journal_frame, text="Refresh", command=self._refresh_journal).pack(
+            anchor="e", pady=(Spacing.SMALL, 0)
         )
-        ttk.Button(journal_btn_row, text="Clear", command=self._clear_journal).pack(
-            side="left"
+        ttk.Button(journal_frame, text="Clear", command=self._clear_journal).pack(
+            anchor="e", pady=(Spacing.SMALL, 0)
         )
 
         # Periodic integrity verification

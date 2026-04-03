@@ -1402,7 +1402,14 @@ class BackupManagerApp:
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.grab_set()
-        dlg.geometry("420x240")
+        # Center on parent window
+        dlg.withdraw()
+        dlg.update_idletasks()
+        w, h = 420, 240
+        px = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
+        py = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
+        dlg.geometry(f"{w}x{h}+{px}+{py}")
+        dlg.deiconify()
 
         frame = ttk.Frame(dlg, padding=(20, 20, 20, 20))
         frame.pack(fill="both", expand=True)

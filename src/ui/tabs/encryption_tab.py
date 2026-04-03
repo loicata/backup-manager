@@ -71,51 +71,6 @@ class EncryptionTab(ttk.Frame):
         )
         self._mirror2_cb.pack(anchor="w", pady=2)
 
-        # Encryption description
-        desc_line1 = (
-            "This software uses AES-256-GCM encryption with "
-            "PBKDF2-HMAC-SHA256 key derivation (600,000 iterations), "
-            "following OWASP 2024 recommendations."
-        )
-        desc_line2 = "Your backups are protected with military-grade " "authenticated encryption."
-        tk.Label(
-            mode_frame,
-            text=desc_line1,
-            fg=Colors.ACCENT,
-            wraplength=900,
-            justify="left",
-            anchor="w",
-        ).pack(fill="x", pady=(8, 0))
-        tk.Label(
-            mode_frame,
-            text=desc_line2,
-            fg=Colors.ACCENT,
-            wraplength=900,
-            justify="left",
-            anchor="w",
-        ).pack(fill="x")
-
-        # Warning text
-        warning_line1 = "But encryption introduces risk."
-        warning_line2 = (
-            "If you enable encryption, always perform a manual test "
-            "using the Recovery tab to verify that you can restore "
-            "your encrypted backups."
-        )
-        tk.Label(
-            mode_frame,
-            text=warning_line1,
-            fg=Colors.ACCENT,
-            anchor="w",
-        ).pack(fill="x", pady=(12, 0))
-        tk.Label(
-            mode_frame,
-            text=warning_line2,
-            fg=Colors.ACCENT,
-            wraplength=900,
-            justify="left",
-            anchor="w",
-        ).pack(fill="x")
 
         # Password frame (shown/hidden based on encryption selection)
         self._pw_frame = ttk.LabelFrame(self, text="Encryption password", padding=Spacing.PAD)

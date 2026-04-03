@@ -105,6 +105,12 @@ class ScheduleJournal:
                 entries = [e for e in entries if e.get("profile_id") == profile_id]
             return entries[-limit:]
 
+    def clear(self) -> None:
+        """Remove all journal entries (thread-safe)."""
+        with self._lock:
+            self._entries.clear()
+            self._save()
+
     def get_last_run(self, profile_id: str) -> dict | None:
         """Get the most recent run for a given profile (thread-safe).
 

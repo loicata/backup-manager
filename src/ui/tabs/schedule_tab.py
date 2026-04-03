@@ -101,8 +101,13 @@ class ScheduleTab(ttk.Frame):
         self.journal_tree.pack(side="left", fill="both", expand=True)
         journal_scroll.pack(side="right", fill="y")
 
-        ttk.Button(journal_frame, text="Refresh", command=self._refresh_journal).pack(
-            anchor="e", pady=(Spacing.SMALL, 0)
+        journal_btn_row = ttk.Frame(journal_frame)
+        journal_btn_row.pack(anchor="e", pady=(Spacing.SMALL, 0))
+        ttk.Button(journal_btn_row, text="Refresh", command=self._refresh_journal).pack(
+            side="left", padx=(0, Spacing.SMALL)
+        )
+        ttk.Button(journal_btn_row, text="Clear", command=self._clear_journal).pack(
+            side="left"
         )
 
         # Periodic integrity verification
@@ -143,6 +148,13 @@ class ScheduleTab(ttk.Frame):
             widget.configure(state=state)
         for child in widget.winfo_children():
             self._set_state_recursive(child, state)
+
+    def _clear_journal(self):
+        """Clear all entries from the schedule journal."""
+        if self._scheduler:
+            with self._scheduler.op_lock:
+                self._scheduler.journal.clear()
+            self._refresh_journal()
 
     def _refresh_journal(self):
         for item in self.journal_tree.get_children():

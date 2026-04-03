@@ -202,11 +202,24 @@ All remote file paths are validated before use:
 
 ---
 
+## Periodic Integrity Verification
+
+- **On-demand verification** — click "Verify all backups" on the Verify tab to check all backups across all destinations (primary + mirrors).
+- **Scheduled verification** — enable periodic verification in the Schedule tab (default: every 7 days). Runs automatically in the background.
+- **Encrypted archives** — verified by comparing SHA-256 hash against the reference stored at backup time (no password needed).
+- **Flat backups** — re-hashes every file against the `.wbverify` manifest.
+- **Remote verification** — SFTP uses server-side `sha256sum`; S3 uses size comparison (S3 guarantees integrity at rest).
+- **Real-time results** — each backup result appears immediately in the results table as verification progresses.
+- **Email reports** — verification results are sent via email with a structured HTML table (Destination, Backup, Status, Details).
+
+---
+
 ## Email notifications
 
 - SMTP-based alerts on backup **success** or **failure**.
 - Configurable recipient, subject, SMTP server, port, and TLS settings.
 - HTML-formatted reports with backup details: file count, duration, destination, errors.
+- Verification reports with structured HTML table matching the UI layout.
 - Preset configurations for common providers (Gmail, Outlook, Yahoo).
 
 ---
@@ -268,10 +281,11 @@ After the wizard, you land on the main interface with a modern Windows 11-style 
 | **Mirror 1** | First optional mirror destination (local, network, SFTP, or S3) |
 | **Mirror 2** | Second optional mirror destination |
 | **Encryption** | AES-256-GCM encryption toggle per destination (primary, mirror 1, mirror 2) with password management |
-| **Schedule** | Backup frequency (manual, hourly, daily, weekly, monthly), time, and auto-retry settings |
+| **Schedule** | Backup frequency (manual, hourly, daily, weekly, monthly), time, auto-retry, and periodic integrity verification settings |
 | **Retention** | GFS rotation policy — daily, weekly, and monthly backup counts |
 | **Email** | SMTP notification settings with provider presets and test button |
 | **Recovery** | Restore from local backup or retrieve from remote destination |
+| **Verify** | On-demand integrity verification of all backups across all destinations with real-time results |
 | **History** | Browse past backup logs with date, profile, and size |
 
 Click **Start backup** on the Run tab to perform an immediate backup, or let the scheduler handle it automatically.
@@ -319,7 +333,7 @@ pytest --cov=src --cov-report=term-missing
 pytest tests/unit/test_backup_engine.py -v
 ```
 
-**Current status:** 717 tests | 84% coverage | 0 failures
+**Current status:** 799 tests | 84% coverage | 0 failures
 
 CI pipeline: GitHub Actions on every push — Black formatting, Ruff linting (Ubuntu), full test suite with coverage enforcement (Windows, Python 3.12 + 3.13).
 
@@ -335,6 +349,7 @@ backup-manager/
 │   │   ├── config.py                # Profile dataclasses & JSON persistence
 │   │   ├── events.py                # Thread-safe event bus for UI updates
 │   │   ├── hashing.py               # SHA-256 file hashing
+│   │   ├── integrity_verifier.py    # Periodic backup integrity verification
 │   │   ├── scheduler.py             # Windows Task Scheduler + in-app scheduler
 │   │   └── phases/                  # Pipeline phases
 │   │       ├── collector.py            # File collection & exclusion filtering

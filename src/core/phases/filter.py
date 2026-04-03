@@ -6,6 +6,7 @@ which files have changed and need to be backed up.
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from src.core.events import EventBus
@@ -44,6 +45,7 @@ def filter_changed_files(
     files: list[FileInfo],
     manifest_path: Path,
     events: EventBus | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> list[FileInfo]:
     """Filter files that have changed since last backup.
 
@@ -54,6 +56,7 @@ def filter_changed_files(
         files: All collected files.
         manifest_path: Path to the manifest JSON.
         events: Optional event bus for logging.
+        cancel_check: Callable that raises CancelledError if cancelled.
 
     Returns:
         List of files that need to be backed up.
@@ -69,6 +72,9 @@ def filter_changed_files(
     skipped = 0
 
     for file_info in files:
+        if cancel_check is not None:
+            cancel_check()
+
         key = file_info.relative_path
         prev = manifest.get(key)
 

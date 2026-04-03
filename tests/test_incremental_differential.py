@@ -780,3 +780,55 @@ class TestDestinationChangeForcesFull:
         expected = compute_profile_hash(profile)
         assert profile.profile_hash == expected
         assert len(profile.profile_hash) == 64
+
+
+class TestFilterCancelCheck:
+    """Tests for cancel_check support in filter_changed_files."""
+
+    def test_cancel_during_filter_raises(self, tmp_path):
+        """CancelledError raised mid-filter stops iteration."""
+        from src.core.exceptions import CancelledError
+
+        source = tmp_path / "src"
+        source.mkdir()
+        for i in range(10):
+            (source / f"f{i}.txt").write_text(f"data{i}")
+
+        manifest_path = tmp_path / "manifest.json"
+        files = collect_files([str(source)])
+
+        # Build a manifest so filter actually hashes files
+        manifest = {}
+        for f in files:
+            manifest[f.relative_path] = {
+                "hash": "wrong_hash",
+                "size": f.size,
+                "mtime": f.mtime,
+            }
+        save_manifest(manifest, manifest_path)
+
+        call_count = 0
+
+        def cancel_after_3():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 3:
+                raise CancelledError()
+
+        with pytest.raises(CancelledError):
+            filter_changed_files(files, manifest_path, cancel_check=cancel_after_3)
+
+        assert call_count == 3
+
+    def test_filter_works_without_cancel_check(self, tmp_path):
+        """filter_changed_files still works when cancel_check is None."""
+        source = tmp_path / "src"
+        source.mkdir()
+        (source / "a.txt").write_text("hello")
+
+        files = collect_files([str(source)])
+        manifest_path = tmp_path / "manifest.json"
+
+        # No manifest → returns all files
+        result = filter_changed_files(files, manifest_path)
+        assert len(result) == 1

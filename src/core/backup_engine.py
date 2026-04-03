@@ -253,7 +253,9 @@ class BackupEngine:
         self._check_cancel()
         if ctx.profile.backup_type == BackupType.DIFFERENTIAL:
             manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
-            ctx.files = filter_changed_files(ctx.files, manifest_path, self._events)
+            ctx.files = filter_changed_files(
+                ctx.files, manifest_path, self._events, cancel_check=self._check_cancel
+            )
             ctx.result.files_skipped = ctx.result.files_found - len(ctx.files)
             if not ctx.files:
                 self._log("No changes detected — backup skipped")

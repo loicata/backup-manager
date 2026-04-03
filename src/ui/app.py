@@ -840,6 +840,21 @@ class BackupManagerApp:
         self.tab_run.clear_log()
 
         def _backup_thread():
+            from datetime import datetime
+
+            from src.core.scheduler import ScheduleLogEntry
+
+            # Log manual backup start in the schedule journal
+            with self.scheduler.op_lock:
+                self.scheduler.journal.add(
+                    ScheduleLogEntry(
+                        profile_id=profile.id,
+                        profile_name=profile.name,
+                        trigger="manual",
+                        status="started",
+                    )
+                )
+
             try:
                 self.tray.set_state(TrayState.BACKUP_RUNNING)
                 stats = self.engine.run_backup(profile)
@@ -849,12 +864,17 @@ class BackupManagerApp:
                     f"{stats.files_processed} files in {stats.duration_seconds:.0f}s",
                 )
 
+                with self.scheduler.op_lock:
+                    self.scheduler.journal.update_last(
+                        status="success",
+                        files_count=stats.files_processed,
+                        duration_seconds=stats.duration_seconds,
+                    )
+
                 # Save backup log to file
                 self._save_backup_log(profile, stats)
 
                 # Update last_backup
-                from datetime import datetime
-
                 profile.last_backup = datetime.now().isoformat()
                 self.config_manager.save_profile(profile)
 
@@ -870,6 +890,8 @@ class BackupManagerApp:
             except CancelledError:
                 self.tray.set_state(TrayState.IDLE)
                 result = self.engine._current_result if self.engine else None
+                with self.scheduler.op_lock:
+                    self.scheduler.journal.update_last(status="cancelled")
                 if result:
                     self._save_backup_log(profile, result)
                 if profile.email.enabled:
@@ -884,6 +906,11 @@ class BackupManagerApp:
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 self.tray.notify("Backup failed", str(e))
                 result = self.engine._current_result if self.engine else None
+                with self.scheduler.op_lock:
+                    self.scheduler.journal.update_last(
+                        status="failed",
+                        detail=f"{type(e).__name__}: {e}",
+                    )
                 if result:
                     self._save_backup_log(profile, result)
                 if profile.email.enabled:

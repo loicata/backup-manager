@@ -1372,7 +1372,7 @@ class BackupManagerApp:
         dlg.resizable(False, False)
         dlg.transient(self.root)
         dlg.grab_set()
-        dlg.geometry("420x280")
+        dlg.geometry("420x320")
 
         frame = ttk.Frame(dlg, padding=20)
         frame.pack(fill="both", expand=True)
@@ -1394,7 +1394,7 @@ class BackupManagerApp:
             text="loicata.com",
             foreground="#1a73e8",
             cursor="hand2",
-            font=Fonts.default(),
+            font=Fonts.normal(),
         )
         link.pack(anchor="w")
         link.bind(

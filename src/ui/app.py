@@ -155,11 +155,12 @@ class BackupManagerApp:
         foss_row.pack()
         tk.Label(
             foss_row,
-            text="software from ",
+            text="software from",
             bg=Colors.SIDEBAR_BG,
             fg=Colors.TEXT_DISABLED,
             font=(Fonts.FAMILY, 7),
-        ).pack(side="left")
+            padx=0,
+        ).pack(side="left", padx=(0, 2))
         link = tk.Label(
             foss_row,
             text="loicata.com",
@@ -167,8 +168,9 @@ class BackupManagerApp:
             fg="#5dade2",
             font=(Fonts.FAMILY, 7, "underline"),
             cursor="hand2",
+            padx=0,
         )
-        link.pack(side="left")
+        link.pack(side="left", padx=0)
         link.bind(
             "<Button-1>",
             lambda e: webbrowser.open("https://loicata.com"),

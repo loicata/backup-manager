@@ -467,18 +467,16 @@ def _build_backup_html(
     if result and result.mirror_results:
         dest_rows = _ROW.format(
             label="Primary",
-            value=f'<span style="color: {color};">{result.backup_path or "OK"}</span>',
+            value=f"{result.backup_path or 'OK'}",
         )
         for mirror_tuple in result.mirror_results:
             name, ok, msg = mirror_tuple[0], mirror_tuple[1], mirror_tuple[2]
             desc = mirror_tuple[3] if len(mirror_tuple) > 3 else ""
-            icon_color = "#27ae60" if ok else "#e74c3c"
-            icon = "OK" if ok else "FAILED"
-            display = desc if desc and ok else msg
-            dest_rows += _ROW.format(
-                label=name,
-                value=f'<span style="color: {icon_color};">{icon}</span> {display}',
-            )
+            if ok:
+                display = desc if desc else msg
+            else:
+                display = f'<span style="color: #e74c3c;">FAILED</span> {msg}'
+            dest_rows += _ROW.format(label=name, value=display)
         sections += _SECTION.format(title="Destinations", rows=dest_rows)
 
     # --- Retention section ---

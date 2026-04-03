@@ -88,14 +88,6 @@ class RecoveryTab(ScrollableTab):
         self._pw_entry = ttk.Entry(pw_frame, textvariable=self.password_var, show="●")
         self._pw_entry.pack(fill="x")
 
-        ttk.Label(
-            pw_frame,
-            text=("We recommend always typing your password manually " "to verify it is correct."),
-            foreground=Colors.ACCENT,
-            font=Fonts.small(),
-            wraplength=1200,
-            justify="left",
-        ).pack(anchor="w", pady=(Spacing.SMALL, 0))
 
     def _build_restore_button(self) -> None:
         """Build the Restore button and status label."""

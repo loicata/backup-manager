@@ -220,8 +220,11 @@ class RunTab(ttk.Frame):
 
     def update_profile_info(self, name: str, backup_type: str, last_backup: str):
         last = last_backup or "Never"
+        type_display = backup_type
+        if backup_type == "differential" and not last_backup:
+            type_display = "differential (will auto-promote to full)"
         self.profile_label.config(
-            text=f"Profile: {name} | Type: {backup_type} | Last backup: {last}"
+            text=f"Profile: {name} | Type: {type_display} | Last backup: {last}"
         )
 
     def clear_log(self):

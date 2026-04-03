@@ -132,8 +132,9 @@ Encryption passwords are stored using a layered protection scheme:
 
 ### Secure memory handling
 
-- Encryption keys and passwords are held in `bytearray` buffers.
-- Buffers are explicitly **zeroed after use** to minimize exposure in memory.
+- Encryption passwords are wrapped in a `SecurePassword` context manager during pipeline execution.
+- The password is stored internally as a mutable `bytearray` and **zeroed immediately** after the write/mirror phase completes.
+- Encryption keys derived by PBKDF2 are held in `bytearray` buffers and explicitly **zeroed after use**.
 - Python's garbage collector cannot be fully controlled, but explicit zeroing reduces the window of exposure.
 
 > **Limitation:** Memory clearing is best-effort and relies on CPython implementation details. On alternative interpreters (PyPy, GraalPy) or under memory pressure, sensitive data may remain in process memory after zeroing. This is an inherent constraint of managed-memory languages. For threat models requiring guaranteed memory erasure, a native-code encryption layer would be needed.
@@ -188,6 +189,7 @@ All remote file paths are validated before use:
 - **Pre-backup target check:** all destinations (primary + mirrors) are verified before backup starts. Unreachable targets trigger a user prompt with options to connect or cancel.
 - **System tray** mode for silent background operation.
 - **Missed backup detection:** if a scheduled backup was missed (e.g. computer was off), it runs automatically on next startup.
+- **Schedule journal:** all backups (manual and scheduled) are logged in a persistent journal visible in the Schedule tab, with profile name, status, and details. The journal can be cleared at any time.
 
 ---
 
@@ -281,7 +283,7 @@ After the wizard, you land on the main interface with a modern Windows 11-style 
 | **Mirror 1** | First optional mirror destination (local, network, SFTP, or S3) |
 | **Mirror 2** | Second optional mirror destination |
 | **Encryption** | AES-256-GCM encryption toggle per destination (primary, mirror 1, mirror 2) with password management |
-| **Schedule** | Backup frequency (manual, hourly, daily, weekly, monthly), time, auto-retry, and periodic integrity verification settings |
+| **Schedule** | Backup frequency (manual, hourly, daily, weekly, monthly), time, auto-retry, periodic integrity verification, and schedule journal with clear option |
 | **Retention** | GFS rotation policy — daily, weekly, and monthly backup counts |
 | **Email** | SMTP notification settings with provider presets and test button |
 | **Recovery** | Restore from local backup or retrieve from remote destination |
@@ -333,7 +335,7 @@ pytest --cov=src --cov-report=term-missing
 pytest tests/unit/test_backup_engine.py -v
 ```
 
-**Current status:** 799 tests | 84% coverage | 0 failures
+**Current status:** 837 tests | 84% coverage | 0 failures
 
 CI pipeline: GitHub Actions on every push — Black formatting, Ruff linting (Ubuntu), full test suite with coverage enforcement (Windows, Python 3.12 + 3.13).
 

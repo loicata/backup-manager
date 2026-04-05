@@ -2,6 +2,9 @@
 build/
 dist/
 *.spec
+*.msi
+*.wixobj
+*.wixpdb
 
 # Python
 __pycache__/
@@ -10,6 +13,12 @@ __pycache__/
 .coverage
 htmlcov/
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Duplicate shadow directories (build artifacts)
+src/src/
+tests/tests/
 
 # IDE
 .vscode/

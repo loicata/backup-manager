@@ -1,5 +1,9 @@
 # Backup Manager v3.2.2
 
+[![CI](https://github.com/loicata/backup-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/loicata/backup-manager/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+
 A production-grade, security-focused Windows backup application built for personal and small-business use. Backup Manager lets you manage multiple backup profiles, replicate data across local drives, network shares, SFTP servers, and S3-compatible cloud storage, while enforcing end-to-end encryption, automated scheduling, and Grandfather-Father-Son retention policies.
 
 Built with a defense-in-depth approach: data is encrypted before it leaves memory, passwords never touch disk in plaintext, and every backup is cryptographically verified after writing.

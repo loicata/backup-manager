@@ -499,9 +499,10 @@ def _build_backup_html(
         if remaining > 0:
             error_lines.append(f"... and {remaining} more error(s)")
         error_text = "\n".join(error_lines)
+        error_count = len(result.phase_errors)
         sections += f"""<tr>
     <td style="padding: 12px 20px; border-top: 1px solid #eee;">
-        <strong style="color: #e74c3c; font-size: 13px;">Errors ({len(result.phase_errors)})</strong>
+        <strong style="color: #e74c3c; font-size: 13px;">Errors ({error_count})</strong>
         <pre style="background: #fdf2f2; padding: 10px; border-radius: 4px;
                     font-size: 12px; overflow-x: auto; color: #c0392b;
                     margin-top: 6px;">{error_text}</pre>

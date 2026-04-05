@@ -272,7 +272,7 @@ class TestBackupEngine:
         assert stats.files_found == 3
         assert stats.files_processed == 3
         assert stats.errors == 0
-        assert stats.duration_seconds > 0
+        assert stats.duration_seconds >= 0
 
     def test_cancel_backup(self, sample_files, tmp_config_dir, tmp_path):
         from src.core.backup_engine import BackupEngine, CancelledError

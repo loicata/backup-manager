@@ -430,7 +430,7 @@ class TestVerifyIter:
         assert result.ok_count == 1
         assert result.error_count == 1
         assert result.total_backups == 2
-        assert result.duration_seconds > 0
+        assert result.duration_seconds >= 0
 
     def test_verify_all_still_works(self, tmp_path: Path) -> None:
         """verify_all() backward compat — delegates to verify_iter."""

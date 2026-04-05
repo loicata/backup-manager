@@ -213,40 +213,67 @@ def setup_theme(root: tk.Tk) -> ttk.Style:
     style.configure("TRadiobutton", font=Fonts.normal())
     _input_border = Colors.CARD_BORDER  # light gray, nearly invisible
     style.configure(
-        "TEntry", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6),
-        bordercolor=_input_border, lightcolor=_input_border,
-        darkcolor=_input_border, fieldbackground="white",
+        "TEntry",
+        font=Fonts.normal(),
+        padding=(Spacing.MEDIUM, 6),
+        bordercolor=_input_border,
+        lightcolor=_input_border,
+        darkcolor=_input_border,
+        fieldbackground="white",
     )
     style.configure(
-        "TCombobox", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6),
-        bordercolor=_input_border, lightcolor=_input_border,
-        darkcolor=_input_border, fieldbackground="white",
+        "TCombobox",
+        font=Fonts.normal(),
+        padding=(Spacing.MEDIUM, 6),
+        bordercolor=_input_border,
+        lightcolor=_input_border,
+        darkcolor=_input_border,
+        fieldbackground="white",
     )
     style.configure(
-        "TSpinbox", font=Fonts.normal(), padding=(Spacing.MEDIUM, 6),
-        bordercolor=_input_border, lightcolor=_input_border,
-        darkcolor=_input_border, fieldbackground="white",
+        "TSpinbox",
+        font=Fonts.normal(),
+        padding=(Spacing.MEDIUM, 6),
+        bordercolor=_input_border,
+        lightcolor=_input_border,
+        darkcolor=_input_border,
+        fieldbackground="white",
     )
 
     # Override sv_ttk underline on input fields via Tcl element options
     try:
         root.tk.call(
-            "ttk::style", "configure", "TEntry",
-            "-bordercolor", _input_border,
-            "-darkcolor", _input_border,
-            "-lightcolor", _input_border,
+            "ttk::style",
+            "configure",
+            "TEntry",
+            "-bordercolor",
+            _input_border,
+            "-darkcolor",
+            _input_border,
+            "-lightcolor",
+            _input_border,
         )
         root.tk.call(
-            "ttk::style", "configure", "TCombobox",
-            "-bordercolor", _input_border,
-            "-darkcolor", _input_border,
-            "-lightcolor", _input_border,
+            "ttk::style",
+            "configure",
+            "TCombobox",
+            "-bordercolor",
+            _input_border,
+            "-darkcolor",
+            _input_border,
+            "-lightcolor",
+            _input_border,
         )
         root.tk.call(
-            "ttk::style", "configure", "TSpinbox",
-            "-bordercolor", _input_border,
-            "-darkcolor", _input_border,
-            "-lightcolor", _input_border,
+            "ttk::style",
+            "configure",
+            "TSpinbox",
+            "-bordercolor",
+            _input_border,
+            "-darkcolor",
+            _input_border,
+            "-lightcolor",
+            _input_border,
         )
     except tk.TclError:
         pass

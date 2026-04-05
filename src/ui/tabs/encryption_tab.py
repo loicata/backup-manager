@@ -71,7 +71,6 @@ class EncryptionTab(ttk.Frame):
         )
         self._mirror2_cb.pack(anchor="w", pady=2)
 
-
         # Password frame (shown/hidden based on encryption selection)
         self._pw_frame = ttk.LabelFrame(self, text="Encryption password", padding=Spacing.PAD)
 

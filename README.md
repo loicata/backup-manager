@@ -1,16 +1,13 @@
-# Backup Manager v3.2.2
+# Backup Manager v3
 
 [![CI](https://github.com/loicata/backup-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/loicata/backup-manager/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://img.shields.io/badge/tests-837%20passed-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-84%25-brightgreen.svg)](#testing)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
-A production-grade, security-focused Windows backup application built for personal and small-business use. Backup Manager lets you manage multiple backup profiles, replicate data across local drives, network shares, SFTP servers, and S3-compatible cloud storage, while enforcing end-to-end encryption, automated scheduling, and Grandfather-Father-Son retention policies.
-
-Built with a defense-in-depth approach: data is encrypted before it leaves memory, passwords never touch disk in plaintext, and every backup is cryptographically verified after writing.
-
----
-
-## Screenshots
+A production-grade, security-focused Windows backup application built for personal and small-business use. Multi-destination backups with end-to-end AES-256-GCM encryption, automated scheduling, and Grandfather-Father-Son retention.
 
 | Profile configuration | Backup in progress |
 |:---------------------:|:------------------:|
@@ -18,58 +15,143 @@ Built with a defense-in-depth approach: data is encrypted before it leaves memor
 
 ---
 
-## Key Features
+## Highlights
+
+| | Feature | Details |
+|---|---------|---------|
+| **4** | **Storage backends** | Local/USB, Network (UNC), SFTP (SSH), S3-compatible cloud |
+| **+2** | **Mirror copies** | Independent replication with per-destination encryption |
+| **AES-256** | **Streaming encryption** | GCM authenticated, no plaintext on disk (`.tar.wbenc`) |
+| **GFS** | **Retention rotation** | Grandfather-Father-Son (daily/weekly/monthly) |
+| **SHA-256** | **Integrity verification** | Pre-backup manifest + post-write check + periodic audits |
+| **DPAPI** | **Password protection** | Windows user-bound, never in plaintext |
+
+---
+
+## Quick Start
+
+### Install
+
+Download **[BackupManager.msi](https://github.com/loicata/backup-manager/releases/latest)** and run it. That's it.
+
+### First launch
+
+A 3-step wizard creates your first profile:
+
+1. **Name** your backup
+2. **Pick source folders** to protect
+3. **Choose a destination** (USB, network, SFTP, or S3)
+
+Click **Finish** — daily backups are enabled by default.
+
+### From source
+
+```bash
+git clone https://github.com/loicata/backup-manager.git
+cd backup-manager
+pip install -r requirements.txt
+python -m src
+```
+
+---
+
+## Features
 
 ### Multi-profile management
 
-- Create unlimited backup profiles, each with its own sources, destinations, schedule, encryption, and retention settings.
-- Profiles can be **active** (scheduled, run automatically) or **inactive** (paused, configuration preserved for later use).
-- Reorder profiles with Up/Down controls; switch between them in a single click.
-- Profile configuration is validated before every backup — errors navigate directly to the relevant tab with a clear explanation.
+- Unlimited profiles with independent sources, destinations, schedule, encryption, and retention.
+- **Active / Inactive** profiles — inactive profiles are paused but preserved.
+- Reorder with Up/Down controls; switch in a single click.
+- Configuration validated before every backup with clear error messages.
 
 ### Storage & Destinations
 
 | Destination | Description |
 |-------------|-------------|
 | **Local / USB** | Any local drive, external HDD, or removable USB storage |
-| **Network (UNC)** | Windows shared network folders (`\\server\share`) with username/password authentication |
-| **SFTP (SSH)** | Remote servers via SSH with password or private key (Ed25519, ECDSA, RSA) authentication |
-| **S3 Cloud** | Amazon S3 or S3-compatible providers: AWS, Scaleway, Wasabi, OVH, DigitalOcean Spaces, Cloudflare R2, Backblaze B2, MinIO |
+| **Network (UNC)** | Windows shared folders (`\\server\share`) with username/password |
+| **SFTP (SSH)** | Remote servers with password or private key (Ed25519, ECDSA, RSA) |
+| **S3 Cloud** | AWS, Scaleway, Wasabi, OVH, DigitalOcean, Cloudflare R2, Backblaze B2, MinIO |
 
 ### Mirrors (multi-destination replication)
 
 - Up to **2 independent mirror copies** in addition to the primary destination.
 - Each mirror can use a **different storage type** and **independent encryption settings** (e.g. primary on USB unencrypted, Mirror 1 on SFTP encrypted, Mirror 2 on S3 encrypted).
 - Mirrors execute automatically after each successful primary write.
-- Mirror failures are reported independently — the primary backup is never affected by a mirror error.
+- Mirror failures are reported independently — the primary backup is never affected.
 - GFS rotation is applied independently on each destination.
 
 ### Backup modes
 
 | Mode | Description |
 |------|-------------|
-| **Full** | Complete copy of all selected files. Creates a self-contained restore point. |
-| **Differential** | Only files changed since the last full backup. Uses SHA-256 manifest comparison for reliable change detection. Configurable full backup cycle (e.g. every N backups). |
+| **Full** | Complete copy of all selected files. Self-contained restore point. |
+| **Differential** | Only files changed since last full backup. SHA-256 manifest comparison. Configurable full backup cycle. |
 
 ### Retention (GFS rotation)
 
-Grandfather-Father-Son rotation keeps backups organized and storage usage predictable:
+Grandfather-Father-Son rotation keeps backups organized and storage predictable:
 
 - **Daily:** number of daily backups to keep beyond today.
 - **Weekly:** number of weekly full backups to keep beyond the current week.
 - **Monthly:** number of monthly full backups to keep beyond the current month.
 
-Weekly and monthly slots require full backups — differential backups are only eligible for daily retention. Old backups are automatically deleted when the configured limits are exceeded. Rotation is applied independently on the primary destination and each mirror.
+Rotation is applied independently on each destination (primary + mirrors).
+
+### Scheduling & Reliability
+
+- **Manual, Hourly, Daily, Weekly, or Monthly** via Windows Task Scheduler.
+- **Auto-start at logon** for unattended operation.
+- **Retry on failure** with progressive delays: 2, 10, 30, 90, and 240 minutes.
+- **Pre-backup target check** — all destinations verified before backup starts.
+- **System tray** mode for silent background operation.
+- **Missed backup detection** — runs automatically on next startup.
+- **Schedule journal** — all backups logged with profile, status, and details.
+
+### Recovery
+
+- **Local restore** — browse a backup folder or select an encrypted `.tar.wbenc` file.
+- **Remote retrieve** — download from SFTP or S3 directly from the Recovery tab.
+- **Automatic decryption** — encrypted archives decrypted on-the-fly.
+- **Long path support** — Windows 260-character limit handled transparently.
+
+### Periodic Integrity Verification
+
+- **On-demand** — verify all backups across all destinations from the Verify tab.
+- **Scheduled** — automatic periodic verification (default: every 7 days).
+- **Email reports** — structured HTML table with results per destination and backup.
+
+### Email notifications
+
+- SMTP alerts on backup **success** or **failure**.
+- HTML-formatted reports with file count, duration, destination, errors.
+- Provider presets for Gmail, Outlook, Yahoo.
+
+### Main interface
+
+| Tab | Description |
+|-----|-------------|
+| **Run** | Launch backup, view real-time progress and logs |
+| **General** | Profile name, backup type, source folders, exclusion patterns |
+| **Storage** | Primary destination type and connection settings |
+| **Mirror 1 / 2** | Optional mirror destinations |
+| **Encryption** | AES-256-GCM toggle per destination with password management |
+| **Schedule** | Frequency, time, auto-retry, periodic verification, journal |
+| **Retention** | GFS rotation policy (daily, weekly, monthly counts) |
+| **Email** | SMTP settings with provider presets and test button |
+| **Recovery** | Restore from local or retrieve from remote |
+| **Verify** | On-demand integrity verification with real-time results |
+| **History** | Browse past backup logs |
 
 ---
 
 ## Security Architecture
 
-Backup Manager follows a **defense-in-depth** model with multiple independent security layers. The goal is simple: even if an attacker gains access to the backup storage, the data remains unreadable without the encryption password.
+Defense-in-depth model with multiple independent security layers. Even if an attacker gains access to the backup storage, the data remains unreadable without the encryption password.
 
 ### Encryption at rest — `.tar.wbenc` streaming format
 
-Backups are encrypted using a custom streaming archive format (`.tar.wbenc`) that ensures **no plaintext data is ever written to disk**:
+No plaintext data is ever written to disk:
 
 ```
 .tar.wbenc file layout:
@@ -89,240 +171,69 @@ EOF sentinel:
   [4B zeros]                 — marks end of stream
 ```
 
-**How it works:**
 1. Source files are streamed into a tar archive in memory.
 2. The tar stream is split into 1 MB chunks.
 3. Each chunk is encrypted independently with AES-256-GCM before writing to disk.
 4. The integrity manifest (`.wbverify`) is embedded inside the archive.
 5. The original plaintext files are never written to the destination.
 
-This design means an interrupted or corrupted write cannot leak plaintext data.
-
 ### Cipher and key derivation
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| **Cipher** | AES-256-GCM | NIST-approved authenticated encryption. Provides both confidentiality and integrity in a single operation. |
-| **Key size** | 256 bits | Maximum AES key length. |
-| **Nonce** | 12 bytes, sequential counter | Unique per chunk. Counter mode prevents nonce reuse within a single archive. |
-| **Authentication tag** | 16 bytes (128 bits) | GCM tag detects any tampering or corruption. |
-| **Key derivation** | PBKDF2-HMAC-SHA256 | Industry-standard password-based KDF. |
-| **Iterations** | 600,000 | Follows OWASP 2024 recommendation for PBKDF2-HMAC-SHA256. |
-| **Salt** | 16 random bytes | Generated per archive using `os.urandom()`. Prevents rainbow table attacks. |
+| **Cipher** | AES-256-GCM | NIST-approved authenticated encryption |
+| **Key size** | 256 bits | Maximum AES key length |
+| **Nonce** | 12 bytes, sequential counter | Unique per chunk, prevents reuse |
+| **Authentication tag** | 16 bytes (128 bits) | Detects tampering or corruption |
+| **Key derivation** | PBKDF2-HMAC-SHA256 | Industry-standard password-based KDF |
+| **Iterations** | 600,000 | OWASP 2024 recommendation |
+| **Salt** | 16 random bytes | `os.urandom()`, prevents rainbow tables |
 
-### Per-destination encryption control
-
-Encryption is configured independently for each destination:
-
-- **Primary storage** — encrypt or leave plaintext.
-- **Mirror 1** — independent encryption flag and password.
-- **Mirror 2** — independent encryption flag and password.
-
-This allows flexible topologies, for example: unencrypted local backup for fast restores, encrypted SFTP mirror for offsite security, encrypted S3 mirror for cloud redundancy.
-
-### Password storage and protection
-
-Encryption passwords are stored using a layered protection scheme:
+### Password storage
 
 | Platform | Method | Details |
 |----------|--------|---------|
-| **Windows (primary)** | DPAPI (`CryptProtectData`) | Password encrypted and tied to the current Windows user account. Cannot be decrypted by another user or on another machine. |
-| **Fallback** | AES-256-GCM with machine key | A random 32-byte machine key is generated once and stored in a DPAPI-protected blob at `%APPDATA%/BackupManager/machine.key`. |
+| **Windows** | DPAPI (`CryptProtectData`) | Tied to current Windows user account |
+| **Fallback** | AES-256-GCM with machine key | DPAPI-protected 32-byte machine key |
 
-**Password policy:**
-- Minimum length: **16 characters** (enforced in the UI).
-- Password strength indicator warns against weak passwords.
-- Passwords are **never logged**, **never written to plaintext files**, and **never included in error messages**.
+- Minimum password length: **16 characters**.
+- Passwords **never logged**, **never in plaintext files**, **never in error messages**.
 
 ### Secure memory handling
 
-- Encryption passwords are wrapped in a `SecurePassword` context manager during pipeline execution.
-- The password is stored internally as a mutable `bytearray` and **zeroed immediately** after the write/mirror phase completes.
-- Encryption keys derived by PBKDF2 are held in `bytearray` buffers and explicitly **zeroed after use**.
-- Python's garbage collector cannot be fully controlled, but explicit zeroing reduces the window of exposure.
-
-> **Limitation:** Memory clearing is best-effort and relies on CPython implementation details. On alternative interpreters (PyPy, GraalPy) or under memory pressure, sensitive data may remain in process memory after zeroing. This is an inherent constraint of managed-memory languages. For threat models requiring guaranteed memory erasure, a native-code encryption layer would be needed.
+- Passwords wrapped in `SecurePassword` context manager during pipeline execution.
+- `bytearray` buffers explicitly **zeroed after use**.
+- Derived keys zeroed immediately after encryption/decryption.
 
 ### Integrity verification pipeline
 
-Every backup goes through a mandatory verification pipeline:
-
-1. **Pre-backup manifest** — SHA-256 hash of every source file is computed before writing.
-2. **Post-write verification** — after the backup is written, every file is re-read and re-hashed against the manifest.
-3. **Remote verification** — for SFTP destinations, server-side `sha256sum` is used; for S3, ETag/MD5 comparison.
-4. **GCM authentication** — for encrypted backups, the AES-256-GCM tag on each chunk provides additional tamper detection.
-5. **Zero-tolerance policy** — any mismatch (missing file, wrong hash, failed GCM tag) marks the entire backup as **failed**.
-
-The `.wbverify` manifest is embedded inside encrypted archives and stored alongside plaintext backups for future independent auditing.
+1. **Pre-backup manifest** — SHA-256 hash of every source file.
+2. **Post-write verification** — re-read and re-hash against manifest.
+3. **Remote verification** — SFTP: server-side `sha256sum`; S3: ETag comparison.
+4. **GCM authentication** — per-chunk tamper detection.
+5. **Zero-tolerance** — any mismatch marks the backup as **failed**.
 
 ### Transport security
 
 | Transport | Protection |
 |-----------|------------|
-| **SFTP** | SSH encrypted channel. Host key verification (TOFU model). Password or private key authentication. |
-| **S3** | HTTPS/TLS. AWS Signature V4 request signing. Access key + secret key authentication. |
-| **Network (UNC)** | Windows SMB authentication. Credentials stored via DPAPI. |
-| **Local** | No transport encryption needed (direct filesystem access). |
+| **SFTP** | SSH encrypted channel, host key verification (TOFU) |
+| **S3** | HTTPS/TLS, AWS Signature V4 |
+| **Network** | Windows SMB, DPAPI credentials |
+| **Local** | Direct filesystem access |
 
-### Path traversal protection
-
-All remote file paths are validated before use:
-- Remote backup names cannot contain `..`, absolute paths, or path separator sequences.
-- This prevents a compromised or malicious remote server from writing outside the designated backup directory.
-
-### Summary
+### Security summary
 
 | Layer | Mechanism |
 |-------|-----------|
-| **Data at rest** | AES-256-GCM streaming encryption (`.tar.wbenc`) — no plaintext on disk |
-| **Key derivation** | PBKDF2-HMAC-SHA256, 600,000 iterations, 16-byte random salt |
-| **Password storage** | Windows DPAPI (user-bound) with AES-256-GCM fallback |
-| **Integrity** | SHA-256 manifest + post-write verification + GCM authentication |
-| **Transport** | SSH (SFTP), HTTPS/TLS (S3), SMB (Network) |
-| **Memory** | Sensitive buffers explicitly zeroed after use |
+| **Data at rest** | AES-256-GCM streaming (`.tar.wbenc`) |
+| **Key derivation** | PBKDF2-HMAC-SHA256, 600K iterations, random salt |
+| **Password storage** | Windows DPAPI (user-bound) + AES-256-GCM fallback |
+| **Integrity** | SHA-256 manifest + post-write verify + GCM auth |
+| **Transport** | SSH / HTTPS / SMB |
+| **Memory** | Explicit buffer zeroing |
 | **Path safety** | Traversal-proof remote path validation |
-| **Logging** | No secrets, passwords, or keys in any log output |
-
----
-
-## Scheduling & Reliability
-
-- **Manual, Hourly, Daily, Weekly, or Monthly** scheduling via Windows Task Scheduler.
-- **Auto-start at logon** for fully unattended operation.
-- **Retry on failure** with progressive delays: 2, 10, 30, 90, and 240 minutes.
-- **Pre-backup target check:** all destinations (primary + mirrors) are verified before backup starts. Unreachable targets trigger a user prompt with options to connect or cancel.
-- **System tray** mode for silent background operation.
-- **Missed backup detection:** if a scheduled backup was missed (e.g. computer was off), it runs automatically on next startup.
-- **Schedule journal:** all backups (manual and scheduled) are logged in a persistent journal visible in the Schedule tab, with profile name, status, and details. The journal can be cleared at any time.
-
----
-
-## Recovery
-
-- **Local restore** — browse a backup folder or select an encrypted `.tar.wbenc` file directly.
-- **Remote retrieve** — download backups from SFTP or S3 destinations directly from the Recovery tab, no external tool required.
-- **Automatic decryption** — encrypted archives are decrypted on-the-fly during restore using the profile password.
-- **Clean output** — only user files are extracted; internal metadata (`.wbverify` manifest) is excluded from the restore.
-- **Named restore folder** — restored files are placed in a subfolder named after the backup (e.g. `loicata_FULL_2026-04-01_215315/`).
-- **Long path support** — Windows 260-character path limit is handled transparently via `\\?\` extended path prefix.
-
----
-
-## Periodic Integrity Verification
-
-- **On-demand verification** — click "Verify all backups" on the Verify tab to check all backups across all destinations (primary + mirrors).
-- **Scheduled verification** — enable periodic verification in the Schedule tab (default: every 7 days). Runs automatically in the background.
-- **Encrypted archives** — verified by comparing SHA-256 hash against the reference stored at backup time (no password needed).
-- **Flat backups** — re-hashes every file against the `.wbverify` manifest.
-- **Remote verification** — SFTP uses server-side `sha256sum`; S3 uses size comparison (S3 guarantees integrity at rest).
-- **Real-time results** — each backup result appears immediately in the results table as verification progresses.
-- **Email reports** — verification results are sent via email with a structured HTML table (Destination, Backup, Status, Details).
-
----
-
-## Email notifications
-
-- SMTP-based alerts on backup **success** or **failure**.
-- Configurable recipient, subject, SMTP server, port, and TLS settings.
-- HTML-formatted reports with backup details: file count, duration, destination, errors.
-- Verification reports with structured HTML table matching the UI layout.
-- Preset configurations for common providers (Gmail, Outlook, Yahoo).
-
----
-
-## History
-
-- Complete log of all backups with date, profile name, and file size.
-- Quick access to the logs directory for detailed per-backup reports.
-
----
-
-## Installation
-
-### MSI Installer (recommended)
-
-1. Download `BackupManager.msi` from the [Releases](https://github.com/loicata/backup-manager/releases) page.
-2. Run the installer and follow the wizard.
-3. Launch Backup Manager from the desktop shortcut or Start Menu.
-4. The application launches automatically after installation.
-
-### From Source
-
-```bash
-git clone https://github.com/loicata/backup-manager.git
-cd backup-manager
-
-pip install -r requirements.txt
-
-python -m src
-```
-
----
-
-## Quick Start
-
-### Setup Wizard (first run)
-
-On first launch, a 3-step wizard guides you through the essential configuration:
-
-1. **Profile name** — give your backup a meaningful name (e.g. "My Documents", "Work Projects").
-2. **What to back up?** — add one or more source folders to include in the backup.
-3. **Where to store?** — choose a primary storage destination:
-   - External drive / USB stick
-   - Network folder (UNC path)
-   - Remote server via SFTP (SSH)
-   - S3 Cloud Storage (AWS, Scaleway, Wasabi, OVH, DigitalOcean, Cloudflare, Backblaze)
-
-Click **Finish** — the wizard creates your profile with a daily schedule enabled by default.
-
-### Main interface
-
-After the wizard, you land on the main interface with a modern Windows 11-style theme (Sun Valley). The configuration is organized in tabs:
-
-| Tab | Description |
-|-----|-------------|
-| **Run** | Launch a backup manually, view real-time progress and detailed logs |
-| **General** | Profile name, backup type (Full / Differential), source folders, exclusion patterns, bandwidth limit, full backup cycle |
-| **Storage** | Primary storage destination type and connection settings |
-| **Mirror 1** | First optional mirror destination (local, network, SFTP, or S3) |
-| **Mirror 2** | Second optional mirror destination |
-| **Encryption** | AES-256-GCM encryption toggle per destination (primary, mirror 1, mirror 2) with password management |
-| **Schedule** | Backup frequency (manual, hourly, daily, weekly, monthly), time, auto-retry, periodic integrity verification, and schedule journal with clear option |
-| **Retention** | GFS rotation policy — daily, weekly, and monthly backup counts |
-| **Email** | SMTP notification settings with provider presets and test button |
-| **Recovery** | Restore from local backup or retrieve from remote destination |
-| **Verify** | On-demand integrity verification of all backups across all destinations with real-time results |
-| **History** | Browse past backup logs with date, profile, and size |
-
-Click **Start backup** on the Run tab to perform an immediate backup, or let the scheduler handle it automatically.
-
----
-
-## Build from Source
-
-### Prerequisites
-
-- Python 3.11 or later (tested on 3.12 and 3.13)
-- [WiX Toolset v3.14](https://wixtoolset.org/) (for MSI packaging only)
-
-### Build the executable
-
-```bash
-python -m PyInstaller BackupManager.spec
-```
-
-The output is in `dist/BackupManager/`.
-
-### Build the MSI installer
-
-```bash
-cd dist
-heat.exe dir BackupManager -ag -sfrag -srd -dr INSTALLFOLDER -cg ProductFiles -var var.SourceDir -out HeatFiles.wxs
-candle.exe -dSourceDir=BackupManager Product.wxs HeatFiles.wxs -o obj/
-light.exe obj/Product.wixobj obj/HeatFiles.wixobj -o BackupManager.msi -ext WixUIExtension -b BackupManager -sice:ICE38 -sice:ICE91 -sice:ICE64
-```
-
-The output is `dist/BackupManager.msi`.
+| **Logging** | No secrets in any log output |
 
 ---
 
@@ -336,12 +247,37 @@ pytest
 pytest --cov=src --cov-report=term-missing
 
 # Run a specific test file
-pytest tests/unit/test_backup_engine.py -v
+pytest tests/unit/test_hashing.py -v
 ```
 
 **Current status:** 837 tests | 84% coverage | 0 failures
 
 CI pipeline: GitHub Actions on every push — Black formatting, Ruff linting (Ubuntu), full test suite with coverage enforcement (Windows, Python 3.12 + 3.13).
+
+---
+
+## Build from Source
+
+### Prerequisites
+
+- Python 3.11+ (tested on 3.12 and 3.13)
+- [WiX Toolset v3.14](https://wixtoolset.org/) (for MSI packaging only)
+
+### Build the executable
+
+```bash
+python build_pyinstaller.py
+```
+
+Output: `dist/BackupManager/BackupManager.exe`
+
+### Build the MSI installer
+
+```bash
+python build_msi.py
+```
+
+Output: `dist/BackupManager-x.y.z.msi`
 
 ---
 
@@ -354,50 +290,26 @@ backup-manager/
 │   │   ├── backup_engine.py         # Main orchestrator (11-phase pipeline)
 │   │   ├── config.py                # Profile dataclasses & JSON persistence
 │   │   ├── events.py                # Thread-safe event bus for UI updates
-│   │   ├── hashing.py               # SHA-256 file hashing
 │   │   ├── integrity_verifier.py    # Periodic backup integrity verification
 │   │   ├── scheduler.py             # Windows Task Scheduler + in-app scheduler
 │   │   └── phases/                  # Pipeline phases
 │   │       ├── collector.py            # File collection & exclusion filtering
 │   │       ├── filter.py               # Differential change detection
-│   │       ├── manifest.py             # SHA-256 integrity manifest
 │   │       ├── encryptor.py            # Streaming tar encryption
 │   │       ├── writer.py               # Write dispatcher (local/remote)
-│   │       ├── local_writer.py         # Local filesystem writer
-│   │       ├── remote_writer.py        # SFTP/S3 streaming upload
 │   │       ├── verifier.py             # Post-write integrity verification
 │   │       ├── mirror.py               # Mirror replication orchestrator
 │   │       └── rotator.py              # GFS retention rotation
 │   ├── storage/                  # Storage backends
-│   │   ├── base.py                  # Abstract backend + retry decorator
-│   │   ├── local.py                 # Local / USB
-│   │   ├── network.py               # UNC network shares
-│   │   ├── sftp.py                  # SFTP via Paramiko (SSH key + password)
-│   │   └── s3.py                    # S3 via Boto3 (multi-provider)
-│   ├── security/                 # Security layer
-│   │   ├── encryption.py           # AES-256-GCM streaming, DPAPI, key management
-│   │   ├── secure_memory.py        # Secure buffer zeroing
-│   │   └── integrity_check.py      # Standalone integrity verification
-│   ├── notifications/            # Alerting
-│   │   └── email_notifier.py       # SMTP with HTML reports
-│   └── ui/                       # GUI (Tkinter + Sun Valley theme)
-│       ├── app.py                   # Main window, sidebar, tab management
-│       ├── wizard.py                # First-launch 3-step setup wizard
-│       ├── theme.py                 # Sun Valley (sv_ttk) + custom overrides
-│       ├── tray.py                  # System tray integration
-│       └── tabs/                    # 11 configuration tabs
-├── tests/
-│   ├── unit/                     # Isolated unit tests
-│   ├── integration/              # Multi-component pipeline tests
-│   └── conftest.py               # Shared session fixtures
-├── assets/                       # Icons, license, screenshots
+│   │   ├── local.py, network.py, sftp.py, s3.py
+│   │   └── base.py                  # Abstract backend + retry decorator
+│   ├── security/                 # Encryption, DPAPI, secure memory
+│   ├── notifications/            # SMTP email with HTML reports
+│   └── ui/                       # Tkinter GUI (Sun Valley theme)
+├── tests/                        # 837 tests (unit + integration)
+├── CHANGELOG.md                  # Release history
 ├── requirements.txt              # Runtime dependencies
-├── pyproject.toml                # Project metadata & tool config
-├── BackupManager.spec            # PyInstaller production build
-├── BackupManagerDebug.spec       # PyInstaller debug build
-├── build_pyinstaller.py          # Build automation script
-├── build_msi.py                  # WiX MSI builder script
-└── CLAUDE.md                     # AI assistant directives
+└── pyproject.toml                # Project metadata & tool config
 ```
 
 ---
@@ -419,7 +331,7 @@ backup-manager/
 
 ## License
 
-[GNU General Public License v3.0](LICENSE) — Copyright (c) 2026 Loic Ader loicata.com
+[GNU General Public License v3.0](LICENSE) — Copyright (c) 2026 Loic Ader [loicata.com](https://loicata.com)
 
 ---
 

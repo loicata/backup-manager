@@ -1,5 +1,5 @@
 """General tab: profile name, backup type, source paths, exclusions,
-bandwidth limit, auto-start, and retry on failure."""
+bandwidth usage, auto-start, and retry on failure."""
 
 import contextlib
 import logging
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class GeneralTab(ScrollableTab):
     """Profile name, backup type, sources, exclusion patterns,
-    bandwidth limit, auto-start, and retry settings."""
+    bandwidth usage, auto-start, and retry settings."""
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
@@ -142,15 +142,25 @@ class GeneralTab(ScrollableTab):
             font=Fonts.small(),
         ).pack(anchor="w")
 
-        # Bandwidth limit
-        bw_frame = ttk.LabelFrame(self.inner, text="Bandwidth limit", padding=Spacing.PAD)
+        # Bandwidth usage
+        bw_frame = ttk.LabelFrame(self.inner, text="Bandwidth usage", padding=Spacing.PAD)
         bw_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.MEDIUM))
 
-        ttk.Label(bw_frame, text="Limit (KB/s, 0 = unlimited):").pack(anchor="w")
-        self.bw_var = tk.IntVar(value=0)
-        ttk.Entry(bw_frame, textvariable=self.bw_var, width=10).pack(
-            anchor="w", pady=(Spacing.SMALL, 0)
-        )
+        self.bw_percent_var = tk.IntVar(value=75)
+        radio_row = ttk.Frame(bw_frame)
+        radio_row.pack(anchor="w")
+        for pct in (25, 50, 75, 100):
+            ttk.Radiobutton(
+                radio_row, text=f"{pct}%", value=pct, variable=self.bw_percent_var
+            ).pack(side="left", padx=(0, Spacing.MEDIUM))
+
+        ttk.Label(
+            bw_frame,
+            text="Percentage of available bandwidth for network destinations. "
+            "Local drives always use 100%.",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w", pady=(Spacing.SMALL, 0))
 
         # Auto-start
         start_frame = ttk.LabelFrame(self.inner, text="Auto-start", padding=Spacing.PAD)
@@ -334,7 +344,7 @@ class GeneralTab(ScrollableTab):
             self.sources_tree.insert("", "end", values=(path, ptype))
 
         self.exclude_var.set(", ".join(profile.exclude_patterns))
-        self.bw_var.set(profile.bandwidth_limit_kbps)
+        self.bw_percent_var.set(profile.bandwidth_percent)
         self.full_every_var.set(profile.full_backup_every)
 
         # Retry from schedule config
@@ -363,7 +373,7 @@ class GeneralTab(ScrollableTab):
             "full_backup_every": self.full_every_var.get(),
             "source_paths": sources,
             "exclude_patterns": excludes,
-            "bandwidth_limit_kbps": self.bw_var.get(),
+            "bandwidth_percent": self.bw_percent_var.get(),
             "autostart": self.autostart_var.get(),
             "autostart_minimized": self.minimized_var.get(),
             "retry_enabled": self.retry_var.get(),

@@ -84,30 +84,46 @@ def with_retry(max_retries: int = 3, base_delay: float = 2.0):
 
 
 class ThrottledReader:
-    """File-like wrapper that limits read speed.
+    """File-like wrapper that limits read speed and checks cancellation.
 
-    Used to prevent network saturation during uploads.
+    Uses a 1-second sliding window to maintain a smooth, stable
+    throughput instead of burst-pause patterns.  The window resets
+    every second, preventing accumulated drift that causes
+    increasingly long pauses.
+
+    Also checks for cancellation on every read, enabling responsive
+    cancel even during long uploads (S3, slow SFTP).
     """
 
-    def __init__(self, fileobj: BinaryIO, limit_kbps: int):
+    def __init__(self, fileobj: BinaryIO, limit_kbps: int = 0, cancel_check=None):
         self._fileobj = fileobj
         self._limit_bps = limit_kbps * 1024  # Convert to bytes/sec
-        self._bytes_read = 0
-        self._start_time = time.monotonic()
+        self._cancel_check = cancel_check
+        self._window_bytes = 0
+        self._window_start = time.monotonic()
 
     def read(self, size: int = -1) -> bytes:
+        if self._cancel_check is not None:
+            self._cancel_check()
+
         data = self._fileobj.read(size)
         if not data or self._limit_bps <= 0:
             return data
 
-        self._bytes_read += len(data)
-        elapsed = time.monotonic() - self._start_time
+        self._window_bytes += len(data)
+        elapsed = time.monotonic() - self._window_start
         if elapsed > 0:
-            current_rate = self._bytes_read / elapsed
+            current_rate = self._window_bytes / elapsed
             if current_rate > self._limit_bps:
-                sleep_time = (self._bytes_read / self._limit_bps) - elapsed
+                sleep_time = (self._window_bytes / self._limit_bps) - elapsed
                 if sleep_time > 0:
                     time.sleep(sleep_time)
+
+        # Reset window every second for smoother throughput
+        now = time.monotonic()
+        if (now - self._window_start) >= 1.0:
+            self._window_bytes = 0
+            self._window_start = now
 
         return data
 
@@ -137,6 +153,7 @@ class StorageBackend(ABC):
     def __init__(self):
         self._progress_callback: Callable | None = None
         self._bandwidth_limit_kbps: int = 0
+        self._cancel_check: Callable | None = None
 
     def set_progress_callback(self, callback: Callable) -> None:
         """Set callback for upload progress: callback(bytes_sent, total_bytes)."""
@@ -146,10 +163,22 @@ class StorageBackend(ABC):
         """Set bandwidth limit in KB/s (0 = unlimited)."""
         self._bandwidth_limit_kbps = max(0, kbps)
 
+    def set_cancel_check(self, cancel_check: Callable) -> None:
+        """Set callable that raises CancelledError when cancel is requested."""
+        self._cancel_check = cancel_check
+
     def _get_throttled_reader(self, fileobj: BinaryIO) -> BinaryIO:
-        """Wrap file object with throttling if bandwidth limit is set."""
-        if self._bandwidth_limit_kbps > 0:
-            return ThrottledReader(fileobj, self._bandwidth_limit_kbps)
+        """Wrap file object with throttling and/or cancel checking.
+
+        Always wraps when a cancel_check is set (for responsive cancel
+        during long uploads). Also wraps when bandwidth limit is set.
+        """
+        if self._bandwidth_limit_kbps > 0 or self._cancel_check is not None:
+            return ThrottledReader(
+                fileobj,
+                limit_kbps=self._bandwidth_limit_kbps,
+                cancel_check=self._cancel_check,
+            )
         return fileobj
 
     @abstractmethod

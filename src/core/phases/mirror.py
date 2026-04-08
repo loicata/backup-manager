@@ -37,6 +37,7 @@ def mirror_backup(
     encrypt_flags: list[bool] | None = None,
     cancel_check: Callable[[], None] | None = None,
     integrity_manifest: dict | None = None,
+    apply_throttle: Callable | None = None,
 ) -> list[tuple[str, bool, str]]:
     """Upload backup to mirror destinations.
 
@@ -56,6 +57,8 @@ def mirror_backup(
         cancel_check: Callable that raises CancelledError if cancelled.
         integrity_manifest: Integrity manifest dict to persist alongside
                             the backup on each mirror.  Never encrypted.
+        apply_throttle: Optional callback(backend, mirror_name) to measure
+                        bandwidth and apply throttle before upload.
 
     Returns:
         List of (mirror_name, success, message) tuples.
@@ -78,6 +81,14 @@ def mirror_backup(
 
         try:
             backend = get_backend(config)
+
+            # Enable responsive cancel during uploads
+            if cancel_check is not None:
+                backend.set_cancel_check(cancel_check)
+
+            # Apply bandwidth throttle if configured
+            if apply_throttle is not None:
+                apply_throttle(backend, mirror_name)
 
             # Determine if this mirror should be encrypted
             should_encrypt = i < len(flags) and flags[i]

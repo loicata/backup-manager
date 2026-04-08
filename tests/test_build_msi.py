@@ -62,6 +62,15 @@ class TestBuildWxs:
         wxs = build_msi._build_wxs("1.0.0")
         assert "NOT Installed" in wxs
 
+    def test_wxs_custom_action_removes_vbs_on_uninstall(self, build_msi):
+        """Fallback CustomAction must delete VBS silently via AppDataFolder."""
+        wxs = build_msi._build_wxs("1.0.0")
+        assert "CA_RemoveStartupVbs" in wxs
+        assert "AppDataFolder" in wxs
+        assert "BackupManager.vbs" in wxs
+        assert "NOT UPGRADINGPRODUCTCODE" in wxs
+        assert "mshta" in wxs
+
     def test_wxs_major_upgrade_configured(self, build_msi):
         """MajorUpgrade must be configured for clean upgrades."""
         wxs = build_msi._build_wxs("1.0.0")

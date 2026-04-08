@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.core.backup_result import BackupResult
+from src.core.bandwidth_tester import compute_throttle_kbps, measure_bandwidth
 from src.core.config import (
     BackupProfile,
     BackupType,
@@ -277,6 +278,13 @@ class BackupEngine:
             else:
                 self._log("Backup type: full")
 
+        # Mark backup as in-progress (persisted immediately so that
+        # a crash or shutdown leaves the flag as False, enabling cleanup).
+        ctx.profile.last_backup_completed = False
+        ctx.profile.incomplete_backup_name = ctx.backup_name
+        ctx.profile.incomplete_backup_was_full = ctx.profile.backup_type == BackupType.FULL
+        ctx.config_manager.save_profile(ctx.profile)
+
         # Phase 1: Collect
         self._phase_collect(ctx)
         if not ctx.files:
@@ -302,6 +310,8 @@ class BackupEngine:
 
         # Phase 4: Write backup
         ctx.backend = self._get_backend(ctx.profile.storage)
+        ctx.backend.set_cancel_check(self._check_cancel)
+        self._apply_bandwidth_throttle(ctx.backend, ctx.profile)
         self._phase_write(ctx)
         ctx.result.backup_path = str(ctx.backup_path or ctx.backup_remote_name)
 
@@ -325,6 +335,11 @@ class BackupEngine:
 
         # Phase 11: Cleanup temp artifacts
         self._phase_cleanup(ctx)
+
+        # Mark backup as successfully completed
+        ctx.profile.last_backup_completed = True
+        ctx.profile.incomplete_backup_name = ""
+        ctx.profile.incomplete_backup_was_full = False
 
         # Restore profile type if it was temporarily promoted to full
         if getattr(ctx, "forced_full", False):
@@ -821,6 +836,19 @@ class BackupEngine:
         if ctx.profile.backup_type != BackupType.DIFFERENTIAL:
             return
 
+        # Previous backup was interrupted — clean up and decide
+        if not ctx.profile.last_backup_completed:
+            self._cleanup_incomplete_backup(ctx)
+            if ctx.profile.incomplete_backup_was_full:
+                # Interrupted full → must redo a full backup
+                ctx.forced_full = True
+                ctx.profile.backup_type = BackupType.FULL
+                self._log("Forcing full backup (previous full was interrupted)")
+                return
+            # Interrupted differential → clean up, then continue checking
+            # other conditions below (config change, cycle, etc.)
+            self._log("Previous differential was interrupted — cleaned up")
+
         manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
         no_manifest = not manifest_path.exists()
         cycle_reached = ctx.profile.differential_count >= ctx.profile.full_backup_every
@@ -934,6 +962,9 @@ class BackupEngine:
                     encrypt_flags=encrypt_flags,
                     cancel_check=self._check_cancel,
                     integrity_manifest=ctx.integrity_manifest,
+                    apply_throttle=lambda backend, label: (
+                        self._apply_bandwidth_throttle(backend, ctx.profile, label)
+                    ),
                 )
             finally:
                 if secure_pw:
@@ -1176,6 +1207,91 @@ class BackupEngine:
                     self._log(f"{mirror_name}: rotated {deleted} old backup(s)")
             except Exception as e:
                 self._log(f"{mirror_name}: rotation failed — {e}")
+
+    def _cleanup_incomplete_backup(self, ctx: PipelineContext) -> None:
+        """Delete the incomplete full backup from all destinations.
+
+        Only deletes the exact backup name recorded when the interrupted
+        full started.  Skips silently if the backup does not exist on
+        a destination (it may not have been written there yet).
+
+        Args:
+            ctx: Pipeline context with profile containing the
+                 incomplete_backup_name field.
+        """
+        name = ctx.profile.incomplete_backup_name
+        if not name:
+            return
+
+        self._log(f"Cleaning up incomplete backup: {name}")
+
+        # Build list of all destinations: primary + mirrors
+        destinations: list[tuple[str, StorageConfig]] = [
+            ("Storage", ctx.profile.storage),
+        ]
+        for i, mirror in enumerate(ctx.profile.mirror_destinations):
+            destinations.append((f"Mirror {i + 1}", mirror))
+
+        for label, config in destinations:
+            try:
+                backend = create_backend(config)
+                # Try both plain directory and encrypted archive names
+                for suffix in ("", ".tar.wbenc"):
+                    target = f"{name}{suffix}"
+                    try:
+                        backend.delete_backup(target)
+                        self._log(f"{label}: deleted incomplete {target}")
+                    except FileNotFoundError:
+                        pass
+            except Exception as exc:
+                self._log(f"{label}: cleanup failed — {exc}")
+
+        ctx.profile.incomplete_backup_name = ""
+
+    def _apply_bandwidth_throttle(
+        self,
+        backend: StorageBackend,
+        profile: BackupProfile,
+        label: str = "Storage",
+    ) -> None:
+        """Measure bandwidth and apply throttle to a backend.
+
+        Skips measurement for LOCAL destinations (always 100%).
+        Skips when the user has selected 100%.
+
+        Args:
+            backend: Storage backend to throttle.
+            profile: Backup profile with bandwidth_percent setting.
+            label: Human-readable destination name for logging.
+        """
+        from src.storage.local import LocalStorage
+
+        if isinstance(backend, LocalStorage):
+            self._log(f"{label}: local destination — bandwidth unlimited")
+            return
+
+        percent = profile.bandwidth_percent
+        if percent >= 100:
+            self._log(f"{label}: bandwidth usage set to 100% — no throttle")
+            return
+
+        self._phase(f"Measuring bandwidth ({label})...")
+        self._check_cancel()
+
+        measured_bps = measure_bandwidth(backend)
+        if measured_bps <= 0:
+            self._log(f"{label}: bandwidth test failed — no throttle applied")
+            return
+
+        throttle_kbps = compute_throttle_kbps(measured_bps, percent)
+        backend.set_bandwidth_limit(throttle_kbps)
+
+        measured_mbps = measured_bps / (1024 * 1024)
+        throttle_mbps = (throttle_kbps * 1024) / (1024 * 1024)
+        self._log(
+            f"{label}: {measured_mbps:.1f} MB/s measured → "
+            f"throttle {percent}% = {throttle_mbps:.1f} MB/s"
+        )
 
     def _get_backend(self, storage: StorageConfig) -> StorageBackend:
         """Create a storage backend from config.

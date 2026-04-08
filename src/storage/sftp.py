@@ -17,6 +17,7 @@ import logging
 import socket
 import stat
 import tarfile
+import time
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
@@ -75,7 +76,8 @@ class _ChannelWriter(io.RawIOBase):
 
     Used by ``tarfile.open(mode='w|')`` to stream tar data directly
     into an exec channel (``tar xf -``), tracking bytes for progress.
-    Supports cancel checking between writes for responsive cancellation.
+    Supports cancel checking between writes and optional bandwidth
+    throttling for responsive cancellation and network sharing.
     """
 
     def __init__(
@@ -84,19 +86,33 @@ class _ChannelWriter(io.RawIOBase):
         progress_callback=None,
         total_bytes: int = 0,
         cancel_check=None,
+        limit_kbps: int = 0,
     ):
         self._channel = channel
         self._progress_callback = progress_callback
         self._total_bytes = total_bytes
         self._bytes_sent = 0
         self._cancel_check = cancel_check
+        self._limit_bps = limit_kbps * 1024
+        self._start_time = time.monotonic()
 
     def write(self, data: bytes | bytearray) -> int:
-        """Send *data* to the SSH channel and update progress."""
+        """Send *data* to the SSH channel with optional throttling."""
         if self._cancel_check is not None:
             self._cancel_check()
         self._channel.sendall(data)
         self._bytes_sent += len(data)
+
+        # Bandwidth throttling: sleep if sending faster than limit
+        if self._limit_bps > 0:
+            elapsed = time.monotonic() - self._start_time
+            if elapsed > 0:
+                current_rate = self._bytes_sent / elapsed
+                if current_rate > self._limit_bps:
+                    sleep_time = (self._bytes_sent / self._limit_bps) - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
         if self._progress_callback and self._total_bytes > 0:
             self._progress_callback(self._bytes_sent, self._total_bytes)
         return len(data)
@@ -461,6 +477,7 @@ class SFTPStorage(StorageBackend):
                 progress_callback,
                 total_bytes,
                 cancel_check,
+                limit_kbps=self._bandwidth_limit_kbps,
             )
 
             with tarfile.open(fileobj=writer, mode="w|") as tar:

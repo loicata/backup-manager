@@ -479,7 +479,7 @@ class BackupManagerApp:
         profile.full_backup_every = general["full_backup_every"]
         profile.source_paths = general["source_paths"]
         profile.exclude_patterns = general["exclude_patterns"]
-        profile.bandwidth_limit_kbps = general["bandwidth_limit_kbps"]
+        profile.bandwidth_percent = general["bandwidth_percent"]
 
         storage = self.tab_storage.collect_config()
         profile.storage = storage["storage"]
@@ -887,6 +887,7 @@ class BackupManagerApp:
     def _start_backup_thread(self, profile: BackupProfile) -> None:
         """Start the actual backup in a background thread."""
         self.tab_run.clear_log()
+        self.tab_run._append_log(f"Backup started — {profile.name}")
 
         def _backup_thread():
             from datetime import datetime
@@ -974,6 +975,7 @@ class BackupManagerApp:
 
     def _cancel_backup(self):
         if self.engine:
+            self.tab_run._append_log("Cancelling backup...")
             self.engine.cancel()
 
     # --- Integrity Verification ---

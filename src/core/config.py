@@ -222,12 +222,15 @@ class BackupProfile:
     sources_hash: str = ""  # Deprecated — kept for JSON compat
     encryption_hash: str = ""  # Deprecated — kept for JSON compat
     profile_hash: str = ""  # SHA-256 of profile config (auto-managed)
-    bandwidth_limit_kbps: int = 0
+    bandwidth_percent: int = 75  # 25, 50, 75, or 100
     sort_order: int = 0
     active: bool = True
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_backup: str | None = None
     last_full_backup: str | None = None
+    last_backup_completed: bool = True  # False while any backup is in progress
+    incomplete_backup_name: str = ""  # Name of interrupted backup to clean up
+    incomplete_backup_was_full: bool = False  # True if the interrupted backup was full
 
 
 # --- Profile fingerprint ---
@@ -269,7 +272,7 @@ def compute_profile_hash(profile: BackupProfile) -> str:
     # Profile identity (excludes backup_type — it toggles between runs)
     parts.append(f"name={profile.name}")
     parts.append(f"full_backup_every={profile.full_backup_every}")
-    parts.append(f"bandwidth_limit_kbps={profile.bandwidth_limit_kbps}")
+    parts.append(f"bandwidth_percent={profile.bandwidth_percent}")
 
     # Sources
     parts.append(f"sources={','.join(sorted(profile.source_paths))}")
@@ -500,6 +503,17 @@ class ConfigManager:
 
     def _dict_to_profile(self, data: dict) -> BackupProfile:
         """Deserialize a dict into a BackupProfile."""
+        # Migrate legacy bandwidth_limit_kbps → bandwidth_percent
+        if "bandwidth_limit_kbps" in data and "bandwidth_percent" not in data:
+            data["bandwidth_percent"] = 100
+            logger.info("Migrated bandwidth_limit_kbps → bandwidth_percent=100")
+        data.pop("bandwidth_limit_kbps", None)
+
+        # Migrate legacy last_full_completed → last_backup_completed
+        if "last_full_completed" in data and "last_backup_completed" not in data:
+            data["last_backup_completed"] = data["last_full_completed"]
+        data.pop("last_full_completed", None)
+
         # Convert enum values
         if "backup_type" in data:
             data["backup_type"] = BackupType(data["backup_type"])

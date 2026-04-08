@@ -10,6 +10,7 @@ for error accumulation.
 import contextlib
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -40,7 +41,7 @@ from src.core.phases.filter import (
     load_manifest,
     save_manifest,
 )
-from src.core.phases.local_writer import generate_backup_name
+from src.core.phases.local_writer import generate_backup_name, sanitize_profile_name
 from src.core.phases.manifest import (
     build_integrity_manifest,
     save_integrity_manifest,
@@ -54,6 +55,121 @@ from src.security.secure_memory import SecurePassword
 from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
+
+
+def create_backend(storage: StorageConfig) -> StorageBackend:
+    """Create a storage backend from a StorageConfig.
+
+    Args:
+        storage: Storage configuration.
+
+    Returns:
+        Configured StorageBackend instance.
+
+    Raises:
+        ValueError: If the storage type is unknown.
+    """
+    from src.storage.local import LocalStorage
+    from src.storage.network import NetworkStorage
+    from src.storage.s3 import S3Storage
+    from src.storage.sftp import SFTPStorage
+
+    builders = {
+        StorageType.LOCAL: lambda s: LocalStorage(s.destination_path),
+        StorageType.NETWORK: lambda s: NetworkStorage(
+            destination_path=s.destination_path,
+            username=s.network_username,
+            password=s.network_password,
+        ),
+        StorageType.SFTP: lambda s: SFTPStorage(
+            host=s.sftp_host,
+            port=s.sftp_port,
+            username=s.sftp_username,
+            password=s.sftp_password,
+            key_path=s.sftp_key_path,
+            key_passphrase=s.sftp_key_passphrase,
+            remote_path=s.sftp_remote_path,
+        ),
+        StorageType.S3: lambda s: S3Storage(
+            bucket=s.s3_bucket,
+            prefix=s.s3_prefix,
+            region=s.s3_region,
+            access_key=s.s3_access_key,
+            secret_key=s.s3_secret_key,
+            endpoint_url=s.s3_endpoint_url,
+            provider=s.s3_provider,
+        ),
+    }
+    builder = builders.get(storage.storage_type)
+    if builder is None:
+        raise ValueError(f"Unknown storage type: {storage.storage_type}")
+    return builder(storage)
+
+
+def _delete_matching_backups(
+    backend: StorageBackend,
+    prefix: str,
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[int, list[str]]:
+    """Delete backups matching a profile prefix on a single backend.
+
+    Args:
+        backend: Storage backend to clean.
+        prefix: Profile name prefix (e.g. "MyProfile_").
+        progress_callback: Optional callback for status messages.
+
+    Returns:
+        Tuple of (deleted_count, error_messages).
+    """
+    deleted = 0
+    errors: list[str] = []
+    backups = backend.list_backups()
+    matching = [b for b in backups if b["name"].startswith(prefix)]
+
+    for backup in matching:
+        name = backup["name"]
+        try:
+            backend.delete_backup(name)
+            deleted += 1
+            if progress_callback:
+                progress_callback(f"Deleted {name}")
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            logger.warning("Failed to delete %s: %s", name, e)
+
+    return deleted, errors
+
+
+def delete_profile_backups(
+    profile_name: str,
+    storage_configs: list[StorageConfig],
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[int, list[str]]:
+    """Delete all backups created by a profile across all destinations.
+
+    Args:
+        profile_name: Human-readable profile name.
+        storage_configs: List of storage configurations to clean.
+        progress_callback: Optional callback for status messages.
+
+    Returns:
+        Tuple of (total_deleted, error_messages).
+    """
+    prefix = sanitize_profile_name(profile_name) + "_"
+    total_deleted = 0
+    all_errors: list[str] = []
+
+    for config in storage_configs:
+        try:
+            backend = create_backend(config)
+            deleted, errors = _delete_matching_backups(backend, prefix, progress_callback)
+            total_deleted += deleted
+            all_errors.extend(errors)
+        except Exception as e:
+            all_errors.append(f"{config.storage_type.value}: {e}")
+            logger.warning("Backend error during cleanup: %s", e)
+
+    return total_deleted, all_errors
 
 
 class BackupEngine:
@@ -1037,6 +1153,7 @@ class BackupEngine:
             ctx.profile.retention,
             self._events,
             current_backup_name=ctx.backup_name,
+            profile_name=ctx.profile.name,
         )
 
         # Count remaining backups on primary after rotation
@@ -1053,6 +1170,7 @@ class BackupEngine:
                     ctx.profile.retention,
                     self._events,
                     current_backup_name=ctx.backup_name,
+                    profile_name=ctx.profile.name,
                 )
                 if deleted:
                     self._log(f"{mirror_name}: rotated {deleted} old backup(s)")
@@ -1071,60 +1189,7 @@ class BackupEngine:
         Raises:
             ValueError: If the storage type is unknown.
         """
-        builders = {
-            StorageType.LOCAL: self._build_local,
-            StorageType.NETWORK: self._build_network,
-            StorageType.SFTP: self._build_sftp,
-            StorageType.S3: self._build_s3,
-        }
-        builder = builders.get(storage.storage_type)
-        if builder is None:
-            raise ValueError(f"Unknown storage type: {storage.storage_type}")
-        return builder(storage)
-
-    @staticmethod
-    def _build_local(storage: StorageConfig) -> StorageBackend:
-        from src.storage.local import LocalStorage
-
-        return LocalStorage(storage.destination_path)
-
-    @staticmethod
-    def _build_network(storage: StorageConfig) -> StorageBackend:
-        from src.storage.network import NetworkStorage
-
-        return NetworkStorage(
-            destination_path=storage.destination_path,
-            username=storage.network_username,
-            password=storage.network_password,
-        )
-
-    @staticmethod
-    def _build_sftp(storage: StorageConfig) -> StorageBackend:
-        from src.storage.sftp import SFTPStorage
-
-        return SFTPStorage(
-            host=storage.sftp_host,
-            port=storage.sftp_port,
-            username=storage.sftp_username,
-            password=storage.sftp_password,
-            key_path=storage.sftp_key_path,
-            key_passphrase=storage.sftp_key_passphrase,
-            remote_path=storage.sftp_remote_path,
-        )
-
-    @staticmethod
-    def _build_s3(storage: StorageConfig) -> StorageBackend:
-        from src.storage.s3 import S3Storage
-
-        return S3Storage(
-            bucket=storage.s3_bucket,
-            prefix=storage.s3_prefix,
-            region=storage.s3_region,
-            access_key=storage.s3_access_key,
-            secret_key=storage.s3_secret_key,
-            endpoint_url=storage.s3_endpoint_url,
-            provider=storage.s3_provider,
-        )
+        return create_backend(storage)
 
     def precheck_targets(self, profile: BackupProfile) -> list[tuple[str, str, bool, str]]:
         """Test connectivity of all configured destinations before backup.

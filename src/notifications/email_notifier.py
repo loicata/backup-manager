@@ -180,6 +180,8 @@ def _build_html(
     cancelled: bool = False,
 ) -> str:
     """Build HTML email body."""
+    from src import __version__
+
     if cancelled:
         color = "#f39c12"
         status = "CANCELLED"
@@ -238,7 +240,7 @@ def _build_html(
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
                            border-top: 1px solid #eee; text-align: center;">
-                    Backup Manager v3.2.2
+                    Backup Manager v{__version__}
                 </td>
             </tr>
         </table>
@@ -428,6 +430,8 @@ def _build_backup_html(
     Returns:
         HTML string.
     """
+    from src import __version__
+
     if cancelled:
         color = "#f39c12"
         status = "CANCELLED"
@@ -539,7 +543,7 @@ def _build_backup_html(
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
                            border-top: 1px solid #eee; text-align: center;">
-                    Backup Manager v3.2.2
+                    Backup Manager v{__version__}
                 </td>
             </tr>
         </table>

@@ -8,10 +8,10 @@ hiddenimports += collect_submodules('botocore')
 
 
 a = Analysis(
-    ['F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\.claude\\worktrees\\hardcore-jones\\src\\__main__.py'],
-    pathex=['F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\.claude\\worktrees\\hardcore-jones'],
+    ['F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\src\\__main__.py'],
+    pathex=['F:\\Documents\\loicata\\BackupManager\\Backup Manager v3'],
     binaries=[],
-    datas=[('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\.claude\\worktrees\\hardcore-jones\\assets\\backup_manager.ico', 'assets'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\.claude\\worktrees\\hardcore-jones\\assets\\License.rtf', 'assets'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\.claude\\worktrees\\hardcore-jones\\assets\\launch.vbs', '.')],
+    datas=[('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\backup_manager.ico', 'assets'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\License.rtf', 'assets'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\launch.vbs', '.')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -38,7 +38,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\.claude\\worktrees\\hardcore-jones\\assets\\backup_manager.ico'],
+    icon=['F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\backup_manager.ico'],
 )
 coll = COLLECT(
     exe,

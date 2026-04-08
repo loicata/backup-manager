@@ -79,7 +79,7 @@ def _build_wxs(version: str) -> str:
            Name="Backup Manager"
            Language="1033"
            Version="{version}.0"
-           Manufacturer="Loic Ader — https://loicata.com"
+           Manufacturer="Loic Ader — loicata.com"
            UpgradeCode="{UPGRADE_CODE}">
 
     <Package InstallerVersion="500"

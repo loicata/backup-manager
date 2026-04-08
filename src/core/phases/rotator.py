@@ -10,6 +10,7 @@ from datetime import datetime
 from src.core.config import RetentionConfig
 from src.core.events import EventBus
 from src.core.phase_logger import PhaseLogger
+from src.core.phases.local_writer import sanitize_profile_name
 from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ def rotate_backups(
     retention: RetentionConfig,
     events: EventBus | None = None,
     current_backup_name: str = "",
+    profile_name: str = "",
 ) -> int:
     """Apply GFS retention policy and delete old backups.
 
@@ -30,6 +32,9 @@ def rotate_backups(
         current_backup_name: Name of the backup just created in this
             run.  This backup is always protected from deletion
             regardless of the retention policy outcome.
+        profile_name: If set, only rotate backups whose name starts
+            with the sanitized profile name prefix.  Backups from
+            other profiles are left untouched.
 
     Returns:
         Number of backups deleted.
@@ -37,6 +42,12 @@ def rotate_backups(
     backups = backend.list_backups()
     if not backups:
         return 0
+
+    if profile_name:
+        prefix = sanitize_profile_name(profile_name) + "_"
+        backups = [b for b in backups if b["name"].startswith(prefix)]
+        if not backups:
+            return 0
 
     return _rotate_gfs(backend, backups, retention, events, current_backup_name)
 
@@ -78,13 +89,37 @@ def _rotate_gfs(
 
     dated_backups.sort(key=lambda x: x[1], reverse=True)
 
+    _apply_gfs_windows(dated_backups, retention, now, keep)
+
+    # Always keep the most recent backup
+    if dated_backups:
+        keep.add(dated_backups[0][0]["name"])
+
+    # Delete backups not in keep set
+    to_delete = [b for b in backups if b["name"] not in keep]
+    deleted = _delete_old_backups(backend, to_delete, phase_log)
+
+    # Count only entries that exist in the actual backup list
+    backup_names = {b["name"] for b in backups}
+    actual_kept = len(keep & backup_names)
+    phase_log.info(f"GFS rotation: kept {actual_kept}, deleted {deleted}")
+    return deleted
+
+
+def _apply_gfs_windows(
+    dated_backups: list[tuple[dict, datetime]],
+    retention: RetentionConfig,
+    now: datetime,
+    keep: set,
+) -> None:
+    """Apply daily/weekly/monthly GFS windows to the keep set."""
     # Keep daily backups (last N days) — all backups within the window
     for backup, dt in dated_backups:
         if (now - dt).days < retention.gfs_daily:
             keep.add(backup["name"])
 
     # Keep weekly backups (last N weeks) — FULL only
-    weekly_dates = set()
+    weekly_dates: set[str] = set()
     for backup, dt in dated_backups:
         if not _is_full_backup(backup["name"]):
             continue
@@ -95,7 +130,7 @@ def _rotate_gfs(
                 keep.add(backup["name"])
 
     # Keep monthly backups (last N months) — FULL only
-    monthly_dates = set()
+    monthly_dates: set[str] = set()
     for backup, dt in dated_backups:
         if not _is_full_backup(backup["name"]):
             continue
@@ -106,12 +141,13 @@ def _rotate_gfs(
                 monthly_dates.add(month_key)
                 keep.add(backup["name"])
 
-    # Always keep the most recent backup
-    if dated_backups:
-        keep.add(dated_backups[0][0]["name"])
 
-    # Delete backups not in keep set
-    to_delete = [b for b in backups if b["name"] not in keep]
+def _delete_old_backups(
+    backend: StorageBackend,
+    to_delete: list[dict],
+    phase_log: PhaseLogger,
+) -> int:
+    """Delete backups not in the keep set, with progress reporting."""
     total = len(to_delete)
     deleted = 0
 
@@ -130,5 +166,4 @@ def _rotate_gfs(
             phase="rotation",
         )
 
-    phase_log.info(f"GFS rotation: kept {len(keep)}, deleted {deleted}")
     return deleted

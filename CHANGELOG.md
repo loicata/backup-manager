@@ -5,6 +5,18 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.3] - 2026-04-08
+
+### Fixed
+- GFS rotation now filters by profile name prefix — backups from other profiles sharing the same storage are no longer counted or protected
+- Rotation log "kept N" count no longer inflated by phantom .tar.wbenc entries
+
+### Added
+- Profile deletion now offers to delete all associated backups across all destinations (primary + mirrors)
+- `sanitize_profile_name()` utility extracted for reuse
+- `create_backend()` public factory function for storage backends
+- `delete_profile_backups()` function for bulk cleanup across destinations
+
 ## [3.2.2] - 2026-04-03
 
 ### Added
@@ -82,6 +94,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - SFTP path traversal protection
 - 492 tests, 90% coverage
 
+[3.2.3]: https://github.com/loicata/backup-manager/releases/tag/v3.2.3
 [3.2.2]: https://github.com/loicata/backup-manager/releases/tag/v3.2.2
 [3.1.2]: https://github.com/loicata/backup-manager/releases/tag/v3.1.2
 [3.1.1]: https://github.com/loicata/backup-manager/releases/tag/v3.1.1

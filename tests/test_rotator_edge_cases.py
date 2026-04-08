@@ -1,5 +1,6 @@
 """Edge-case tests for GFS backup rotation."""
 
+import logging
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -231,3 +232,90 @@ class TestRotatorEdgeCases:
 
         deleted_names = {c.args[0] for c in backend.delete_backup.call_args_list}
         assert "latest" not in deleted_names
+
+    def test_profile_filter_only_matching(self):
+        """Rotation with profile_name only considers matching backups."""
+        now = datetime(2026, 4, 8, 12, 0)
+        backups = [
+            _backup("ProfileA_FULL_2026-04-08_120000", now),
+            _backup("ProfileB_FULL_2026-04-08_120000", now),
+            _backup("ProfileA_DIFF_2026-03-01_120000", datetime(2026, 3, 1, 12, 0)),
+            _backup("ProfileB_DIFF_2026-03-01_120000", datetime(2026, 3, 1, 12, 0)),
+        ]
+        backend = _make_backend(backups)
+        retention = RetentionConfig(gfs_daily=1, gfs_weekly=0, gfs_monthly=0)
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            rotate_backups(backend, retention, profile_name="ProfileA")
+
+        deleted_names = {c.args[0] for c in backend.delete_backup.call_args_list}
+        # Old ProfileA DIFF should be deleted
+        assert "ProfileA_DIFF_2026-03-01_120000" in deleted_names
+        # ProfileB backups must never be touched
+        assert "ProfileB_FULL_2026-04-08_120000" not in deleted_names
+        assert "ProfileB_DIFF_2026-03-01_120000" not in deleted_names
+
+    def test_profile_filter_leaves_other_untouched(self):
+        """Aggressive retention on profile A does not delete profile B."""
+        now = datetime(2026, 4, 8, 12, 0)
+        backups = [
+            _backup("Alpha_FULL_2026-04-08_120000", now),
+            _backup("Alpha_FULL_2026-03-01_120000", datetime(2026, 3, 1, 12, 0)),
+            _backup("Beta_FULL_2026-03-01_120000", datetime(2026, 3, 1, 12, 0)),
+        ]
+        backend = _make_backend(backups)
+        retention = RetentionConfig(gfs_daily=1, gfs_weekly=0, gfs_monthly=0)
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            deleted = rotate_backups(backend, retention, profile_name="Alpha")
+
+        assert deleted == 1
+        backend.delete_backup.assert_called_once_with("Alpha_FULL_2026-03-01_120000")
+
+    def test_kept_count_excludes_phantoms(self, caplog):
+        """Log 'kept N' count should not include phantom .tar.wbenc entries."""
+        now = datetime(2026, 4, 8, 12, 0)
+        backups = [
+            _backup("Prof_FULL_2026-04-08_120000", now),
+            _backup("Prof_DIFF_2026-04-07_120000", datetime(2026, 4, 7, 12, 0)),
+        ]
+        backend = _make_backend(backups)
+        retention = RetentionConfig(gfs_daily=7, gfs_weekly=0, gfs_monthly=0)
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            with caplog.at_level(logging.DEBUG):
+                rotate_backups(
+                    backend,
+                    retention,
+                    current_backup_name="Prof_FULL_2026-04-08_120000",
+                    profile_name="Prof",
+                )
+
+        # The keep set internally has phantom "Prof_FULL_...tar.wbenc"
+        # but the log should only count real backups: 2
+        assert "kept 2" in caplog.text
+
+    def test_empty_profile_name_rotates_all(self):
+        """Empty profile_name applies rotation to all backups (backward compat)."""
+        now = datetime(2026, 4, 8, 12, 0)
+        backups = [
+            _backup("Alpha_FULL_2026-04-08_120000", now),
+            _backup("Beta_FULL_2026-01-01_120000", datetime(2026, 1, 1, 12, 0)),
+        ]
+        backend = _make_backend(backups)
+        retention = RetentionConfig(gfs_daily=1, gfs_weekly=0, gfs_monthly=0)
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            deleted = rotate_backups(backend, retention, profile_name="")
+
+        # Old Beta backup should be deleted (outside daily window)
+        assert deleted == 1
+        backend.delete_backup.assert_called_once_with("Beta_FULL_2026-01-01_120000")

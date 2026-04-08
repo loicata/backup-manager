@@ -138,6 +138,25 @@ def _add_manifest_to_tar(tar: tarfile.TarFile, manifest: dict) -> None:
     tar.addfile(info, io.BytesIO(data))
 
 
+def sanitize_profile_name(profile_name: str) -> str:
+    """Sanitize a profile name for use in backup filenames.
+
+    Args:
+        profile_name: Human-readable profile name.
+
+    Returns:
+        Filesystem-safe name with only alphanumeric, hyphen, and underscore.
+
+    Raises:
+        ValueError: If the sanitized name is empty.
+    """
+    safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in profile_name)
+    safe = safe.strip().replace(" ", "_")
+    if not safe:
+        raise ValueError(f"Profile name produces empty sanitized result: {profile_name!r}")
+    return safe
+
+
 def generate_backup_name(profile_name: str, backup_type: str = "FULL") -> str:
     """Generate a timestamped backup name with type marker.
 
@@ -149,8 +168,6 @@ def generate_backup_name(profile_name: str, backup_type: str = "FULL") -> str:
         Name like "ProfileName_FULL_2026-03-17_143000"
     """
     ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    # Sanitize profile name for filesystem
-    safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in profile_name)
-    safe_name = safe_name.strip().replace(" ", "_")
+    safe_name = sanitize_profile_name(profile_name)
     tag = "FULL" if backup_type != "DIFF" else "DIFF"
     return f"{safe_name}_{tag}_{ts}"

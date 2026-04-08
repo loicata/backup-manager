@@ -142,10 +142,10 @@ class TestProtectUnprotectSecrets:
 
 
 class TestBuildNetwork:
-    """Tests for BackupEngine._build_network passing credentials."""
+    """Tests for create_backend passing network credentials."""
 
     def test_credentials_passed_to_backend(self):
-        from src.core.backup_engine import BackupEngine
+        from src.core.backup_engine import create_backend
 
         config = StorageConfig(
             storage_type=StorageType.NETWORK,
@@ -154,8 +154,7 @@ class TestBuildNetwork:
             network_password="s3cret",
         )
 
-        engine = BackupEngine.__new__(BackupEngine)
-        backend = engine._build_network(config)
+        backend = create_backend(config)
 
         assert backend._username == "domain\\admin"
         assert backend._password == "s3cret"

@@ -606,13 +606,62 @@ class BackupManagerApp:
     def _delete_profile(self):
         if not self._current_profile:
             return
-        name = self._current_profile.name
-        if messagebox.askyesno("Delete", f"Delete profile '{name}'?"):
-            self.config_manager.delete_profile(self._current_profile.id)
-            self._current_profile = None
-            self._load_profiles()
-            if self._current_profile is None:
-                self._clear_tabs()
+        profile = self._current_profile
+        name = profile.name
+
+        if not messagebox.askyesno("Delete", f"Delete profile '{name}'?"):
+            return
+
+        delete_backups = messagebox.askyesno(
+            "Delete backups",
+            f"Also delete all backups created by '{name}'?\n\n"
+            "This will remove backups from all destinations "
+            "(primary storage, mirrors).\n\n"
+            "This cannot be undone.",
+        )
+
+        if delete_backups:
+            self._delete_profile_backups_async(profile)
+        else:
+            self._finalize_profile_deletion(profile)
+
+    def _finalize_profile_deletion(self, profile: BackupProfile) -> None:
+        """Remove profile config and refresh the UI."""
+        self.config_manager.delete_profile(profile.id)
+        self._current_profile = None
+        self._load_profiles()
+        if self._current_profile is None:
+            self._clear_tabs()
+
+    def _delete_profile_backups_async(self, profile: BackupProfile) -> None:
+        """Delete all backups for a profile in background, then remove config."""
+        from src.core.backup_engine import delete_profile_backups
+
+        configs = [profile.storage] + list(profile.mirror_destinations)
+        configs = [c for c in configs if c.destination_path or c.sftp_host or c.s3_bucket]
+
+        result: list = [None]
+
+        def _do_delete():
+            result[0] = delete_profile_backups(profile.name, configs)
+
+        def _poll():
+            if result[0] is None:
+                self.root.after(200, _poll)
+                return
+            deleted, errors = result[0]
+            for err in errors:
+                logger.warning("Backup deletion error: %s", err)
+            if errors:
+                messagebox.showwarning(
+                    "Partial cleanup",
+                    f"Deleted {deleted} backup(s) but {len(errors)} "
+                    f"error(s) occurred.\nCheck logs for details.",
+                )
+            self._finalize_profile_deletion(profile)
+
+        threading.Thread(target=_do_delete, daemon=True, name="DeleteBackups").start()
+        self.root.after(200, _poll)
 
     def _clear_tabs(self):
         """Reset all tabs to empty/default state after profile deletion."""

@@ -20,6 +20,7 @@ class MirrorTab(ScrollableTab):
         self._mirror_index = mirror_index
         self._features = get_available_features()
         self._config_frames: dict[str, ttk.Frame] = {}
+        self._saved_device_serial: str = ""
         self._build_ui()
 
     def _build_ui(self):
@@ -277,6 +278,25 @@ class MirrorTab(ScrollableTab):
         color = Colors.SUCCESS if ok else Colors.DANGER
         self.test_label.config(text=msg, foreground=color)
 
+    @staticmethod
+    def _detect_device_serial(destination_path: str) -> str:
+        """Detect hardware serial for a local drive path.
+
+        Args:
+            destination_path: Local path like "G:\\Backups".
+
+        Returns:
+            Hardware serial string, or empty string if unavailable.
+        """
+        if not destination_path or len(destination_path) < 2:
+            return ""
+        if destination_path[1] != ":":
+            return ""
+
+        from src.storage.drive_serial import get_hardware_serial
+
+        return get_hardware_serial(destination_path[0]) or ""
+
     def _build_storage_config(self) -> StorageConfig:
         """Build StorageConfig from current UI state."""
         stype = StorageType(self.type_var.get())
@@ -284,6 +304,8 @@ class MirrorTab(ScrollableTab):
 
         if stype == StorageType.LOCAL:
             config.destination_path = self.local_path_var.get()
+            detected = self._detect_device_serial(config.destination_path)
+            config.device_serial = detected or self._saved_device_serial
         elif stype == StorageType.NETWORK:
             config.destination_path = self.network_path_var.get()
             config.network_username = self.network_user_var.get()
@@ -304,6 +326,7 @@ class MirrorTab(ScrollableTab):
 
     def load_profile(self, profile: BackupProfile):
         """Load mirror config from profile."""
+        self._saved_device_serial = ""
         # Reset all fields before loading to avoid stale values
         self.local_path_var.set("")
         self.network_path_var.set("")
@@ -322,6 +345,7 @@ class MirrorTab(ScrollableTab):
             m = mirrors[self._mirror_index]
             self.enabled_var.set(True)
             self.type_var.set(m.storage_type.value)
+            self._saved_device_serial = getattr(m, "device_serial", "")
             if m.storage_type == StorageType.LOCAL:
                 self.local_path_var.set(m.destination_path)
             elif m.storage_type == StorageType.NETWORK:

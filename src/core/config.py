@@ -55,6 +55,7 @@ class RetentionPolicy(StrEnum):
 class StorageConfig:
     storage_type: StorageType = StorageType.LOCAL
     destination_path: str = ""
+    device_serial: str = ""  # Hardware serial (auto-detected, LOCAL only)
 
     # Network (UNC)
     network_username: str = ""
@@ -228,6 +229,7 @@ class BackupProfile:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_backup: str | None = None
     last_full_backup: str | None = None
+    last_full_files_count: int = 0
     last_backup_completed: bool = True  # False while any backup is in progress
     incomplete_backup_name: str = ""  # Name of interrupted backup to clean up
     incomplete_backup_was_full: bool = False  # True if the interrupted backup was full

@@ -58,6 +58,26 @@ from src.storage.base import StorageBackend
 logger = logging.getLogger(__name__)
 
 
+def _resolve_local_destination(storage: StorageConfig) -> str:
+    """Resolve the local destination path using drive serial if needed.
+
+    If the configured path is inaccessible and a device serial is saved,
+    scans all drive letters to find the drive and rewrites the path.
+
+    Args:
+        storage: Storage configuration (may be mutated in-place).
+
+    Returns:
+        Resolved destination path.
+    """
+    from src.storage.drive_serial import resolve_local_path
+
+    resolved = resolve_local_path(storage.destination_path, storage.device_serial)
+    if resolved != storage.destination_path:
+        storage.destination_path = resolved
+    return resolved
+
+
 def create_backend(storage: StorageConfig) -> StorageBackend:
     """Create a storage backend from a StorageConfig.
 
@@ -76,7 +96,7 @@ def create_backend(storage: StorageConfig) -> StorageBackend:
     from src.storage.sftp import SFTPStorage
 
     builders = {
-        StorageType.LOCAL: lambda s: LocalStorage(s.destination_path),
+        StorageType.LOCAL: lambda s: LocalStorage(_resolve_local_destination(s)),
         StorageType.NETWORK: lambda s: NetworkStorage(
             destination_path=s.destination_path,
             username=s.network_username,
@@ -922,6 +942,8 @@ class BackupEngine:
             save_manifest(full_manifest, manifest_path)
             ctx.profile.differential_count = 0
             ctx.profile.profile_hash = compute_profile_hash(ctx.profile)
+            ctx.profile.last_full_backup = datetime.now().isoformat()
+            ctx.profile.last_full_files_count = ctx.result.files_processed
         else:
             ctx.profile.differential_count += 1
 

@@ -6,6 +6,7 @@ Supports two modes:
 """
 
 import logging
+import os
 import shutil
 import tarfile
 from datetime import datetime
@@ -99,9 +100,18 @@ def write_encrypted_tar(
             enc_writer = EncryptingWriter(out_file, password)
             with tarfile.open(fileobj=enc_writer, mode="w|") as tar:
                 for i, file_info in enumerate(files):
+                    src_path = long_path_str(file_info.source_path)
+                    try:
+                        actual_size = os.path.getsize(src_path)
+                    except OSError:
+                        logger.warning(
+                            "File vanished, skipping: %s",
+                            file_info.relative_path,
+                        )
+                        continue
                     info = tarfile.TarInfo(name=file_info.relative_path)
-                    info.size = file_info.size
-                    with open(long_path_str(file_info.source_path), "rb") as f:
+                    info.size = actual_size
+                    with open(src_path, "rb") as f:
                         tar.addfile(info, fileobj=f)
                     phase_log.progress(
                         current=i + 1,

@@ -756,18 +756,11 @@ class SFTPStorage(StorageBackend):
                     "(slower but compatible)"
                 )
 
-            # Get free space
-            try:
-                sftp2 = self._get_sftp(transport)
-                try:
-                    vfs = sftp2.statvfs(self._remote_path)
-                    free = vfs.f_bavail * vfs.f_frsize
-                    free_gb = free / (1024**3)
-                    info += f"\n{free_gb:.1f} GB free"
-                finally:
-                    sftp2.close()
-            except Exception:
-                pass
+            # Get free space — try statvfs first, fallback to df via exec
+            free_bytes = self._get_free_space_from_transport(transport, exec_ok)
+            if free_bytes is not None:
+                free_gb = free_bytes / (1024**3)
+                info += f"\n{free_gb:.1f} GB free"
 
             return True, info
         except Exception as e:
@@ -775,17 +768,62 @@ class SFTPStorage(StorageBackend):
         finally:
             transport.close()
 
+    def _get_free_space_from_transport(
+        self,
+        transport,
+        exec_ok: bool,
+    ) -> int | None:
+        """Get free space using an existing transport.
+
+        Tries statvfs first (standard SFTP extension), then falls
+        back to ``df`` via exec channel if statvfs is unavailable.
+
+        Args:
+            transport: Active paramiko Transport.
+            exec_ok: Whether exec channel is available.
+
+        Returns:
+            Free space in bytes, or None if unavailable.
+        """
+        # Method 1: statvfs (SFTP extension)
+        try:
+            sftp = self._get_sftp(transport)
+            try:
+                vfs = sftp.statvfs(self._remote_path)
+                return vfs.f_bavail * vfs.f_frsize
+            finally:
+                sftp.close()
+        except Exception as e:
+            logger.debug("statvfs unavailable: %s", e)
+
+        # Method 2: df via exec channel
+        if exec_ok:
+            try:
+                escaped = _shell_escape(self._remote_path)
+                channel = transport.open_session()
+                try:
+                    channel.settimeout(10)
+                    channel.exec_command(f"df -B1 {escaped} | tail -1")  # nosec B601
+                    output = channel.recv(4096).decode("utf-8", errors="replace")
+                    channel.recv_exit_status()
+                    # df -B1 output: filesystem 1B-blocks used available ...
+                    parts = output.split()
+                    if len(parts) >= 4:
+                        return int(parts[3])
+                finally:
+                    channel.close()
+            except Exception as e:
+                logger.debug("df fallback failed: %s", e)
+
+        return None
+
     def get_free_space(self) -> int | None:
         """Get free space on the remote filesystem."""
         try:
             transport = self._get_transport()
             try:
-                sftp = self._get_sftp(transport)
-                try:
-                    vfs = sftp.statvfs(self._remote_path)
-                    return vfs.f_bavail * vfs.f_frsize
-                finally:
-                    sftp.close()
+                exec_ok = self._check_exec_channel(transport)
+                return self._get_free_space_from_transport(transport, exec_ok)
             finally:
                 transport.close()
         except Exception:

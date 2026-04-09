@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from src.core.events import LOG, PHASE_CHANGED, PHASE_COUNT, PROGRESS, STATUS, EventBus
+from src.core.health_checker import DestinationHealth, format_bytes
 from src.ui.theme import Colors, Fonts, Spacing
 
 
@@ -33,6 +34,9 @@ class RunTab(ttk.Frame):
             foreground=Colors.TEXT_SECONDARY,
         )
         self.profile_label.pack(anchor="w", padx=Spacing.LARGE)
+
+        # Health dashboard (3 cards in a row)
+        self._build_health_dashboard()
 
         # Progress section
         progress_frame = ttk.LabelFrame(self, text="Progress", padding=Spacing.PAD)
@@ -109,6 +113,243 @@ class RunTab(ttk.Frame):
             disabledforeground=Colors.TEXT_DISABLED,
         )
         self.cancel_btn.pack(side="left", padx=Spacing.MEDIUM)
+
+    def _build_health_dashboard(self):
+        """Build the 3-card health dashboard row."""
+        self._dashboard_frame = ttk.Frame(self)
+        self._dashboard_frame.pack(
+            fill="x",
+            padx=Spacing.LARGE,
+            pady=(Spacing.MEDIUM, 0),
+        )
+
+        # Card 1: Last backup
+        self._card_last = self._make_card(self._dashboard_frame, "Last backup")
+        self._card_last["frame"].pack(side="left", fill="both", expand=True)
+
+        # Card 2: Next scheduled
+        self._card_next = self._make_card(self._dashboard_frame, "Next scheduled")
+        self._card_next["frame"].pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(Spacing.MEDIUM, 0),
+        )
+
+        # Card 3: Destinations
+        self._card_dest = self._make_card(self._dashboard_frame, "Destinations")
+        self._card_dest["frame"].pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(Spacing.MEDIUM, 0),
+        )
+
+        self._dest_labels: list[tuple[ttk.Label, ttk.Label]] = []
+
+        # Default state (no profile selected yet)
+        self.update_last_backup_card("")
+        self.update_next_scheduled_card("—")
+        self.update_destinations_card([])
+
+    def _make_card(
+        self,
+        parent: ttk.Frame,
+        title: str,
+    ) -> dict:
+        """Create a LabelFrame card with a content label.
+
+        Args:
+            parent: Parent frame.
+            title: Card title.
+
+        Returns:
+            Dict with 'frame' and 'content' (inner frame for content).
+        """
+        frame = ttk.LabelFrame(parent, text=title, padding=Spacing.PAD)
+        content = ttk.Frame(frame)
+        content.pack(fill="both", expand=True)
+        return {"frame": frame, "content": content}
+
+    @staticmethod
+    def _format_ago(timestamp: str) -> str:
+        """Format an ISO timestamp as a human-readable 'ago' string.
+
+        Args:
+            timestamp: ISO format datetime string.
+
+        Returns:
+            String like "2h ago", "3d ago", or the raw timestamp on error.
+        """
+        from datetime import datetime
+
+        try:
+            dt = datetime.fromisoformat(timestamp)
+            delta = datetime.now() - dt
+            total_seconds = int(delta.total_seconds())
+            if total_seconds >= 86400:
+                return f"{total_seconds // 86400}d ago"
+            if total_seconds >= 3600:
+                return f"{total_seconds // 3600}h ago"
+            if total_seconds >= 60:
+                return f"{total_seconds // 60}min ago"
+            return "Just now"
+        except (ValueError, TypeError):
+            return timestamp
+
+    def update_last_backup_card(
+        self,
+        last_backup: str,
+        files_count: int = 0,
+        success: bool = True,
+        is_differential: bool = False,
+        last_full_backup: str = "",
+        last_full_files_count: int = 0,
+    ) -> None:
+        """Update the Last backup card.
+
+        Args:
+            last_backup: ISO timestamp of last backup, or empty.
+            files_count: Number of files in last backup.
+            success: Whether last backup succeeded.
+            is_differential: Whether the profile uses differential backups.
+            last_full_backup: ISO timestamp of last full backup.
+            last_full_files_count: Number of files in last full backup.
+        """
+        content = self._card_last["content"]
+        for widget in content.winfo_children():
+            widget.destroy()
+
+        if not last_backup:
+            ttk.Label(
+                content,
+                text="Never",
+                foreground=Colors.TEXT_SECONDARY,
+            ).pack(anchor="w")
+            return
+
+        ago = self._format_ago(last_backup)
+        status_icon = "\u2713" if success else "\u2717"
+        status_color = Colors.SUCCESS if success else Colors.DANGER
+
+        # Line 1: status + ago + files count on same line
+        files_str = f" \u00b7 {files_count:,} files" if files_count > 0 else ""
+        ttk.Label(
+            content,
+            text=(
+                f"{status_icon} Success \u2014 {ago}{files_str}"
+                if success
+                else f"{status_icon} Failed \u2014 {ago}{files_str}"
+            ),
+            foreground=status_color,
+            font=Fonts.normal(),
+        ).pack(anchor="w")
+
+        # Line 2: last full info (only for differential profiles)
+        if is_differential and last_full_backup:
+            full_ago = self._format_ago(last_full_backup)
+            full_files = (
+                f" \u00b7 {last_full_files_count:,} files" if last_full_files_count > 0 else ""
+            )
+            ttk.Label(
+                content,
+                text=f"  Last full: {full_ago}{full_files}",
+                foreground=Colors.TEXT_SECONDARY,
+                font=Fonts.small(),
+            ).pack(anchor="w")
+
+    def update_next_scheduled_card(self, next_info: str) -> None:
+        """Update the Next scheduled card.
+
+        Args:
+            next_info: Human-readable next run info from scheduler.
+        """
+        content = self._card_next["content"]
+        for widget in content.winfo_children():
+            widget.destroy()
+
+        ttk.Label(
+            content,
+            text=next_info,
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w")
+
+    def update_destinations_card(
+        self,
+        destinations: list[tuple[str, str]],
+    ) -> None:
+        """Set up destination rows with loading placeholders.
+
+        Args:
+            destinations: List of (label, backend_type) for each
+                configured destination. E.g. [("Storage", "local"), ...].
+        """
+        content = self._card_dest["content"]
+        for widget in content.winfo_children():
+            widget.destroy()
+        self._dest_labels.clear()
+
+        if not destinations:
+            ttk.Label(
+                content,
+                text="Not configured",
+                foreground=Colors.TEXT_SECONDARY,
+            ).pack(anchor="w")
+            return
+
+        for label_text, _backend_type in destinations:
+            row = ttk.Frame(content)
+            row.pack(fill="x", anchor="w")
+
+            name_lbl = ttk.Label(
+                row,
+                text=f"{label_text}:",
+                font=Fonts.small(),
+            )
+            name_lbl.pack(side="left")
+
+            status_lbl = ttk.Label(
+                row,
+                text="  ...",
+                foreground=Colors.TEXT_SECONDARY,
+                font=Fonts.small(),
+            )
+            status_lbl.pack(side="left", padx=(Spacing.SMALL, 0))
+
+            self._dest_labels.append((name_lbl, status_lbl))
+
+    def update_destination_status(
+        self,
+        index: int,
+        health: DestinationHealth,
+    ) -> None:
+        """Update a single destination row after async check.
+
+        Must be called on the main thread (use self.after()).
+
+        Args:
+            index: Destination index (0=storage, 1+=mirrors).
+            health: Health check result.
+        """
+        if index >= len(self._dest_labels):
+            return
+
+        _name_lbl, status_lbl = self._dest_labels[index]
+
+        if health.online is None:
+            status_lbl.config(text="  ...", foreground=Colors.TEXT_SECONDARY)
+        elif health.online:
+            if health.free_bytes is not None:
+                text = f"  {format_bytes(health.free_bytes)} free"
+            else:
+                text = "  \u2713 Online"
+            status_lbl.config(text=text, foreground=Colors.SUCCESS)
+        else:
+            error_short = health.error[:30] if health.error else "Unreachable"
+            status_lbl.config(
+                text=f"  \u2717 {error_short}",
+                foreground=Colors.DANGER,
+            )
 
     def _subscribe_events(self):
         self._events.subscribe(PROGRESS, self._on_progress)

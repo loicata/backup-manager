@@ -17,6 +17,7 @@ class StorageTab(ScrollableTab):
         super().__init__(parent, **kwargs)
         self._features = get_available_features()
         self._config_frames: dict[str, ttk.Frame] = {}
+        self._saved_device_serial: str = ""
         self._build_ui()
 
     def _build_ui(self):
@@ -241,6 +242,25 @@ class StorageTab(ScrollableTab):
         if path:
             self.local_path_var.set(path)
 
+    @staticmethod
+    def _detect_device_serial(destination_path: str) -> str:
+        """Detect hardware serial for a local drive path.
+
+        Args:
+            destination_path: Local path like "G:\\Backups".
+
+        Returns:
+            Hardware serial string, or empty string if unavailable.
+        """
+        if not destination_path or len(destination_path) < 2:
+            return ""
+        if destination_path[1] != ":":
+            return ""
+
+        from src.storage.drive_serial import get_hardware_serial
+
+        return get_hardware_serial(destination_path[0]) or ""
+
     def _browse_key(self):
         path = filedialog.askopenfilename(
             title="Select SSH private key",
@@ -285,6 +305,8 @@ class StorageTab(ScrollableTab):
 
         if stype == StorageType.LOCAL:
             config.destination_path = self.local_path_var.get()
+            detected = self._detect_device_serial(config.destination_path)
+            config.device_serial = detected or self._saved_device_serial
         elif stype == StorageType.NETWORK:
             config.destination_path = self.network_path_var.get()
             config.network_username = self.network_user_var.get()
@@ -306,6 +328,7 @@ class StorageTab(ScrollableTab):
     def load_profile(self, profile: BackupProfile):
         s = profile.storage
         self.type_var.set(s.storage_type.value)
+        self._saved_device_serial = getattr(s, "device_serial", "")
 
         # Reset all fields before loading to avoid stale values
         self.local_path_var.set("")

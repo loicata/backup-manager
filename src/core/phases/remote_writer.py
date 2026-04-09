@@ -185,11 +185,17 @@ def _build_encrypted_tar(
         for file_info in files:
             if cancel_check is not None:
                 cancel_check()
+            src_path = long_path_str(file_info.source_path)
+            try:
+                actual_size = os.path.getsize(src_path)
+            except OSError:
+                logger.warning("File vanished, skipping: %s", file_info.relative_path)
+                continue
             info = tarfile.TarInfo(name=file_info.relative_path)
-            info.size = file_info.size
-            with open(long_path_str(file_info.source_path), "rb") as f:
+            info.size = actual_size
+            with open(src_path, "rb") as f:
                 tar.addfile(info, fileobj=f)
-            bytes_written += file_info.size
+            bytes_written += actual_size
             phase_log.progress(
                 current=bytes_written,
                 total=progress_total,

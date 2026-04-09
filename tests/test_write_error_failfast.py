@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.exceptions import WriteError
+from src.core.exceptions import CancelledError, WriteError
 from src.core.phases.collector import FileInfo
 from src.core.phases.local_writer import write_flat
 from src.core.phases.remote_writer import write_remote
@@ -252,3 +252,65 @@ class TestScheduledBackupNotifications:
         app.tray.notify.assert_called_once()
         call_args = app.tray.notify.call_args
         assert "complete" in call_args[0][0].lower()
+
+    def test_cancellation_sends_tray_notification(self):
+        app = self._make_app()
+        profile = MagicMock()
+        profile.name = "TestProfile"
+        profile.email.enabled = False
+
+        mock_engine = MagicMock()
+        mock_engine.run_backup.side_effect = CancelledError()
+
+        instance = self._make_instance(app)
+
+        with patch("src.ui.app.BackupEngine", return_value=mock_engine):
+            instance._scheduled_backup(profile)
+
+        app.tray.notify.assert_called_once()
+        call_args = app.tray.notify.call_args
+        assert "cancelled" in call_args[0][0].lower()
+        assert "TestProfile" in call_args[0][1]
+
+
+class TestManualBackupNotifications:
+    """_start_backup_thread sends tray notifications on cancel."""
+
+    def _make_instance(self):
+        """Create a BackupManagerApp instance with mocked internals."""
+        from src.ui.app import BackupManagerApp
+
+        instance = BackupManagerApp.__new__(BackupManagerApp)
+        instance.tray = MagicMock()
+        instance.scheduler = MagicMock()
+        instance.config_manager = MagicMock()
+        instance.events = MagicMock()
+        instance.engine = MagicMock()
+        instance.tab_run = MagicMock()
+        return instance
+
+    def test_cancellation_sends_tray_notification(self):
+        instance = self._make_instance()
+        profile = MagicMock()
+        profile.name = "MyProfile"
+        profile.email.enabled = False
+
+        instance.engine.run_backup.side_effect = CancelledError()
+        instance.engine._current_result = None
+
+        # Call _start_backup_thread and wait for the thread to finish
+        with patch("src.ui.app.BackupEngine"):
+            instance._start_backup_thread(profile)
+
+        # Wait for the background thread to complete
+        import threading
+        import time
+
+        for t in threading.enumerate():
+            if t.name == "Backup":
+                t.join(timeout=5)
+
+        instance.tray.notify.assert_called_once()
+        call_args = instance.tray.notify.call_args
+        assert "cancelled" in call_args[0][0].lower()
+        assert "MyProfile" in call_args[0][1]

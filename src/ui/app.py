@@ -11,6 +11,7 @@ from src import __version__
 from src.core.backup_engine import BackupEngine, CancelledError
 from src.core.config import BackupProfile, BackupType, ConfigManager
 from src.core.events import STATUS, EventBus
+from src.core.health_checker import check_destinations_async
 from src.core.scheduler import AutoStart, InAppScheduler
 from src.ui.tabs.email_tab import EmailTab
 from src.ui.tabs.encryption_tab import EncryptionTab
@@ -437,6 +438,84 @@ class BackupManagerApp:
             profile.last_backup,
         )
         self.tab_run.clear_log()
+
+        self._update_health_dashboard(profile)
+
+    def _update_health_dashboard(self, profile: BackupProfile) -> None:
+        """Populate the Run tab health dashboard for a profile.
+
+        Updates the 3 cards: Last backup, Next scheduled, Destinations.
+        Destination checks run in background threads; results update
+        the UI via after() callbacks.
+
+        Args:
+            profile: The currently selected profile.
+        """
+        # Card 1: Last backup — use journal timestamp (more accurate
+        # than profile.last_backup which only updates on success)
+        last_run = self.scheduler.journal.get_last_run(profile.id)
+        files_count = 0
+        success = True
+        last_timestamp = profile.last_backup or ""
+        if last_run:
+            success = last_run.get("status") == "success"
+            files_count = last_run.get("files_count", 0)
+            last_timestamp = last_run.get("timestamp", last_timestamp)
+        is_diff = profile.backup_type == BackupType.DIFFERENTIAL
+        self.tab_run.update_last_backup_card(
+            last_timestamp,
+            files_count=files_count,
+            success=success,
+            is_differential=is_diff,
+            last_full_backup=profile.last_full_backup or "",
+            last_full_files_count=profile.last_full_files_count,
+        )
+
+        # Card 2: Next scheduled
+        next_info = self.scheduler.get_next_run_info(profile)
+        self.tab_run.update_next_scheduled_card(next_info)
+
+        # Card 3: Destinations (with async checks)
+        destinations = []
+        try:
+            profile.storage.validate()
+            destinations.append(("Storage", profile.storage.storage_type.value))
+        except ValueError:
+            pass
+        for i, mirror in enumerate(profile.mirror_destinations):
+            try:
+                mirror.validate()
+                destinations.append(
+                    (f"Mirror {i + 1}", mirror.storage_type.value),
+                )
+            except ValueError:
+                pass
+
+        self.tab_run.update_destinations_card(destinations)
+
+        if destinations:
+            check_destinations_async(
+                profile.storage,
+                profile.mirror_destinations,
+                callback=self._on_health_result,
+            )
+
+    def _on_health_result(self, index: int, health) -> None:
+        """Callback from health check thread — schedule UI update.
+
+        Args:
+            index: Destination index (0=storage, 1+=mirrors).
+            health: DestinationHealth result.
+        """
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            self.tab_run.after(
+                0,
+                self.tab_run.update_destination_status,
+                index,
+                health,
+            )
 
     def _save_profile(self, silent: bool = False) -> bool:
         """Collect config from all tabs and save.
@@ -939,6 +1018,10 @@ class BackupManagerApp:
 
             except CancelledError:
                 self.tray.set_state(TrayState.IDLE)
+                self.tray.notify(
+                    "Backup cancelled",
+                    f"[{profile.name}] Cancelled by user",
+                )
                 result = self.engine._current_result if self.engine else None
                 with self.scheduler.op_lock:
                     self.scheduler.journal.update_last(status="cancelled")
@@ -1187,6 +1270,10 @@ class BackupManagerApp:
 
         except CancelledError:
             self.tray.set_state(TrayState.IDLE)
+            self.tray.notify(
+                "Scheduled backup cancelled",
+                f"[{profile.name}] Cancelled by user",
+            )
             if profile.email.enabled:
                 result = self.engine._current_result if self.engine else None
                 self._send_backup_email(

@@ -20,6 +20,7 @@ def verify_backup(
     backup_path: Path,
     manifest_path: Path,
     events: EventBus | None = None,
+    cancel_check=None,
 ) -> tuple[bool, str]:
     """Verify backup contents against manifest.
 
@@ -27,6 +28,7 @@ def verify_backup(
         backup_path: Path to the backup directory.
         manifest_path: Path to the .wbverify file.
         events: Optional event bus.
+        cancel_check: Optional callable that raises CancelledError.
 
     Returns:
         (success, message) tuple.
@@ -47,6 +49,8 @@ def verify_backup(
     errors = []
 
     for i, (rel_path, info) in enumerate(files.items()):
+        if cancel_check is not None:
+            cancel_check()
         expected_hash = info.get("hash", "")
         file_path = Path(long_path_str(backup_path / rel_path))
 

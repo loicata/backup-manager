@@ -228,6 +228,7 @@ class InAppScheduler:
         self._journal = ScheduleJournal(config_dir)
         self._state = SchedulerState(config_dir)
         self._op_lock = threading.Lock()
+        self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
         self._last_check_time = time.monotonic()
@@ -257,8 +258,9 @@ class InAppScheduler:
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
         if self._thread:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=2)
         logger.info("Scheduler stopped")
 
     def _run(self) -> None:
@@ -277,7 +279,9 @@ class InAppScheduler:
                 self._check_schedules()
             except Exception:
                 logger.exception("Scheduler error")
-            time.sleep(CHECK_INTERVAL)
+            self._stop_event.wait(CHECK_INTERVAL)
+            if self._stop_event.is_set():
+                break
 
     def _check_startup_missed(self) -> None:
         """Check for missed backups on application startup (cold boot).
@@ -412,7 +416,10 @@ class InAppScheduler:
         try:
             self._backup_callback(profile)
             with self._op_lock:
-                self._journal.update_last(status="success")
+                self._journal.update_last(
+                    status="success",
+                    timestamp=datetime.now().isoformat(),
+                )
             logger.info("Scheduled backup succeeded: %s", profile.name)
         except Exception as e:
             logger.exception("Scheduled backup failed: %s", profile.name)
@@ -420,6 +427,7 @@ class InAppScheduler:
                 self._journal.update_last(
                     status="failed",
                     detail=f"{type(e).__name__}: {e}",
+                    timestamp=datetime.now().isoformat(),
                 )
 
             # Retry logic
@@ -464,8 +472,11 @@ class InAppScheduler:
             sleep_seconds = delay_minutes * 60
             slept = 0
             while slept < sleep_seconds and self._running:
-                time.sleep(min(CHECK_INTERVAL, sleep_seconds - slept))
-                slept += CHECK_INTERVAL
+                chunk = min(CHECK_INTERVAL, sleep_seconds - slept)
+                self._stop_event.wait(chunk)
+                if self._stop_event.is_set():
+                    break
+                slept += chunk
 
             if not self._running:
                 logger.info("Scheduler stopped — aborting retry for '%s'", profile.name)
@@ -485,7 +496,10 @@ class InAppScheduler:
             try:
                 self._backup_callback(profile)
                 with self._op_lock:
-                    self._journal.update_last(status="success")
+                    self._journal.update_last(
+                        status="success",
+                        timestamp=datetime.now().isoformat(),
+                    )
                 logger.info(
                     "Retry %d/%d succeeded for '%s'",
                     attempt,
@@ -504,6 +518,7 @@ class InAppScheduler:
                     self._journal.update_last(
                         status="failed",
                         detail=f"Retry {attempt}/{total_attempts}: {type(e).__name__}: {e}",
+                        timestamp=datetime.now().isoformat(),
                     )
 
         logger.error(
@@ -600,21 +615,34 @@ class InAppScheduler:
 
 
 class AutoStart:
-    """Manages Windows auto-start via VBS in Startup folder."""
+    """Manages Windows auto-start via HKCU\\...\\Run registry key.
 
-    STARTUP_DIR = Path(
+    Uses the standard Windows mechanism for per-user auto-start programs.
+    The registry key is natively cleaned up by MSI uninstallers, unlike
+    VBS scripts in the Startup folder which could persist after removal.
+    """
+
+    _REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    _REG_VALUE = "BackupManager"
+
+    # Legacy VBS path — used only for migration cleanup.
+    _LEGACY_VBS = Path(
         os.environ.get("APPDATA", ""),
         "Microsoft",
         "Windows",
         "Start Menu",
         "Programs",
         "Startup",
+        "BackupManager.vbs",
     )
-    VBS_FILENAME = "BackupManager.vbs"
 
     @classmethod
     def ensure_startup(cls, show_window: bool = True) -> None:
-        """Create or update VBS startup script."""
+        """Create or update auto-start registry entry.
+
+        Args:
+            show_window: If False, adds --minimized flag to the command.
+        """
         import sys
 
         if not getattr(sys, "frozen", False):
@@ -622,45 +650,77 @@ class AutoStart:
 
         exe_path = Path(sys.executable)
         args = "" if show_window else " --minimized"
+        command = f'"{exe_path}"{args}'
 
-        vbs_content = (
-            f'Set WshShell = CreateObject("WScript.Shell")\n'
-            f'WshShell.Run """{exe_path}""{args}", '
-            f'{"1" if show_window else "0"}, False\n'
-        )
-
-        vbs_path = cls.STARTUP_DIR / cls.VBS_FILENAME
         try:
-            vbs_path.write_text(vbs_content, encoding="utf-8")
-            logger.info("Auto-start configured: %s", vbs_path)
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                cls._REG_KEY,
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                winreg.SetValueEx(key, cls._REG_VALUE, 0, winreg.REG_SZ, command)
+            logger.info("Auto-start configured via registry: %s", command)
         except OSError as e:
-            logger.warning("Could not create startup script: %s", e)
+            logger.warning("Could not set auto-start registry key: %s", e)
+
+        cls._cleanup_legacy_vbs()
 
     @classmethod
     def disable(cls) -> tuple[bool, str]:
-        """Remove VBS startup script."""
-        vbs_path = cls.STARTUP_DIR / cls.VBS_FILENAME
+        """Remove auto-start registry entry."""
         try:
-            if vbs_path.exists():
-                vbs_path.unlink()
-                return True, "Auto-start disabled"
-            return True, "Auto-start was not enabled"
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                cls._REG_KEY,
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                try:
+                    winreg.DeleteValue(key, cls._REG_VALUE)
+                except FileNotFoundError:
+                    cls._cleanup_legacy_vbs()
+                    return True, "Auto-start was not enabled"
         except OSError as e:
             return False, f"Could not disable: {e}"
 
+        cls._cleanup_legacy_vbs()
+        return True, "Auto-start disabled"
+
     @classmethod
     def is_enabled(cls) -> bool:
-        """Check if auto-start is configured."""
-        return (cls.STARTUP_DIR / cls.VBS_FILENAME).exists()
+        """Check if auto-start registry entry exists."""
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cls._REG_KEY, 0, winreg.KEY_READ) as key:
+                winreg.QueryValueEx(key, cls._REG_VALUE)
+                return True
+        except (FileNotFoundError, OSError):
+            return False
 
     @classmethod
     def is_show_window(cls) -> bool:
         """Check if startup is configured to show window."""
-        vbs_path = cls.STARTUP_DIR / cls.VBS_FILENAME
-        if vbs_path.exists():
-            try:
-                content = vbs_path.read_text(encoding="utf-8")
-                return "--minimized" not in content
-            except OSError:
-                pass
-        return True
+        try:
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cls._REG_KEY, 0, winreg.KEY_READ) as key:
+                value, _ = winreg.QueryValueEx(key, cls._REG_VALUE)
+                return "--minimized" not in value
+        except (FileNotFoundError, OSError):
+            return True
+
+    @classmethod
+    def _cleanup_legacy_vbs(cls) -> None:
+        """Remove legacy VBS startup script if it exists."""
+        try:
+            if cls._LEGACY_VBS.exists():
+                cls._LEGACY_VBS.unlink()
+                logger.info("Removed legacy VBS auto-start: %s", cls._LEGACY_VBS)
+        except OSError as e:
+            logger.debug("Could not remove legacy VBS: %s", e)

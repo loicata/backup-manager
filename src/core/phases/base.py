@@ -43,6 +43,7 @@ class PipelineContext:
     backup_path: Path | None = None
     backup_remote_name: str = ""
     integrity_manifest: dict = field(default_factory=dict)
+    filter_hashes: dict[str, str] = field(default_factory=dict)  # From filter phase
     file_hashes: dict[str, str] = field(default_factory=dict)  # rel_path → sha256
     backend: Any | None = None  # StorageBackend
 

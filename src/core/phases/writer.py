@@ -59,6 +59,7 @@ def write_backup(
                     encrypt_pw,
                     ctx.events,
                     integrity_manifest=ctx.integrity_manifest,
+                    cancel_check=cancel_check,
                 )
             else:
                 ctx.backup_path = write_flat(
@@ -66,6 +67,7 @@ def write_backup(
                     dest,
                     ctx.backup_name,
                     ctx.events,
+                    cancel_check=cancel_check,
                 )
     finally:
         if secure_pw:

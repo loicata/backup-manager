@@ -24,6 +24,7 @@ def build_integrity_manifest(
     files: list[FileInfo],
     events: EventBus | None = None,
     cancel_check=None,
+    cached_hashes: dict[str, str] | None = None,
 ) -> dict:
     """Build integrity manifest with hashes of all source files.
 
@@ -31,18 +32,30 @@ def build_integrity_manifest(
         files: Files that were backed up.
         events: Optional event bus.
         cancel_check: Optional callable that raises CancelledError.
+        cached_hashes: Optional mapping of relative_path to SHA-256
+            hex digest from a previous phase (e.g. filter).  Files
+            present in this dict skip disk I/O entirely.
 
     Returns:
         Manifest dict with file hashes and total checksum.
     """
     phase_log = PhaseLogger("manifest", events)
+    cache = cached_hashes or {}
     file_hashes = {}
     total = len(files)
+    cache_hits = 0
 
     for i, file_info in enumerate(files):
         if cancel_check is not None:
             cancel_check()
-        file_hash = compute_sha256(file_info.source_path)
+
+        cached = cache.get(file_info.relative_path)
+        if cached is not None:
+            file_hash = cached
+            cache_hits += 1
+        else:
+            file_hash = compute_sha256(file_info.source_path)
+
         file_hashes[file_info.relative_path] = {
             "hash": file_hash,
             "size": file_info.size,
@@ -53,6 +66,11 @@ def build_integrity_manifest(
             total=total,
             filename=file_info.relative_path,
             phase="hashing",
+        )
+
+    if cache_hits:
+        phase_log.info(
+            f"Manifest hashing: {cache_hits}/{total} from cache, " f"{total - cache_hits} computed"
         )
 
     # Total checksum: hash of sorted file hashes

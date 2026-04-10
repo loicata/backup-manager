@@ -146,12 +146,15 @@ def _delete_old_backups(
     backend: StorageBackend,
     to_delete: list[dict],
     phase_log: PhaseLogger,
+    cancel_check=None,
 ) -> int:
     """Delete backups not in the keep set, with progress reporting."""
     total = len(to_delete)
     deleted = 0
 
     for i, backup in enumerate(to_delete):
+        if cancel_check is not None:
+            cancel_check()
         try:
             backend.delete_backup(backup["name"])
             deleted += 1

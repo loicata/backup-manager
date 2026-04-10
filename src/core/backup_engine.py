@@ -404,7 +404,7 @@ class BackupEngine:
         self._check_cancel()
         if ctx.profile.backup_type == BackupType.DIFFERENTIAL:
             manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
-            ctx.files = filter_changed_files(
+            ctx.files, ctx.filter_hashes = filter_changed_files(
                 ctx.files, manifest_path, self._events, cancel_check=self._check_cancel
             )
             ctx.result.files_skipped = ctx.result.files_found - len(ctx.files)
@@ -545,6 +545,7 @@ class BackupEngine:
             ctx.files,
             self._events,
             cancel_check=self._check_cancel,
+            cached_hashes=getattr(ctx, "filter_hashes", None),
         )
 
         # Cache file hashes for reuse in Phase 8 (delta manifest)
@@ -616,7 +617,9 @@ class BackupEngine:
             self._phase("Verifying backup (hash)...")
             self._check_cancel()
             manifest_file = ctx.backup_path.parent / f"{ctx.backup_path.name}.wbverify"
-            ok, msg = verify_backup(ctx.backup_path, manifest_file, self._events)
+            ok, msg = verify_backup(
+                ctx.backup_path, manifest_file, self._events, cancel_check=self._check_cancel
+            )
             if not ok:
                 raise RuntimeError(msg)
 
@@ -695,6 +698,8 @@ class BackupEngine:
         total = len(ctx.files)
 
         for i, f in enumerate(ctx.files):
+            self._check_cancel()
+
             if f.relative_path not in remote_map:
                 errors.append(f"Missing on remote: {f.relative_path}")
                 continue
@@ -781,6 +786,8 @@ class BackupEngine:
         total = len(ctx.files)
 
         for i, f in enumerate(ctx.files):
+            self._check_cancel()
+
             if f.relative_path not in remote_map:
                 errors.append(f"Missing on remote: {f.relative_path}")
             elif remote_map[f.relative_path] != f.size:
@@ -934,7 +941,9 @@ class BackupEngine:
 
         if ctx.profile.backup_type == BackupType.FULL:
             self._phase("Updating manifest...")
-            full_manifest = build_updated_manifest(ctx.all_files, ctx.file_hashes)
+            full_manifest = build_updated_manifest(
+                ctx.all_files, ctx.file_hashes, cancel_check=self._check_cancel
+            )
             full_manifest["__metadata__"] = {
                 "backup_name": ctx.backup_name,
                 "created_at": datetime.now().isoformat(),
@@ -1093,6 +1102,7 @@ class BackupEngine:
         size_verified = 0
 
         for f in ctx.files:
+            self._check_cancel()
             expected_path = f.relative_path
             if expected_path not in remote_map:
                 errors.append(f"Missing on {mirror_name}: {expected_path}")
@@ -1141,6 +1151,7 @@ class BackupEngine:
         errors = []
 
         for f in ctx.files:
+            self._check_cancel()
             expected_path = f.relative_path
             if expected_path not in remote_map:
                 errors.append(f"Missing on {mirror_name}: {expected_path}")
@@ -1258,13 +1269,17 @@ class BackupEngine:
             try:
                 backend = create_backend(config)
                 # Try both plain directory and encrypted archive names
+                deleted = False
                 for suffix in ("", ".tar.wbenc"):
                     target = f"{name}{suffix}"
                     try:
                         backend.delete_backup(target)
                         self._log(f"{label}: deleted incomplete {target}")
+                        deleted = True
                     except FileNotFoundError:
                         pass
+                if not deleted:
+                    self._log(f"{label}: nothing to clean up")
             except Exception as exc:
                 self._log(f"{label}: cleanup failed — {exc}")
 

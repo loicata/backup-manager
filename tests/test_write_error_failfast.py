@@ -185,6 +185,9 @@ class TestScheduledBackupNotifications:
         instance.config_manager = app.config_manager
         instance.events = app.events
         instance.engine = None
+        instance.root = MagicMock()
+        instance.tab_run = MagicMock()
+        instance._update_health_dashboard = MagicMock()
         return instance
 
     def test_failure_sends_tray_notification_then_reraises(self):
@@ -304,7 +307,6 @@ class TestManualBackupNotifications:
 
         # Wait for the background thread to complete
         import threading
-        import time
 
         for t in threading.enumerate():
             if t.name == "Backup":

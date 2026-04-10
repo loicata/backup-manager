@@ -20,18 +20,6 @@ def build_msi():
 class TestBuildWxs:
     """Verify the generated WXS contains required cleanup components."""
 
-    def test_wxs_contains_startup_cleanup(self, build_msi):
-        """Uninstall must remove BackupManager.vbs from Startup folder."""
-        wxs = build_msi._build_wxs("1.0.0")
-        assert "RemoveAutoStartVbs" in wxs
-        assert 'Name="BackupManager.vbs"' in wxs
-        assert 'On="uninstall"' in wxs
-
-    def test_wxs_contains_startup_folder(self, build_msi):
-        """WXS must reference the Windows Startup folder for cleanup."""
-        wxs = build_msi._build_wxs("1.0.0")
-        assert "StartupFolder" in wxs
-
     def test_wxs_contains_registry_cleanup(self, build_msi):
         """Uninstall must remove HKCU\\Software\\BackupManager registry key."""
         wxs = build_msi._build_wxs("1.0.0")
@@ -39,10 +27,23 @@ class TestBuildWxs:
         assert 'Key="Software\\BackupManager"' in wxs
         assert 'Action="removeOnUninstall"' in wxs
 
+    def test_wxs_removes_autostart_run_key(self, build_msi):
+        """Uninstall must remove auto-start entry from HKCU\\...\\Run."""
+        wxs = build_msi._build_wxs("1.0.0")
+        assert "RemoveAutoStartRun" in wxs
+        assert "CurrentVersion\\Run" in wxs
+        assert 'Name="BackupManager"' in wxs
+
+    def test_wxs_no_legacy_vbs_references(self, build_msi):
+        """WXS must not contain legacy VBS/StartupFolder references."""
+        wxs = build_msi._build_wxs("1.0.0")
+        assert "StartupFolder" not in wxs
+        assert "BackupManager.vbs" not in wxs
+        assert "CA_RemoveStartupVbs" not in wxs
+
     def test_wxs_cleanup_components_in_feature(self, build_msi):
         """Cleanup components must be referenced in the Complete feature."""
         wxs = build_msi._build_wxs("1.0.0")
-        assert 'ComponentRef Id="C_CleanupAutoStart"' in wxs
         assert 'ComponentRef Id="C_CleanupRegistry"' in wxs
 
     def test_wxs_contains_start_menu_cleanup(self, build_msi):
@@ -62,14 +63,11 @@ class TestBuildWxs:
         wxs = build_msi._build_wxs("1.0.0")
         assert "NOT Installed" in wxs
 
-    def test_wxs_custom_action_removes_vbs_on_uninstall(self, build_msi):
-        """Fallback CustomAction must delete VBS silently via AppDataFolder."""
+    def test_wxs_no_custom_action_for_vbs(self, build_msi):
+        """No CustomAction for VBS cleanup should exist (registry is used)."""
         wxs = build_msi._build_wxs("1.0.0")
-        assert "CA_RemoveStartupVbs" in wxs
-        assert "AppDataFolder" in wxs
-        assert "BackupManager.vbs" in wxs
-        assert "NOT UPGRADINGPRODUCTCODE" in wxs
-        assert "mshta" in wxs
+        assert "mshta" not in wxs
+        assert "CA_RemoveStartupVbs" not in wxs
 
     def test_wxs_major_upgrade_configured(self, build_msi):
         """MajorUpgrade must be configured for clean upgrades."""

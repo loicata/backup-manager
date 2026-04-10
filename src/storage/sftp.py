@@ -76,8 +76,15 @@ class _ChannelWriter(io.RawIOBase):
 
     Used by ``tarfile.open(mode='w|')`` to stream tar data directly
     into an exec channel (``tar xf -``), tracking bytes for progress.
-    Supports cancel checking between writes and optional bandwidth
-    throttling for responsive cancellation and network sharing.
+
+    Tarfile emits many small writes (512-byte headers, padding blocks).
+    Without buffering, each tiny write becomes a separate ``sendall()``
+    call — each one must pass through SSH flow control, causing massive
+    overhead and near-zero throughput on high-latency or slow receivers.
+
+    The internal buffer accumulates small writes and flushes in chunks
+    of _FAST_CHUNK_SIZE (1 MB), reducing SSH round-trips by ~2000x for
+    typical backups with many small files.
     """
 
     def __init__(
@@ -95,13 +102,37 @@ class _ChannelWriter(io.RawIOBase):
         self._cancel_check = cancel_check
         self._limit_bps = limit_kbps * 1024
         self._start_time = time.monotonic()
+        self._buffer = bytearray()
 
     def write(self, data: bytes | bytearray) -> int:
-        """Send *data* to the SSH channel with optional throttling."""
+        """Buffer data and flush in large chunks for efficient SSH transfer."""
         if self._cancel_check is not None:
             self._cancel_check()
-        self._channel.sendall(data)
-        self._bytes_sent += len(data)
+
+        self._buffer.extend(data)
+
+        # Flush when buffer reaches chunk size
+        while len(self._buffer) >= _FAST_CHUNK_SIZE:
+            self._flush_chunk(_FAST_CHUNK_SIZE)
+
+        return len(data)
+
+    def flush(self) -> None:
+        """Flush remaining buffered data to the SSH channel."""
+        if self._buffer:
+            self._flush_chunk(len(self._buffer))
+
+    def close(self) -> None:
+        """Flush buffer before closing."""
+        self.flush()
+
+    def _flush_chunk(self, size: int) -> None:
+        """Send *size* bytes from the buffer to the channel."""
+        chunk = bytes(self._buffer[:size])
+        del self._buffer[:size]
+
+        self._channel.sendall(chunk)
+        self._bytes_sent += len(chunk)
 
         # Bandwidth throttling: sleep if sending faster than limit
         if self._limit_bps > 0:
@@ -115,7 +146,6 @@ class _ChannelWriter(io.RawIOBase):
 
         if self._progress_callback and self._total_bytes > 0:
             self._progress_callback(self._bytes_sent, self._total_bytes)
-        return len(data)
 
     def writable(self) -> bool:
         return True
@@ -213,7 +243,11 @@ class SFTPStorage(StorageBackend):
         # Switch socket to operation timeout now that connection succeeded
         sock.settimeout(_OPERATION_TIMEOUT)
 
-        transport = paramiko.Transport(sock)
+        transport = paramiko.Transport(
+            sock,
+            default_window_size=_SFTP_WINDOW_SIZE,
+            default_max_packet_size=2**15,  # 32 KB (paramiko max)
+        )
         transport.set_keepalive(_KEEPALIVE_INTERVAL)
 
         # Authenticate
@@ -489,6 +523,8 @@ class SFTPStorage(StorageBackend):
                     with open(local_path, "rb") as f:
                         tar.addfile(info, fileobj=f)
 
+            # Flush remaining buffered data before closing channel
+            writer.flush()
             channel.shutdown_write()
             exit_status = channel.recv_exit_status()
             if exit_status != 0:
@@ -501,6 +537,8 @@ class SFTPStorage(StorageBackend):
         total_bytes = sum(size for _, _, size in files)
         bytes_sent = 0
         for local_path, rel_path, size in files:
+            if self._cancel_check is not None:
+                self._cancel_check()
             remote_path = f"{remote_dir}/{rel_path}"
             with open(local_path, "rb") as f:
                 self.upload_file(f, remote_path, size=size)
@@ -588,6 +626,8 @@ class SFTPStorage(StorageBackend):
         self._ensure_remote_dir_exec(transport, base)
 
         for filepath in local_path.rglob("*"):
+            if self._cancel_check is not None:
+                self._cancel_check()
             if filepath.is_file():
                 rel = filepath.relative_to(local_path).as_posix()
                 remote_full = f"{base}/{rel}"
@@ -601,6 +641,8 @@ class SFTPStorage(StorageBackend):
         self._ensure_remote_dir_sftp(sftp, base)
 
         for filepath in local_path.rglob("*"):
+            if self._cancel_check is not None:
+                self._cancel_check()
             if filepath.is_file():
                 rel = filepath.relative_to(local_path).as_posix()
                 remote_full = f"{base}/{rel}"
@@ -986,6 +1028,8 @@ class SFTPStorage(StorageBackend):
             hash_map: dict[str, str] = {}
             batch_size = 200
             for i in range(0, len(remote_paths), batch_size):
+                if self._cancel_check is not None:
+                    self._cancel_check()
                 batch = remote_paths[i : i + batch_size]
                 escaped = " ".join(_shell_escape(p) for p in batch)
                 cmd = f"sha256sum {escaped}"

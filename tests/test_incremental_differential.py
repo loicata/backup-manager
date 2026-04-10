@@ -66,7 +66,7 @@ def _do_backup_cycle(source_dir: Path, manifest_path: Path):
     detection works correctly across multiple runs.
     """
     files = _collect(source_dir)
-    changed = filter_changed_files(files, manifest_path)
+    changed, _ = filter_changed_files(files, manifest_path)
     # Save ALL files so differential detection works across runs.
     manifest = build_updated_manifest(files)
     save_manifest(manifest, manifest_path)
@@ -84,7 +84,7 @@ class TestDifferentialBasic:
     def test_first_run_no_manifest_backs_up_all(self, source_dir, manifest_path):
         """First run without manifest should include all files (= full)."""
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) == len(files)
 
@@ -93,7 +93,7 @@ class TestDifferentialBasic:
         _do_backup_cycle(source_dir, manifest_path)
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 0
 
@@ -104,7 +104,7 @@ class TestDifferentialBasic:
         (source_dir / "doc.txt").write_text("Modified!", encoding="utf-8")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 1
         assert changed[0].relative_path.endswith("/doc.txt")
@@ -116,7 +116,7 @@ class TestDifferentialBasic:
         (source_dir / "new_file.txt").write_text("Brand new", encoding="utf-8")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 1
         assert changed[0].relative_path.endswith("/new_file.txt")
@@ -128,7 +128,7 @@ class TestDifferentialBasic:
         (source_dir / "doc.txt").unlink()
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 0
         # Verify the file is not in collected files either
@@ -143,7 +143,7 @@ class TestDifferentialBasic:
         (source_dir / "brand_new.txt").write_text("New", encoding="utf-8")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         changed_names = {f.relative_path for f in changed}
         assert any(n.endswith("/doc.txt") for n in changed_names)
@@ -169,7 +169,7 @@ class TestChangeDetectionEdgeCases:
         (source_dir / "doc.txt").write_text("BBBBBBBBBB", encoding="utf-8")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) >= 1
         assert any(f.relative_path.endswith("/doc.txt") for f in changed)
@@ -181,7 +181,7 @@ class TestChangeDetectionEdgeCases:
         (source_dir / "doc.txt").write_text("Much longer content now!", encoding="utf-8")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert any(f.relative_path.endswith("/doc.txt") for f in changed)
 
@@ -196,7 +196,7 @@ class TestChangeDetectionEdgeCases:
         doc.write_text(content, encoding="utf-8")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         # Content is the same, hash matches → should be skipped
         assert not any(f.relative_path.endswith("/doc.txt") for f in changed)
@@ -214,13 +214,13 @@ class TestChangeDetectionEdgeCases:
 
         # Second run: empty file unchanged
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
         assert not any(f.relative_path.endswith("/empty.txt") for f in changed)
 
         # Modify empty file to non-empty
         (source_dir / "empty.txt").write_text("Now has content", encoding="utf-8")
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
         assert any(f.relative_path.endswith("/empty.txt") for f in changed)
 
     def test_file_truncated_to_empty(self, source_dir, manifest_path):
@@ -230,7 +230,7 @@ class TestChangeDetectionEdgeCases:
         (source_dir / "doc.txt").write_bytes(b"")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert any(f.relative_path.endswith("/doc.txt") for f in changed)
 
@@ -252,7 +252,7 @@ class TestFileRenameAndMove:
         old.rename(new)
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         changed_names = {f.relative_path for f in changed}
         assert any(n.endswith("/document.txt") for n in changed_names)
@@ -267,7 +267,7 @@ class TestFileRenameAndMove:
         (source_dir / "doc.txt").rename(new_dir / "doc.txt")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         changed_names = {f.relative_path for f in changed}
         assert any("moved" in name for name in changed_names)
@@ -287,7 +287,7 @@ class TestManifestEdgeCases:
         manifest_path.write_text("{invalid json!!!", encoding="utf-8")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         # All files should be backed up (treated as first run)
         assert len(changed) == len(files)
@@ -298,7 +298,7 @@ class TestManifestEdgeCases:
         manifest_path.write_text("", encoding="utf-8")
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) == len(files)
 
@@ -314,7 +314,7 @@ class TestManifestEdgeCases:
             }
         save_manifest(manifest, manifest_path)
 
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         # Missing hash means prev.get("hash", "") won't match → all files changed
         # Actually: size matches, hash compare: compute_sha256(file) != "" → changed
@@ -334,7 +334,7 @@ class TestManifestEdgeCases:
         save_manifest(manifest, manifest_path)
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 0  # Real files unchanged
 
@@ -380,7 +380,7 @@ class TestMultipleBackupCycles:
         (source_dir / "subdir" / "nested.txt").unlink()
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         changed_names = {f.relative_path for f in changed}
         assert any(n.endswith("/added.txt") for n in changed_names)
@@ -579,7 +579,7 @@ class TestFilterErrorHandling:
             original_sha = compute_sha256
             mock_sha.side_effect = _failing_sha
 
-            changed = filter_changed_files(files, manifest_path)
+            changed, _ = filter_changed_files(files, manifest_path)
 
         # doc.txt should be in changed (fail-safe: can't read = include)
         assert any(f.relative_path.endswith("/doc.txt") for f in changed)
@@ -590,7 +590,7 @@ class TestFilterErrorHandling:
         # Don't create the directory — load_manifest handles this
 
         files = _collect(source_dir)
-        changed = filter_changed_files(files, bad_path)
+        changed, _ = filter_changed_files(files, bad_path)
 
         assert len(changed) == len(files)
 
@@ -623,7 +623,7 @@ class TestManyFiles:
 
         # Second run
         files = _collect(source)
-        changed2 = filter_changed_files(files, manifest_path)
+        changed2, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed2) == 5
         changed_names = {f.relative_path for f in changed2}
@@ -642,7 +642,7 @@ class TestManyFiles:
         _do_backup_cycle(source, manifest_path)
 
         files = _collect(source)
-        changed = filter_changed_files(files, manifest_path)
+        changed, _ = filter_changed_files(files, manifest_path)
 
         assert len(changed) == 0
 
@@ -830,5 +830,5 @@ class TestFilterCancelCheck:
         manifest_path = tmp_path / "manifest.json"
 
         # No manifest → returns all files
-        result = filter_changed_files(files, manifest_path)
+        result, _ = filter_changed_files(files, manifest_path)
         assert len(result) == 1

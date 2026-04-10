@@ -22,6 +22,7 @@ def encrypt_backup(
     backup_path: Path,
     password: str,
     events: EventBus | None = None,
+    cancel_check=None,
 ) -> Path:
     """Encrypt a backup directory into a .tar.wbenc archive.
 
@@ -32,6 +33,7 @@ def encrypt_backup(
         backup_path: Path to the backup directory.
         password: Encryption password.
         events: Optional event bus.
+        cancel_check: Optional callable that raises CancelledError.
 
     Returns:
         Path to the encrypted archive (.tar.wbenc file).
@@ -58,6 +60,8 @@ def encrypt_backup(
         enc_writer = EncryptingWriter(out_file, password)
         with tarfile.open(fileobj=enc_writer, mode="w|") as tar:
             for i, filepath in enumerate(files):
+                if cancel_check is not None:
+                    cancel_check()
                 rel = filepath.relative_to(backup_path)
                 info = tarfile.TarInfo(name=str(rel).replace("\\", "/"))
                 info.size = filepath.stat().st_size

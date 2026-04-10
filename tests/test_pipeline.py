@@ -84,7 +84,7 @@ class TestFilter:
     def test_no_manifest_returns_all(self, sample_files, tmp_path):
         files = collect_files([str(sample_files)])
         manifest_path = tmp_path / "manifest.json"
-        result = filter_changed_files(files, manifest_path)
+        result, _ = filter_changed_files(files, manifest_path)
         assert len(result) == len(files)
 
     def test_unchanged_files_filtered(self, sample_files, tmp_path):
@@ -96,7 +96,7 @@ class TestFilter:
         save_manifest(manifest, manifest_path)
 
         # Filter again — should find no changes
-        result = filter_changed_files(files, manifest_path)
+        result, _ = filter_changed_files(files, manifest_path)
         assert len(result) == 0
 
     def test_modified_file_detected(self, sample_files, tmp_path):
@@ -110,7 +110,7 @@ class TestFilter:
         (sample_files / "file1.txt").write_text("MODIFIED", encoding="utf-8")
 
         files = collect_files([str(sample_files)])
-        result = filter_changed_files(files, manifest_path)
+        result, _ = filter_changed_files(files, manifest_path)
         assert len(result) >= 1
         assert any(
             f.relative_path.endswith("/file1.txt") or f.relative_path == "file1.txt" for f in result
@@ -124,7 +124,7 @@ class TestFilter:
 
         (sample_files / "new_file.txt").write_text("new", encoding="utf-8")
         files = collect_files([str(sample_files)])
-        result = filter_changed_files(files, manifest_path)
+        result, _ = filter_changed_files(files, manifest_path)
         assert any(
             f.relative_path.endswith("/new_file.txt") or f.relative_path == "new_file.txt"
             for f in result

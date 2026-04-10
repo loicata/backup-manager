@@ -106,7 +106,6 @@ def _build_wxs(version: str) -> str:
       <Directory Id="ProgramMenuFolder">
         <Directory Id="ApplicationProgramsFolder" Name="Backup Manager" />
       </Directory>
-      <Directory Id="StartupFolder" />
     </Directory>
 
     <!-- Start Menu shortcut -->
@@ -124,32 +123,6 @@ def _build_wxs(version: str) -> str:
       </Component>
     </DirectoryRef>
 
-    <!-- Clean up auto-start VBS from Windows Startup folder on uninstall.
-         RemoveFile uses StartupFolder (works for interactive uninstall).
-         CustomAction uses AppDataFolder explicitly (works for elevated/silent). -->
-    <DirectoryRef Id="StartupFolder">
-      <Component Id="C_CleanupAutoStart" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
-        <RemoveFile Id="RemoveAutoStartVbs"
-                    Name="BackupManager.vbs"
-                    On="uninstall" />
-        <RegistryValue Root="HKCU" Key="Software\\BackupManager"
-                       Name="CleanupAutoStart" Type="integer" Value="1"
-                       KeyPath="yes" />
-      </Component>
-    </DirectoryRef>
-
-    <!-- Fallback: delete VBS silently using mshta (no console flash) -->
-    <CustomAction Id="CA_RemoveStartupVbs"
-                  Directory="INSTALLFOLDER"
-                  ExeCommand='mshta vbscript:Execute("On Error Resume Next:CreateObject(""Scripting.FileSystemObject"").DeleteFile(""[AppDataFolder]Microsoft\\Windows\\Start Menu\\Programs\\Startup\\BackupManager.vbs""):close")'
-                  Return="ignore" />
-
-    <InstallExecuteSequence>
-      <Custom Action="CA_RemoveStartupVbs" Before="RemoveFiles">
-        Installed AND (REMOVE="ALL") AND NOT UPGRADINGPRODUCTCODE
-      </Custom>
-    </InstallExecuteSequence>
-
     <!-- Clean up registry keys on uninstall -->
     <Component Id="C_CleanupRegistry" Directory="INSTALLFOLDER" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
       <RegistryValue Root="HKCU" Key="Software\\BackupManager"
@@ -158,13 +131,15 @@ def _build_wxs(version: str) -> str:
       <RemoveRegistryKey Id="RemoveRegKey" Root="HKCU"
                          Key="Software\\BackupManager"
                          Action="removeOnUninstall" />
+      <RemoveRegistryValue Id="RemoveAutoStartRun" Root="HKCU"
+                           Key="Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+                           Name="BackupManager" />
     </Component>
 
     <!-- Features -->
     <Feature Id="Complete" Title="Backup Manager" Level="1">
       <ComponentGroupRef Id="ProductFiles" />
       <ComponentRef Id="C_StartMenuShortcut" />
-      <ComponentRef Id="C_CleanupAutoStart" />
       <ComponentRef Id="C_CleanupRegistry" />
     </Feature>
 

@@ -101,7 +101,11 @@ class TestSFTPStorageWithMock:
             mock_sock.settimeout.assert_any_call(60)
             mock_sock.settimeout.assert_any_call(600)
             mock_sock.connect.assert_called_once_with(("192.168.1.100", 22))
-            mp.Transport.assert_called_once_with(mock_sock)
+            mp.Transport.assert_called_once_with(
+                mock_sock,
+                default_window_size=2**25,
+                default_max_packet_size=2**15,
+            )
             transport.connect.assert_called_once_with(username="testuser", password="testpass")
         finally:
             self._cleanup_paramiko()

@@ -46,7 +46,7 @@ def filter_changed_files(
     manifest_path: Path,
     events: EventBus | None = None,
     cancel_check: Callable[[], None] | None = None,
-) -> list[FileInfo]:
+) -> tuple[list[FileInfo], dict[str, str]]:
     """Filter files that have changed since last backup.
 
     Compares each file's SHA-256 against the stored manifest.
@@ -59,16 +59,20 @@ def filter_changed_files(
         cancel_check: Callable that raises CancelledError if cancelled.
 
     Returns:
-        List of files that need to be backed up.
+        Tuple of (changed_files, computed_hashes) where computed_hashes
+        maps relative_path to SHA-256 hex digest for every file that
+        was hashed during filtering.  Downstream phases (manifest,
+        delta update) reuse these hashes to avoid redundant I/O.
     """
     phase_log = PhaseLogger("filter", events)
 
     manifest = load_manifest(manifest_path)
     if not manifest:
         phase_log.info("No previous manifest — full backup")
-        return files
+        return files, {}
 
     changed = []
+    computed_hashes: dict[str, str] = {}
     skipped = 0
 
     for file_info in files:
@@ -91,6 +95,7 @@ def filter_changed_files(
         # Deep check: hash changed?
         try:
             current_hash = compute_sha256(file_info.source_path)
+            computed_hashes[key] = current_hash
             if current_hash != prev.get("hash", ""):
                 changed.append(file_info)
             else:
@@ -99,12 +104,13 @@ def filter_changed_files(
             changed.append(file_info)  # Can't read = include
 
     phase_log.info(f"Filter: {len(changed)} changed, {skipped} unchanged")
-    return changed
+    return changed, computed_hashes
 
 
 def build_updated_manifest(
     files: list[FileInfo],
     cached_hashes: dict[str, str] | None = None,
+    cancel_check=None,
 ) -> dict[str, dict]:
     """Build a manifest dict from a list of files.
 
@@ -113,6 +119,7 @@ def build_updated_manifest(
         cached_hashes: Optional mapping of relative_path to SHA-256
             from a previous phase (e.g. integrity manifest). When
             provided, avoids re-hashing files already computed.
+        cancel_check: Optional callable that raises CancelledError.
 
     Returns:
         Manifest dict for saving.
@@ -120,6 +127,8 @@ def build_updated_manifest(
     cache = cached_hashes or {}
     manifest = {}
     for file_info in files:
+        if cancel_check is not None:
+            cancel_check()
         try:
             file_hash = cache.get(file_info.relative_path)
             if file_hash is None:

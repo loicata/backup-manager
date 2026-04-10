@@ -133,4 +133,4 @@ class TestMeasureBandwidth:
     def test_sample_sizes_are_correct(self):
         """Warmup is 1 MB, measurement is 16 MB."""
         assert WARMUP_SIZE == 1 * 1024 * 1024
-        assert SAMPLE_SIZE == 256 * 1024 * 1024
+        assert SAMPLE_SIZE == 16 * 1024 * 1024

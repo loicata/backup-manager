@@ -104,9 +104,9 @@ class Spacing:
 # --- App constants ---
 
 APP_TITLE = "Backup Manager"
-APP_VERSION = "3.2.4"
-WINDOW_SIZE = "1520x900"
-MIN_SIZE = (1440, 830)
+APP_VERSION = "3.2.5"
+WINDOW_SIZE = "1520x950"
+MIN_SIZE = (1440, 880)
 
 
 def setup_theme(root: tk.Tk) -> ttk.Style:

@@ -9,7 +9,7 @@ from tkinter import messagebox, ttk
 
 from src import __version__
 from src.core.backup_engine import BackupEngine, CancelledError
-from src.core.config import BackupProfile, BackupType, ConfigManager
+from src.core.config import BackupProfile, BackupType, ConfigManager, StorageConfig
 from src.core.events import STATUS, EventBus
 from src.core.health_checker import check_destinations_async
 from src.core.scheduler import AutoStart, InAppScheduler
@@ -36,6 +36,9 @@ from src.ui.theme import (
 from src.ui.tray import BackupTray, TrayState
 
 logger = logging.getLogger(__name__)
+
+# Interval between continuous health checks for destinations (ms)
+HEALTH_POLL_INTERVAL_MS = 60_000
 
 
 class BackupManagerApp:
@@ -314,9 +317,10 @@ class BackupManagerApp:
         self.tab_verify.start_btn.config(command=self._run_verify)
         self.tab_verify.cancel_btn.config(command=self._cancel_verify)
 
-        # Save button at bottom (hidden on Run and History tabs)
+        # Save button at bottom (hidden on Run and History tabs).
+        # Packed before notebook so it reserves space at the bottom.
         self._save_frame = ttk.Frame(parent)
-        self._save_frame.pack(fill="x", side="bottom")
+        self._save_frame.pack(fill="x", side="bottom", before=self.notebook)
         ttk.Button(
             self._save_frame,
             text="Save",
@@ -493,11 +497,34 @@ class BackupManagerApp:
 
         self.tab_run.update_destinations_card(destinations)
 
+        # Track destination configs for continuous health polling
+        self._health_configs: dict[int, tuple[StorageConfig, str]] = {}
+        try:
+            profile.storage.validate()
+            self._health_configs[0] = (profile.storage, "Storage")
+        except ValueError:
+            pass
+        for i, mirror in enumerate(profile.mirror_destinations):
+            try:
+                mirror.validate()
+                self._health_configs[i + 1] = (mirror, f"Mirror {i + 1}")
+            except ValueError:
+                pass
+
+        # Bump generation to cancel polling from previous profile
+        self._health_poll_generation = getattr(self, "_health_poll_generation", 0) + 1
+
         if destinations:
             check_destinations_async(
                 profile.storage,
                 profile.mirror_destinations,
                 callback=self._on_health_result,
+            )
+            # Schedule continuous polling every 30s
+            self.root.after(
+                HEALTH_POLL_INTERVAL_MS,
+                self._poll_health,
+                self._health_poll_generation,
             )
 
     def _on_health_result(self, index: int, health) -> None:
@@ -516,6 +543,48 @@ class BackupManagerApp:
                 index,
                 health,
             )
+
+    def _poll_health(self, generation: int) -> None:
+        """Re-check all destinations periodically.
+
+        Stops if the profile changed (generation mismatch) or no
+        destinations are configured.
+
+        Args:
+            generation: Poll generation to detect profile changes.
+        """
+        if generation != getattr(self, "_health_poll_generation", -1):
+            return
+        if not getattr(self, "_health_configs", {}):
+            return
+
+        for index, (config, label) in self._health_configs.items():
+            threading.Thread(
+                target=self._check_single_destination,
+                args=(index, config, label),
+                daemon=True,
+                name=f"HealthPoll-{label}",
+            ).start()
+
+        # Schedule next poll
+        self.root.after(
+            HEALTH_POLL_INTERVAL_MS,
+            self._poll_health,
+            generation,
+        )
+
+    def _check_single_destination(self, index: int, config: "StorageConfig", label: str) -> None:
+        """Check one destination and report result via callback.
+
+        Args:
+            index: Destination index (0=storage, 1+=mirrors).
+            config: Storage configuration.
+            label: Display label.
+        """
+        from src.core.health_checker import _check_destination
+
+        result = _check_destination(config, label)
+        self._on_health_result(index, result)
 
     def _save_profile(self, silent: bool = False) -> bool:
         """Collect config from all tabs and save.
@@ -993,19 +1062,24 @@ class BackupManagerApp:
                     f"{stats.files_processed} files in {stats.duration_seconds:.0f}s",
                 )
 
+                completed_at = datetime.now().isoformat()
                 with self.scheduler.op_lock:
                     self.scheduler.journal.update_last(
                         status="success",
                         files_count=stats.files_processed,
                         duration_seconds=stats.duration_seconds,
+                        timestamp=completed_at,
                     )
 
                 # Save backup log to file
                 self._save_backup_log(profile, stats)
 
                 # Update last_backup
-                profile.last_backup = datetime.now().isoformat()
+                profile.last_backup = completed_at
                 self.config_manager.save_profile(profile)
+
+                # Refresh dashboard to show updated last backup info
+                self.root.after(0, self._update_health_dashboard, profile)
 
                 # Send email notification
                 if profile.email.enabled:
@@ -1220,6 +1294,8 @@ class BackupManagerApp:
             RuntimeError: If targets are unavailable and user cancels,
                 or if the backup itself fails.
         """
+        from datetime import datetime
+
         # Skip unconfigured profiles (default storage has empty destination)
         try:
             profile.storage.validate()
@@ -1251,14 +1327,21 @@ class BackupManagerApp:
                 f"[{profile.name}] {stats.files_processed} files "
                 f"in {stats.duration_seconds:.0f}s",
             )
+            completed_at = datetime.now().isoformat()
             with self.scheduler.op_lock:
                 self.scheduler.journal.update_last(
                     status="success",
                     files_count=stats.files_processed,
                     duration_seconds=stats.duration_seconds,
+                    timestamp=completed_at,
                 )
 
             self._save_backup_log(profile, stats)
+
+            # Update last_backup and refresh dashboard
+            profile.last_backup = completed_at
+            self.config_manager.save_profile(profile)
+            self.root.after(0, self._update_health_dashboard, profile)
 
             if profile.email.enabled:
                 self._send_backup_email(
@@ -1505,6 +1588,9 @@ class BackupManagerApp:
     def _quit_app(self):
         """Auto-save current profile and quit the application."""
         self._auto_save()
+        # Stop health polling to prevent background checks during shutdown
+        self._health_poll_generation = -1
+        self._health_configs = {}
         # Hide the window immediately to avoid visual flicker during cleanup
         self.root.withdraw()
         self.root.update_idletasks()

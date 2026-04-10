@@ -26,6 +26,7 @@ def write_flat(
     destination: Path,
     backup_name: str,
     events: EventBus | None = None,
+    cancel_check=None,
 ) -> Path:
     """Write files as a flat directory copy.
 
@@ -34,6 +35,7 @@ def write_flat(
         destination: Base destination path.
         backup_name: Name for this backup (directory name).
         events: Optional event bus.
+        cancel_check: Optional callable that raises CancelledError.
 
     Returns:
         Path to the created backup directory.
@@ -44,6 +46,8 @@ def write_flat(
 
     total = len(files)
     for i, file_info in enumerate(files):
+        if cancel_check is not None:
+            cancel_check()
         target = backup_dir / file_info.relative_path
         long_path_mkdir(target.parent)
 
@@ -70,6 +74,7 @@ def write_encrypted_tar(
     password: str,
     events: EventBus | None = None,
     integrity_manifest: dict | None = None,
+    cancel_check=None,
 ) -> Path:
     """Write files as an encrypted .tar.wbenc archive.
 
@@ -85,6 +90,7 @@ def write_encrypted_tar(
         password: Encryption password.
         events: Optional event bus.
         integrity_manifest: Optional manifest dict to embed in the archive.
+        cancel_check: Optional callable that raises CancelledError.
 
     Returns:
         Path to the created .tar.wbenc file.
@@ -100,6 +106,8 @@ def write_encrypted_tar(
             enc_writer = EncryptingWriter(out_file, password)
             with tarfile.open(fileobj=enc_writer, mode="w|") as tar:
                 for i, file_info in enumerate(files):
+                    if cancel_check is not None:
+                        cancel_check()
                     src_path = long_path_str(file_info.source_path)
                     try:
                         actual_size = os.path.getsize(src_path)

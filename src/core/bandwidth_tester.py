@@ -1,9 +1,11 @@
-"""Bandwidth tester: measures write throughput to a storage backend.
+"""Bandwidth tester: measures real write throughput to a storage backend.
 
-Uploads a single 256 MB sample with
-a warmup pass to establish the connection, then a measurement pass.
-Used before backup to calculate a throttle limit from the user's
-percentage setting.
+Uploads a sample file and waits for the remote server to confirm the
+write is complete before measuring elapsed time.  This gives the true
+end-to-end throughput instead of just measuring local buffer fill speed.
+
+For SFTP backends, uses ``sync`` via exec channel to ensure data is
+flushed to disk on the remote before stopping the timer.
 """
 
 import io
@@ -16,10 +18,11 @@ from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-# Single sample size: 256 MB (accurate measurement for large backups)
-SAMPLE_SIZE = 256 * 1024 * 1024
+# Sample size: 16 MB (large enough for accurate measurement,
+# small enough to complete in reasonable time on slow links)
+SAMPLE_SIZE = 16 * 1024 * 1024
 
-# Warmup size: 1 MB (just to establish connection)
+# Warmup size: 1 MB (establish connection, fill OS buffers)
 WARMUP_SIZE = 1 * 1024 * 1024
 
 # Prefix for temporary test files
@@ -27,13 +30,13 @@ TEMP_PREFIX = ".bm_speedtest_"
 
 
 def measure_bandwidth(backend: StorageBackend) -> float:
-    """Measure write speed to a storage backend.
+    """Measure real write speed to a storage backend.
 
-    Performs a 1 MB warmup upload (to establish connection and fill
-    OS buffers), then a single 16 MB measurement.  Returns the
-    throughput in bytes per second.
+    Performs a 1 MB warmup upload, then a 16 MB measurement that
+    waits for the remote to confirm the write is complete.  Returns
+    the true end-to-end throughput in bytes per second.
 
-    If both attempts fail, returns 0.0 (no throttling applied).
+    If the measurement fails, returns 0.0 (no throttling applied).
 
     Args:
         backend: Connected storage backend to test.
@@ -48,12 +51,12 @@ def measure_bandwidth(backend: StorageBackend) -> float:
     except Exception as exc:
         logger.warning("Bandwidth warmup failed: %s", exc)
 
-    # Measurement: single large sample
+    # Measurement: timed upload with remote confirmation
     try:
         speed = _write_sample(backend, SAMPLE_SIZE)
         if speed > 0:
             logger.info(
-                "Bandwidth test: %.2f MB/s (256 MB sample)",
+                "Bandwidth test: %.2f MB/s (16 MB sample, end-to-end)",
                 speed / (1024 * 1024),
             )
             return speed
@@ -82,7 +85,12 @@ def compute_throttle_kbps(measured_bps: float, percent: int) -> int:
 
 
 def _write_sample(backend: StorageBackend, size: int) -> float:
-    """Upload a single sample file and return write speed.
+    """Upload a sample file and return real write speed.
+
+    For SFTP backends, forces a remote ``sync`` after the upload to
+    ensure all data is flushed to disk before stopping the timer.
+    This measures true end-to-end throughput, not just local buffer
+    fill speed.
 
     Args:
         backend: Storage backend to write to.
@@ -100,6 +108,10 @@ def _write_sample(backend: StorageBackend, size: int) -> float:
     start = time.monotonic()
     try:
         backend.upload_file(io.BytesIO(data), temp_name, size=size)
+
+        # Force remote flush — ensures we measure real throughput,
+        # not just how fast we can fill the local TCP/SSH buffer.
+        _remote_sync(backend)
     finally:
         _cleanup(backend, temp_name)
 
@@ -107,6 +119,34 @@ def _write_sample(backend: StorageBackend, size: int) -> float:
     if elapsed <= 0:
         return 0.0
     return size / elapsed
+
+
+def _remote_sync(backend: StorageBackend) -> None:
+    """Force remote data flush for accurate bandwidth measurement.
+
+    For SFTP backends, runs ``sync`` via the exec channel to ensure
+    all buffered data is written to disk.  For other backends (S3,
+    local), the upload call itself is synchronous so no extra action
+    is needed.
+
+    Args:
+        backend: Storage backend that was just written to.
+    """
+    # Only SFTP needs an explicit sync — other backends are synchronous
+    if not hasattr(backend, "_get_transport"):
+        return
+
+    try:
+        transport = backend._get_transport()
+        channel = transport.open_session()
+        try:
+            channel.settimeout(30)
+            channel.exec_command("sync")  # nosec B601
+            channel.recv_exit_status()
+        finally:
+            channel.close()
+    except Exception as exc:
+        logger.debug("Remote sync failed (non-critical): %s", exc)
 
 
 def _cleanup(backend: StorageBackend, name: str) -> None:

@@ -3,7 +3,7 @@
 import tkinter as tk
 from tkinter import ttk
 
-from src.core.config import BackupProfile, RetentionConfig, RetentionPolicy
+from src.core.config import BackupProfile, RetentionConfig, RetentionPolicy, ScheduleFrequency
 from src.ui.theme import Spacing
 
 
@@ -29,9 +29,11 @@ class RetentionTab(ttk.Frame):
             ("Months of history:", "gfs_monthly", 1),
         ]
         self._gfs_vars = {}
+        self._gfs_rows: dict[str, ttk.Frame] = {}
         for label, key, default in gfs_fields:
             row = ttk.Frame(frame)
             row.pack(fill="x", pady=2)
+            self._gfs_rows[key] = row
             ttk.Label(row, text=label).pack(side="left")
             var = tk.IntVar(value=default)
             self._gfs_vars[key] = var
@@ -102,16 +104,29 @@ class RetentionTab(ttk.Frame):
 
         Internal values are stored with +1 offset.
         Display value = internal - 1.
+        Hides "Days of history" when schedule is weekly or less frequent
+        since daily retention is irrelevant without daily backups.
         """
         r = profile.retention
+        self._gfs_enabled = r.gfs_enabled
         for key, var in self._gfs_vars.items():
             internal_val = getattr(r, key, var.get() + 1)
             var.set(max(internal_val - 1, 0))
+
+        # Hide daily row when schedule is weekly or monthly
+        freq = profile.schedule.frequency
+        daily_row = self._gfs_rows.get("gfs_daily")
+        if daily_row:
+            if freq in (ScheduleFrequency.WEEKLY, ScheduleFrequency.MONTHLY):
+                daily_row.pack_forget()
+            else:
+                daily_row.pack(fill="x", pady=2)
 
     def collect_config(self) -> dict:
         """Collect retention configuration.
 
         User values are +1 to get internal values.
+        Preserves gfs_enabled from the loaded profile.
         """
         internal_values = {}
         for key, var in self._gfs_vars.items():
@@ -120,6 +135,9 @@ class RetentionTab(ttk.Frame):
         return {
             "retention": RetentionConfig(
                 policy=RetentionPolicy.GFS,
+                gfs_enabled=self._gfs_enabled,
                 **internal_values,
             ),
         }
+
+    _gfs_enabled: bool = True  # Preserved from load_profile

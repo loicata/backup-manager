@@ -95,7 +95,7 @@ class TestS3StorageConnection:
 
     def test_resolve_endpoint_aws(self):
         """AWS uses default endpoint (None)."""
-        backend = S3Storage(bucket="b", provider="aws")
+        backend = S3Storage(bucket="b", provider="Amazon AWS")
         assert backend._endpoint_url == ""
 
     def test_resolve_endpoint_wasabi(self):
@@ -112,7 +112,7 @@ class TestS3StorageConnection:
         custom = "https://my.storage.example.com"
         backend = S3Storage(
             bucket="b",
-            provider="aws",
+            provider="Amazon AWS",
             endpoint_url=custom,
         )
         assert backend._endpoint_url == custom

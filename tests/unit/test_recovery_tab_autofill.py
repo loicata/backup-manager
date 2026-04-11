@@ -94,7 +94,7 @@ class TestRetrieveAutoFillS3:
             s3_region="us-east-1",
             s3_access_key="MIRROR_KEY",
             s3_secret_key="MIRROR_SECRET",
-            s3_provider="aws",
+            s3_provider="Amazon AWS",
         )
         profile = _make_profile(
             storage_type=StorageType.SFTP,

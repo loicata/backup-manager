@@ -163,9 +163,9 @@ class StorageTab(ScrollableTab):
 
         # Provider selector
         ttk.Label(frame, text="Provider:").pack(anchor="w")
-        self.s3_provider_var = tk.StringVar(value="aws")
+        self.s3_provider_var = tk.StringVar(value="Amazon AWS")
         providers = [
-            "aws",
+            "Amazon AWS",
             "scaleway",
             "wasabi",
             "ovh",
@@ -191,7 +191,7 @@ class StorageTab(ScrollableTab):
 
         # Region — Combobox with provider-specific values
         ttk.Label(frame, text="Region:").pack(anchor="w", pady=(Spacing.SMALL, 0))
-        default_regions = PROVIDER_REGIONS.get("aws", [])
+        default_regions = PROVIDER_REGIONS.get("Amazon AWS", [])
         region_var = tk.StringVar(value=default_regions[0] if default_regions else "")
         self._s3_vars["s3_region"] = region_var
         self._s3_region_cb = ttk.Combobox(frame, textvariable=region_var, values=default_regions)
@@ -339,7 +339,7 @@ class StorageTab(ScrollableTab):
             for key, var in self._sftp_vars.items():
                 var.set("22" if key == "sftp_port" else "")
         if hasattr(self, "_s3_vars"):
-            self.s3_provider_var.set("aws")
+            self.s3_provider_var.set("Amazon AWS")
             for var in self._s3_vars.values():
                 var.set("")
 

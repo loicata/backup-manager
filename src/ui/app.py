@@ -18,6 +18,7 @@ from src.ui.tabs.encryption_tab import EncryptionTab
 from src.ui.tabs.general_tab import GeneralTab
 from src.ui.tabs.history_tab import HistoryTab
 from src.ui.tabs.mirror_tab import MirrorTab
+from src.ui.tabs.protection_tab import ProtectionTab
 from src.ui.tabs.recovery_tab import RecoveryTab
 from src.ui.tabs.retention_tab import RetentionTab
 from src.ui.tabs.run_tab import RunTab
@@ -284,6 +285,7 @@ class BackupManagerApp:
         self.tab_mirror1 = MirrorTab(self.notebook, mirror_index=0)
         self.tab_mirror2 = MirrorTab(self.notebook, mirror_index=1)
         self.tab_retention = RetentionTab(self.notebook)
+        self.tab_protection = ProtectionTab(self.notebook)
         self.tab_encryption = EncryptionTab(self.notebook)
         self.tab_schedule = ScheduleTab(self.notebook, scheduler=self.scheduler)
         self.tab_email = EmailTab(self.notebook)
@@ -430,11 +432,16 @@ class BackupManagerApp:
         self.tab_storage.load_profile(profile)
         self.tab_mirror1.load_profile(profile)
         self.tab_mirror2.load_profile(profile)
-        self.tab_retention.load_profile(profile)
         self.tab_encryption.load_profile(profile)
         self.tab_schedule.load_profile(profile)
         self.tab_email.load_profile(profile)
         self.tab_recovery.load_profile(profile)
+
+        # Swap Retention ↔ Protection tab based on Object Lock mode
+        self._update_retention_protection_tab(profile)
+
+        self.tab_retention.load_profile(profile)
+        self.tab_protection.load_profile(profile)
 
         self.tab_run.update_profile_info(
             profile.name,
@@ -444,6 +451,38 @@ class BackupManagerApp:
         self.tab_run.clear_log()
 
         self._update_health_dashboard(profile)
+
+    def _update_retention_protection_tab(self, profile: BackupProfile) -> None:
+        """Show Protection tab or Retention tab based on profile mode.
+
+        Object Lock profiles show the Protection tab (read-only).
+        Standard profiles show the normal Retention tab with GFS config.
+
+        Args:
+            profile: Currently loaded profile.
+        """
+        try:
+            if profile.object_lock_enabled:
+                self.notebook.hide(self.tab_retention)
+                # Add Protection tab at the position where Retention was
+                try:
+                    self.notebook.index(self.tab_protection)
+                except tk.TclError:
+                    # Not yet added — insert after Schedule
+                    schedule_idx = self.notebook.index(self.tab_schedule)
+                    self.notebook.insert(schedule_idx + 1, self.tab_protection, text=" Protection ")
+            else:
+                import contextlib
+
+                with contextlib.suppress(tk.TclError):
+                    self.notebook.hide(self.tab_protection)
+                try:
+                    self.notebook.index(self.tab_retention)
+                except tk.TclError:
+                    schedule_idx = self.notebook.index(self.tab_schedule)
+                    self.notebook.insert(schedule_idx + 1, self.tab_retention, text=" Retention ")
+        except tk.TclError:
+            pass  # Tab manipulation during window setup
 
     def _update_health_dashboard(self, profile: BackupProfile) -> None:
         """Populate the Run tab health dashboard for a profile.
@@ -649,8 +688,9 @@ class BackupManagerApp:
         retention = self.tab_retention.collect_config()
         profile.retention = retention["retention"]
 
-        # Validate differential full-backup cycle
-        if general["backup_type"] == BackupType.DIFFERENTIAL:
+        # Validate differential full-backup cycle (skip for Object Lock profiles
+        # where GFS rotation is disabled — S3 Lifecycle handles cleanup)
+        if general["backup_type"] == BackupType.DIFFERENTIAL and profile.retention.gfs_enabled:
             cycle = general["full_backup_every"]
             gfs_d = profile.retention.gfs_daily
 

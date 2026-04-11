@@ -214,13 +214,9 @@ def main():
             # Show setup wizard — keep root hidden but move it
             # off-screen so the transient wizard Toplevel is visible.
             logger.info("No profiles — launching setup wizard...")
-            root.geometry("1x1+-10000+-10000")
-            root.attributes("-alpha", 0)  # Fully transparent before showing
-            root.deiconify()
-            wizard = SetupWizard(root)
+            root.withdraw()  # Keep root hidden during wizard
+            wizard = SetupWizard(root, standalone=True)
             profile = wizard.run()
-            root.attributes("-alpha", 1)  # Restore opacity
-            root.withdraw()
             if profile:
                 config_mgr.save_profile(profile)
                 logger.info("Wizard completed — profile saved")

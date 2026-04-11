@@ -82,6 +82,124 @@ class TestLastBackupCompletedFlag:
         assert loaded.last_backup_completed is False
 
 
+class TestCleanupIncompleteBackup:
+    def _make_ctx(self, profile, mgr):
+        from src.core.phases.base import PipelineContext
+
+        return PipelineContext(
+            profile=profile,
+            config_manager=mgr,
+            events=EventBus(),
+            result=BackupResult(),
+        )
+
+    def test_logs_nothing_to_clean_when_not_found(self, tmp_config_dir):
+        """Destinations where the incomplete backup doesn't exist log a message."""
+        from unittest.mock import MagicMock, patch
+
+        from src.core.backup_engine import BackupEngine
+        from src.core.config import StorageConfig, StorageType
+
+        storage_dir = tmp_config_dir / "storage"
+        storage_dir.mkdir()
+
+        profile = BackupProfile(
+            name="Test",
+            incomplete_backup_name="test_FULL_interrupted",
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(storage_dir),
+            ),
+            mirror_destinations=[
+                StorageConfig(
+                    storage_type=StorageType.S3,
+                    s3_bucket="bucket",
+                    s3_region="eu-west-1",
+                    s3_access_key="key",
+                    s3_secret_key="secret",
+                ),
+            ],
+        )
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+
+        mock_backend = MagicMock()
+        mock_backend.delete_backup.side_effect = FileNotFoundError("not found")
+
+        engine = BackupEngine(mgr, events=EventBus())
+        ctx = self._make_ctx(profile, mgr)
+
+        logged = []
+        engine._log = lambda msg, **kw: logged.append(msg)
+
+        with patch(
+            "src.core.backup_engine.create_backend",
+            return_value=mock_backend,
+        ):
+            engine._cleanup_incomplete_backup(ctx)
+
+        # Both Storage and Mirror 1 should report nothing to clean up
+        clean_msgs = [m for m in logged if "nothing to clean up" in m]
+        assert len(clean_msgs) == 2
+        assert any("Storage" in m for m in clean_msgs)
+        assert any("Mirror 1" in m for m in clean_msgs)
+
+    def test_mixed_found_and_not_found(self, tmp_config_dir):
+        """Storage has the backup, Mirror does not."""
+        from unittest.mock import MagicMock, patch
+
+        from src.core.backup_engine import BackupEngine
+        from src.core.config import StorageConfig, StorageType
+
+        storage_dir = tmp_config_dir / "storage"
+        storage_dir.mkdir()
+
+        profile = BackupProfile(
+            name="Test",
+            incomplete_backup_name="test_FULL_123",
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(storage_dir),
+            ),
+            mirror_destinations=[
+                StorageConfig(
+                    storage_type=StorageType.S3,
+                    s3_bucket="bucket",
+                    s3_region="eu-west-1",
+                    s3_access_key="key",
+                    s3_secret_key="secret",
+                ),
+            ],
+        )
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+
+        # Storage backend: plain dir found, .tar.wbenc not found
+        storage_backend = MagicMock()
+        storage_backend.delete_backup.side_effect = [
+            None,  # plain dir deleted
+            FileNotFoundError(),  # no .tar.wbenc
+        ]
+        # Mirror backend: nothing found
+        mirror_backend = MagicMock()
+        mirror_backend.delete_backup.side_effect = FileNotFoundError("nope")
+
+        backends = [storage_backend, mirror_backend]
+
+        engine = BackupEngine(mgr, events=EventBus())
+        ctx = self._make_ctx(profile, mgr)
+
+        logged = []
+        engine._log = lambda msg, **kw: logged.append(msg)
+
+        with patch(
+            "src.core.backup_engine.create_backend",
+            side_effect=backends,
+        ):
+            engine._cleanup_incomplete_backup(ctx)
+
+        assert any("Storage: deleted incomplete" in m for m in logged)
+        assert any("Mirror 1: nothing to clean up" in m for m in logged)
+
+
 class TestForceFullAfterInterrupt:
     def _make_ctx(self, profile, mgr):
         from src.core.phases.base import PipelineContext
@@ -180,3 +298,119 @@ class TestForceFullAfterInterrupt:
         engine._maybe_force_full(ctx)
 
         assert profile.last_backup_completed is True
+
+
+class TestMarkCompletedPersistence:
+    """Regression tests: _mark_completed must persist flags to disk.
+
+    Before the fix, last_backup_completed was set in memory but never
+    saved, so every subsequent run treated the previous backup as
+    interrupted and forced a full.
+    """
+
+    def _make_ctx(self, profile, mgr):
+        from src.core.phases.base import PipelineContext
+
+        return PipelineContext(
+            profile=profile,
+            config_manager=mgr,
+            events=EventBus(),
+            result=BackupResult(),
+        )
+
+    def test_mark_completed_persists_flags(self, tmp_config_dir):
+        """After _mark_completed, reloading the profile from disk must
+        show last_backup_completed=True and empty incomplete fields."""
+        from src.core.backup_engine import BackupEngine
+
+        profile = BackupProfile(
+            name="Persist",
+            last_backup_completed=False,
+            incomplete_backup_name="Persist_FULL_123",
+            incomplete_backup_was_full=True,
+        )
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        mgr.save_profile(profile)
+
+        engine = BackupEngine(mgr, events=EventBus())
+        ctx = self._make_ctx(profile, mgr)
+
+        engine._mark_completed(ctx)
+
+        # Reload from disk to verify persistence
+        loaded = mgr.get_all_profiles()[0]
+        assert loaded.last_backup_completed is True
+        assert loaded.incomplete_backup_name == ""
+        assert loaded.incomplete_backup_was_full is False
+
+    def test_mark_completed_restores_differential_type(self, tmp_config_dir):
+        """When a differential was auto-promoted to full, _mark_completed
+        must restore the profile type back to DIFFERENTIAL on disk."""
+        from src.core.backup_engine import BackupEngine
+
+        profile = BackupProfile(
+            name="Restore",
+            backup_type=BackupType.FULL,
+            last_backup_completed=False,
+            incomplete_backup_name="Restore_FULL_123",
+            incomplete_backup_was_full=True,
+        )
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        mgr.save_profile(profile)
+
+        engine = BackupEngine(mgr, events=EventBus())
+        ctx = self._make_ctx(profile, mgr)
+        ctx.forced_full = True  # simulate auto-promotion
+
+        engine._mark_completed(ctx)
+
+        loaded = mgr.get_all_profiles()[0]
+        assert loaded.backup_type == BackupType.DIFFERENTIAL
+
+    def test_successful_backup_allows_next_differential(self, tmp_config_dir):
+        """End-to-end: after a successful full backup, the next run should
+        NOT force a full (the bug that triggered this fix)."""
+        from src.core.backup_engine import BackupEngine
+        from src.core.config import StorageConfig, StorageType, compute_profile_hash
+
+        backups_dir = tmp_config_dir / "backups"
+        backups_dir.mkdir()
+
+        profile = BackupProfile(
+            name="E2E",
+            backup_type=BackupType.DIFFERENTIAL,
+            last_backup_completed=False,
+            incomplete_backup_name="E2E_FULL_old",
+            incomplete_backup_was_full=True,
+            differential_count=0,
+            storage=StorageConfig(
+                storage_type=StorageType.LOCAL,
+                destination_path=str(backups_dir),
+            ),
+        )
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        mgr.save_profile(profile)
+
+        engine = BackupEngine(mgr, events=EventBus())
+
+        # Simulate a successful backup completing
+        ctx = self._make_ctx(profile, mgr)
+        engine._mark_completed(ctx)
+
+        # Now reload from disk and run _maybe_force_full
+        reloaded = mgr.get_all_profiles()[0]
+        assert reloaded.last_backup_completed is True
+
+        # Create a manifest so "no_manifest" doesn't trigger
+        manifest_path = mgr.get_manifest_path(reloaded.id)
+        manifest_path.write_text("{}", encoding="utf-8")
+
+        # Create a fake full backup so destination check passes
+        (backups_dir / "E2E_FULL_2026-01-01_000000").mkdir()
+
+        reloaded.profile_hash = compute_profile_hash(reloaded)
+        ctx2 = self._make_ctx(reloaded, mgr)
+        engine._maybe_force_full(ctx2)
+
+        assert ctx2.forced_full is False
+        assert reloaded.backup_type == BackupType.DIFFERENTIAL

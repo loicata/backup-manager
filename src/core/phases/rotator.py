@@ -39,6 +39,12 @@ def rotate_backups(
     Returns:
         Number of backups deleted.
     """
+    # Object Lock mode — S3 Lifecycle handles cleanup, skip rotation
+    if not retention.gfs_enabled:
+        phase_log = PhaseLogger("rotation", events)
+        phase_log.info("Rotation skipped (Object Lock mode — managed by S3 Lifecycle)")
+        return 0
+
     backups = backend.list_backups()
     if not backups:
         return 0

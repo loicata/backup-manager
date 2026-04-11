@@ -11,7 +11,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from src.core.backup_result import BackupResult
@@ -308,12 +308,14 @@ class BackupEngine:
         # Phase 1: Collect
         self._phase_collect(ctx)
         if not ctx.files:
+            self._mark_completed(ctx)
             self._emit_status("success")
             return
 
         # Phase 2: Filter (differential only)
         self._phase_filter(ctx)
         if not ctx.files:
+            self._mark_completed(ctx)
             self._emit_status("success")
             return
 
@@ -332,6 +334,7 @@ class BackupEngine:
         ctx.backend = self._get_backend(ctx.profile.storage)
         ctx.backend.set_cancel_check(self._check_cancel)
         self._apply_bandwidth_throttle(ctx.backend, ctx.profile)
+        self._apply_object_lock_retention(ctx)
         self._phase_write(ctx)
         ctx.result.backup_path = str(ctx.backup_path or ctx.backup_remote_name)
 
@@ -356,7 +359,15 @@ class BackupEngine:
         # Phase 11: Cleanup temp artifacts
         self._phase_cleanup(ctx)
 
-        # Mark backup as successfully completed
+        self._mark_completed(ctx)
+
+    def _mark_completed(self, ctx: PipelineContext) -> None:
+        """Reset interrupt-recovery flags and persist to disk.
+
+        Must be called on every successful exit path (including early
+        returns when there are no files to process) so the next run
+        does not mistake a completed backup for an interrupted one.
+        """
         ctx.profile.last_backup_completed = True
         ctx.profile.incomplete_backup_name = ""
         ctx.profile.incomplete_backup_was_full = False
@@ -364,6 +375,8 @@ class BackupEngine:
         # Restore profile type if it was temporarily promoted to full
         if getattr(ctx, "forced_full", False):
             ctx.profile.backup_type = BackupType.DIFFERENTIAL
+
+        ctx.config_manager.save_profile(ctx.profile)
 
     def _phase_cleanup(self, ctx: PipelineContext) -> None:
         """Phase 11: Remove temporary artifacts from backup directory."""
@@ -1329,6 +1342,40 @@ class BackupEngine:
             f"{label}: {measured_mbps:.1f} MB/s measured → "
             f"throttle {percent}% = {throttle_mbps:.1f} MB/s"
         )
+
+    def _apply_object_lock_retention(self, ctx: PipelineContext) -> None:
+        """Set per-object Object Lock retention on the backend.
+
+        Full backups are locked for retention + full_extra_days to ensure
+        they outlive all differential backups that reference them.
+        Differential backups are locked for the base retention period.
+
+        Does nothing if the profile does not have Object Lock enabled.
+
+        Args:
+            ctx: Current pipeline context.
+        """
+        if not ctx.profile.object_lock_enabled:
+            return
+
+        from datetime import timedelta
+
+        storage = ctx.profile.storage
+        lock_days = storage.s3_object_lock_days
+
+        is_full = ctx.profile.backup_type == BackupType.FULL or getattr(ctx, "forced_full", False)
+        if is_full:
+            lock_days += storage.s3_object_lock_full_extra_days
+
+        retain_until = datetime.now(UTC) + timedelta(days=lock_days)
+
+        if hasattr(ctx.backend, "set_retain_until"):
+            ctx.backend.set_retain_until(retain_until)
+            tag = "full" if is_full else "differential"
+            self._log(
+                f"Object Lock: {tag} backup locked for {lock_days} days "
+                f"(until {retain_until.strftime('%Y-%m-%d')})"
+            )
 
     def _get_backend(self, storage: StorageConfig) -> StorageBackend:
         """Create a storage backend from config.

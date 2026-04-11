@@ -1,7 +1,14 @@
-"""Tests for scheduler retry logic."""
+"""Tests for scheduler retry logic.
+
+The retry loop in _retry_backup sleeps via _stop_event.wait() in
+CHECK_INTERVAL chunks (not time.sleep).  The ``fast_retry`` fixture
+patches _stop_event so waits return instantly while keeping
+_running=True, allowing tests to exercise the full retry path
+without real delays.
+"""
 
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -29,6 +36,20 @@ def scheduler_env(tmp_path):
         "profiles": profiles,
         "tmp_path": tmp_path,
     }
+
+
+@pytest.fixture
+def fast_retry(scheduler_env):
+    """Patch _stop_event.wait so retry waits return instantly.
+
+    _retry_backup loops with _stop_event.wait(chunk); making wait()
+    a no-op and is_set() return False lets the loop advance
+    without blocking.
+    """
+    s = scheduler_env["scheduler"]
+    s._stop_event.wait = lambda *a, **kw: None
+    s._stop_event.is_set = lambda: False
+    return scheduler_env
 
 
 class TestTriggerBackupSuccess:
@@ -101,11 +122,10 @@ class TestTriggerBackupFailureNoRetry:
 class TestRetryBackup:
     """Test the retry mechanism directly."""
 
-    @patch("src.core.scheduler.time.sleep")
-    def test_retry_succeeds_on_second_attempt(self, mock_sleep, scheduler_env):
+    def test_retry_succeeds_on_second_attempt(self, fast_retry):
         """Retry should stop after first successful attempt."""
-        s = scheduler_env["scheduler"]
-        callback = scheduler_env["callback"]
+        s = fast_retry["scheduler"]
+        callback = fast_retry["callback"]
         # First call fails, second succeeds
         callback.side_effect = [RuntimeError("fail"), None]
 
@@ -126,11 +146,10 @@ class TestRetryBackup:
         entries = s.journal.get_entries()
         assert entries[-1]["status"] == "success"
 
-    @patch("src.core.scheduler.time.sleep")
-    def test_retry_exhausts_all_delays(self, mock_sleep, scheduler_env):
+    def test_retry_exhausts_all_delays(self, fast_retry):
         """When all retries fail, all delays are used."""
-        s = scheduler_env["scheduler"]
-        callback = scheduler_env["callback"]
+        s = fast_retry["scheduler"]
+        callback = fast_retry["callback"]
         callback.side_effect = RuntimeError("always fails")
 
         profile = BackupProfile(
@@ -150,11 +169,10 @@ class TestRetryBackup:
         entries = s.journal.get_entries()
         assert entries[-1]["status"] == "failed"
 
-    @patch("src.core.scheduler.time.sleep")
-    def test_retry_logs_each_attempt(self, mock_sleep, scheduler_env):
+    def test_retry_logs_each_attempt(self, fast_retry):
         """Each retry attempt should be logged in the journal."""
-        s = scheduler_env["scheduler"]
-        callback = scheduler_env["callback"]
+        s = fast_retry["scheduler"]
+        callback = fast_retry["callback"]
         callback.side_effect = RuntimeError("fail")
 
         profile = BackupProfile(
@@ -174,18 +192,18 @@ class TestRetryBackup:
         assert "retry_1" in triggers
         assert "retry_2" in triggers
 
-    @patch("src.core.scheduler.time.sleep")
-    def test_retry_stops_when_scheduler_stopped(self, mock_sleep, scheduler_env):
+    def test_retry_stops_when_scheduler_stopped(self, scheduler_env):
         """Retry should abort if scheduler is stopped during wait."""
         s = scheduler_env["scheduler"]
         callback = scheduler_env["callback"]
         callback.side_effect = RuntimeError("fail")
 
-        # Stop scheduler after first sleep
-        def stop_on_sleep(*args):
+        # Stop scheduler when _stop_event.wait is called
+        def stop_on_wait(*args, **kwargs):
             s._running = False
+            s._stop_event.set()
 
-        mock_sleep.side_effect = stop_on_sleep
+        s._stop_event.wait = stop_on_wait
 
         profile = BackupProfile(
             name="Stopped",
@@ -197,14 +215,13 @@ class TestRetryBackup:
 
         s._trigger_backup(profile, datetime.now())
 
-        # Only initial call, retry aborted during sleep
+        # Only initial call, retry aborted during wait
         assert callback.call_count == 1
 
-    @patch("src.core.scheduler.time.sleep")
-    def test_retry_with_default_delays(self, mock_sleep, scheduler_env):
+    def test_retry_with_default_delays(self, fast_retry):
         """Default retry delays are 2, 10, 30, 90, 240 minutes."""
-        s = scheduler_env["scheduler"]
-        callback = scheduler_env["callback"]
+        s = fast_retry["scheduler"]
+        callback = fast_retry["callback"]
         # Fails initially, succeeds on 3rd retry
         callback.side_effect = [
             RuntimeError("fail"),  # initial
@@ -224,11 +241,10 @@ class TestRetryBackup:
         entries = s.journal.get_entries()
         assert entries[-1]["status"] == "success"
 
-    @patch("src.core.scheduler.time.sleep")
-    def test_retry_empty_delays_does_not_retry(self, mock_sleep, scheduler_env):
+    def test_retry_empty_delays_does_not_retry(self, fast_retry):
         """Empty retry_delay_minutes means no retries even if enabled."""
-        s = scheduler_env["scheduler"]
-        callback = scheduler_env["callback"]
+        s = fast_retry["scheduler"]
+        callback = fast_retry["callback"]
         callback.side_effect = RuntimeError("fail")
 
         profile = BackupProfile(

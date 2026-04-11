@@ -38,8 +38,9 @@ class GeneralTab(ScrollableTab):
         )
 
         # Backup type
-        type_frame = ttk.LabelFrame(self.inner, text="Backup type", padding=Spacing.PAD)
-        type_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
+        self._type_frame = ttk.LabelFrame(self.inner, text="Backup type", padding=Spacing.PAD)
+        self._type_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
+        type_frame = self._type_frame
 
         self.type_var = tk.StringVar(value=BackupType.FULL.value)
         for bt in BackupType:
@@ -51,16 +52,6 @@ class GeneralTab(ScrollableTab):
         # Differential info (shown only for differential)
         self._diff_info_frame = ttk.Frame(type_frame)
         self._diff_info_frame.pack(fill="x", pady=(4, 0))
-
-        self._diff_info_label = ttk.Label(
-            self._diff_info_frame,
-            text="Differential applies to daily backup only. "
-            "Weekly and monthly retention always use full backups.",
-            foreground=Colors.TEXT_SECONDARY,
-            wraplength=400,
-            justify="left",
-        )
-        self._diff_info_label.pack(anchor="w")
 
         # Full backup cycle
         self._full_every_frame = ttk.Frame(self._diff_info_frame)
@@ -334,6 +325,10 @@ class GeneralTab(ScrollableTab):
         """Load profile data into UI widgets."""
         self.name_var.set(profile.name)
         self.type_var.set(profile.backup_type.value)
+
+        # Hide backup type controls in Object Lock mode (managed automatically)
+        if profile.object_lock_enabled:
+            self._type_frame.pack_forget()
 
         # Clear and reload sources
         for item in self.sources_tree.get_children():

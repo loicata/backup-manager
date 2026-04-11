@@ -104,7 +104,7 @@ class Spacing:
 # --- App constants ---
 
 APP_TITLE = "Backup Manager"
-APP_VERSION = "3.2.5"
+APP_VERSION = "3.3.0"
 WINDOW_SIZE = "1520x950"
 MIN_SIZE = (1440, 880)
 

@@ -248,10 +248,10 @@ class TestDescribeTarget:
         config = StorageConfig(
             storage_type=StorageType.S3,
             s3_bucket="my-bucket",
-            s3_provider="aws",
+            s3_provider="Amazon AWS",
             s3_region="eu-west-1",
         )
         msg = BackupEngine._describe_target(config)
         assert "S3 bucket" in msg
         assert "my-bucket" in msg
-        assert "aws" in msg
+        assert "Amazon AWS" in msg

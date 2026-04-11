@@ -112,18 +112,24 @@ class ScheduleJournal:
             self._save()
 
     def get_last_run(self, profile_id: str) -> dict | None:
-        """Get the most recent run for a given profile (thread-safe).
+        """Get the most recent backup run for a given profile (thread-safe).
+
+        Skips non-backup entries (e.g. verify triggers) so the
+        dashboard only shows actual backup results.
 
         Args:
             profile_id: Profile to look up.
 
         Returns:
-            The last matching entry dict, or None.
+            The last matching backup entry dict, or None.
         """
         with self._lock:
             for entry in reversed(self._entries):
-                if entry.get("profile_id") == profile_id:
-                    return entry
+                if entry.get("profile_id") != profile_id:
+                    continue
+                if entry.get("trigger") == "verify":
+                    continue
+                return entry
             return None
 
 

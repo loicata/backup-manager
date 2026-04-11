@@ -1,38 +1,64 @@
-"""Setup wizard: 3-step guided profile creation.
+"""Setup wizard: guided profile creation with personal/professional modes.
 
 Shown on first launch when no profiles exist.
-Creates a complete BackupProfile through a multi-step flow.
+
+Two paths:
+  - **Personal**: 3-step local/network/SFTP/S3 backup (unchanged).
+  - **Professional**: 9-step S3 Object Lock anti-ransomware setup with
+    guided AWS account creation, cost simulation, disclaimers, and
+    automatic bucket provisioning.
 """
 
 import logging
 import sys
 import threading
 import tkinter as tk
+import uuid
+import webbrowser
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from src.core.config import (
     BackupProfile,
+    BackupType,
+    EncryptionConfig,
+    RetentionConfig,
+    RetentionPolicy,
     ScheduleConfig,
     ScheduleFrequency,
     StorageConfig,
     StorageType,
 )
 from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
+from src.storage.s3_setup import (
+    GLACIER_IR_PRICE_PER_GB,
+    REQUIRED_IAM_POLICY,
+    RETENTION_OPTIONS,
+    S3ObjectLockSetup,
+    detect_local_currency,
+    estimate_total_cost,
+    format_cost,
+)
 from src.ui.theme import Colors, Fonts, Spacing
 
 logger = logging.getLogger(__name__)
 
+# Wizard mode constants
+MODE_CHOICE = "choice"
+MODE_PERSONAL = "personal"
+MODE_PROFESSIONAL = "professional"
+
 
 class SetupWizard:
-    """3-step setup wizard for creating a backup profile."""
+    """Setup wizard with personal/professional paths."""
 
-    TOTAL_STEPS = 3
-
-    def __init__(self, parent: tk.Tk = None):
+    def __init__(self, parent: tk.Tk = None, standalone: bool = False):
         self.result_profile: BackupProfile | None = None
         self._parent = parent
-        self._step = 1
+        self._standalone = standalone
+        self._mode = MODE_CHOICE
+        self._step = 0  # 0 = mode choice screen
+        self._total_steps = 3  # Updated when mode is chosen
         self._features = get_available_features()
 
         # Profile data collected across steps
@@ -43,6 +69,16 @@ class SetupWizard:
                 "type": StorageType.LOCAL.value,
                 "vars": {},
             },
+            # Professional mode extras
+            "pro_aws_key": "",
+            "pro_aws_secret": "",
+            "pro_region": "eu-west-1",
+            "pro_bucket": "",
+            "pro_retention_idx": 2,  # Default: 13 months
+            "pro_encrypt": False,
+            "pro_encrypt_password": "",
+            "pro_mirror_local": False,
+            "pro_mirror_path": "",
         }
 
         self._build_window()
@@ -51,7 +87,7 @@ class SetupWizard:
         """Build the wizard window, header, progress bar, content area, and footer."""
         self._win = tk.Toplevel(self._parent) if self._parent else tk.Tk()
         self._win.title("Backup Manager \u2014 Setup Wizard")
-        win_w, win_h = 800, 600
+        win_w, win_h = 1000, 700
         screen_w = self._win.winfo_screenwidth()
         screen_h = self._win.winfo_screenheight()
         x = (screen_w - win_w) // 2
@@ -81,7 +117,7 @@ class SetupWizard:
             except Exception:
                 pass
 
-        if self._parent:
+        if self._parent and not self._standalone:
             self._win.transient(self._parent)
             self._win.grab_set()
 
@@ -111,7 +147,7 @@ class SetupWizard:
         # Progress bar
         self._progress = ttk.Progressbar(
             self._win,
-            maximum=self.TOTAL_STEPS,
+            maximum=self._total_steps,
             mode="determinate",
         )
         self._progress.pack(fill="x")
@@ -189,52 +225,81 @@ class SetupWizard:
     # ------------------------------------------------------------------
 
     def _show_step(self) -> None:
-        """Display the current step."""
+        """Display the current step based on the active mode."""
         for w in self._content.winfo_children():
             w.destroy()
 
         # Reset scroll to top
         self._canvas.yview_moveto(0)
 
-        self._progress["value"] = self._step
-        self._back_btn.state(["!disabled"] if self._step > 1 else ["disabled"])
+        if self._step == 0:
+            # Mode choice screen — hide progress and back
+            self._progress["value"] = 0
+            self._back_btn.state(["disabled"])
+            self._next_btn.pack_forget()
+            self._step_mode_choice()
+            return
 
+        self._next_btn.pack(side="right")
+        self._progress["maximum"] = self._total_steps
+        self._progress["value"] = self._step
+        self._back_btn.state(["!disabled"])
         self._next_btn.config(text="Next \u2192")
 
-        step_builders = {
-            1: self._step_name,
-            2: self._step_sources,
-            3: self._step_storage,
-        }
+        if self._mode == MODE_PERSONAL:
+            builders = {
+                1: self._step_name,
+                2: self._step_sources,
+                3: self._step_storage,
+            }
+        else:
+            builders = {
+                1: self._step_pro_protection_info,
+                2: self._step_pro_retention_choice,
+                3: self._step_pro_cost_simulation,
+                4: self._step_pro_disclaimers,
+                5: self._step_pro_aws_guide,
+                6: self._step_name,
+                7: self._step_sources,
+                8: self._step_pro_encryption,
+                9: self._step_pro_local_mirror,
+                10: self._step_pro_auto_setup,
+            }
 
-        builder = step_builders.get(self._step, lambda: None)
+        builder = builders.get(self._step, lambda: None)
         builder()
 
     def _set_header(self, title: str) -> None:
         """Update the wizard header with step title and counter."""
         self._title_label.config(text=title)
-        self._step_label.config(text=f"Step {self._step} of {self.TOTAL_STEPS}")
+        self._step_label.config(text=f"Step {self._step} of {self._total_steps}")
 
     def _go_next(self) -> None:
         """Advance to the next step, or create the profile on the last step."""
-        # Validate current step before advancing or creating
         error = self._validate_current_step()
         if error:
-            from tkinter import messagebox
-
             messagebox.showwarning("Validation", error, parent=self._win)
             return
 
-        if self._step == self.TOTAL_STEPS:
-            self._create_profile()
+        if self._step == self._total_steps:
+            if self._mode == MODE_PERSONAL:
+                self._create_profile()
+            else:
+                self._create_pro_profile()
             return
 
         self._collect_current_step()
-        self._step = min(self._step + 1, self.TOTAL_STEPS)
+        self._step = min(self._step + 1, self._total_steps)
         self._show_step()
 
     def _validate_current_step(self) -> str | None:
         """Validate the current step. Returns error message or None."""
+        if self._mode == MODE_PERSONAL:
+            return self._validate_personal_step()
+        return self._validate_pro_step()
+
+    def _validate_personal_step(self) -> str | None:
+        """Validate personal (classic) mode steps."""
         if self._step == 1:
             name = self._data.get("name", "").strip()
             if not name:
@@ -243,26 +308,63 @@ class SetupWizard:
             if not self._data.get("sources"):
                 return "Please add at least one source folder."
         elif self._step == 3:
-            storage = self._data.get("storage", {})
-            svars = storage.get("vars", {})
-            stype = storage.get("type", "")
-            if stype in (StorageType.LOCAL.value, StorageType.NETWORK.value):
-                path = svars.get("destination_path", "")
-                if not path:
-                    return "Please select a destination folder."
-            elif stype == StorageType.SFTP.value:
-                host = svars.get("sftp_host", "")
-                if not host:
-                    return "Please enter a SFTP host."
-            elif stype == StorageType.S3.value:
-                bucket = svars.get("s3_bucket", "")
-                if not bucket:
-                    return "Please enter an S3 bucket name."
+            return self._validate_personal_storage()
+        return None
+
+    def _validate_personal_storage(self) -> str | None:
+        """Validate the personal storage step."""
+        storage = self._data.get("storage", {})
+        svars = storage.get("vars", {})
+        stype = storage.get("type", "")
+        if stype in (StorageType.LOCAL.value, StorageType.NETWORK.value):
+            if not svars.get("destination_path", ""):
+                return "Please select a destination folder."
+        elif stype == StorageType.SFTP.value:
+            if not svars.get("sftp_host", ""):
+                return "Please enter a SFTP host."
+        elif stype == StorageType.S3.value and not svars.get("s3_bucket", ""):
+            return "Please enter an S3 bucket name."
+        return None
+
+    def _validate_pro_step(self) -> str | None:
+        """Validate professional mode steps.
+
+        Step order: 1=info, 2=retention, 3=cost, 4=disclaimers,
+        5=AWS keys, 6=name, 7=sources, 8=encryption,
+        9=local mirror, 10=setup.
+        """
+        if self._step == 5:
+            if not self._data.get("pro_aws_key", "").strip():
+                return "Please enter your Amazon AWS Access Key."
+            if not self._data.get("pro_aws_secret", "").strip():
+                return "Please enter your Amazon AWS Secret Key."
+        elif self._step == 6:
+            name = self._data.get("name", "").strip()
+            if not name:
+                return "Please enter a profile name."
+        elif self._step == 7:
+            if not self._data.get("sources"):
+                return "Please add at least one source folder."
+        elif self._step == 8:
+            if self._data.get("pro_encrypt"):
+                pw = self._data.get("pro_encrypt_password", "")
+                if not pw or len(pw) < 8:
+                    return "Encryption password must be at least 8 characters."
         return None
 
     def _go_back(self) -> None:
         """Go back to the previous step."""
-        self._step = max(self._step - 1, 1)
+        if self._step <= 1:
+            self._mode = MODE_CHOICE
+            self._step = 0
+        else:
+            self._step -= 1
+            # Skip encryption step (8) going back if retention > 13 months
+            if self._mode == MODE_PROFESSIONAL and self._step == 8:
+                idx = self._data.get("pro_retention_idx", 0)
+                _label, months, _days = RETENTION_OPTIONS[idx]
+                if months > 13:
+                    self._step = 7
         self._show_step()
 
     def _cancel(self) -> None:
@@ -276,22 +378,124 @@ class SetupWizard:
         pass  # Each step stores data via its own widgets / traces
 
     # ------------------------------------------------------------------
-    # Step 1: Welcome
+    # Step 0: Mode choice (Personal / Professional)
     # ------------------------------------------------------------------
 
-    def _step_welcome(self) -> None:
-        """Display the welcome screen."""
-        self._set_header("Welcome!")
+    def _step_mode_choice(self) -> None:
+        """Display the mode selection screen with two cards."""
+        self._set_header("Choose your backup mode")
+        self._step_label.config(text="")
+
         ttk.Label(
             self._content,
-            text="This wizard will guide you through creating\n"
-            "your first backup profile.\n\n"
-            "You can change any setting later.",
+            text="How would you like to protect your data?",
             font=Fonts.large(),
-        ).pack(pady=Spacing.XLARGE)
+        ).pack(pady=(Spacing.XLARGE, Spacing.LARGE))
+
+        cards = ttk.Frame(self._content)
+        cards.pack(fill="both", expand=True, pady=Spacing.MEDIUM)
+        cards.columnconfigure(0, weight=1)
+        cards.columnconfigure(1, weight=1)
+
+        # Classic card
+        personal = ttk.LabelFrame(cards, text="", padding=Spacing.XLARGE)
+        personal.grid(row=0, column=0, padx=Spacing.MEDIUM, sticky="nsew")
+
+        tk.Label(
+            personal,
+            text="\U0001f3e0",
+            font=("Segoe UI", 40),
+        ).pack(pady=(0, Spacing.MEDIUM))
+        ttk.Label(
+            personal,
+            text="Classic",
+            font=Fonts.title(),
+        ).pack()
+        ttk.Label(
+            personal,
+            text="Backup to external drive,\nnetwork share, SSH server\nor S3 cloud storage.\n\n"
+            "Simple and fast setup.",
+            justify="center",
+        ).pack(pady=Spacing.MEDIUM)
+        ttk.Button(
+            personal,
+            text="Choose Classic",
+            style="Accent.TButton",
+            command=lambda: self._select_mode(MODE_PERSONAL),
+        ).pack(pady=Spacing.MEDIUM)
+
+        # Anti-Ransomware card
+        pro = ttk.LabelFrame(cards, text="", padding=Spacing.XLARGE)
+        pro.grid(row=0, column=1, padx=Spacing.MEDIUM, sticky="nsew")
+
+        tk.Label(
+            pro,
+            text="\U0001f6e1",
+            font=("Segoe UI", 40),
+            anchor="center",
+        ).pack(pady=(0, Spacing.MEDIUM), fill="x")
+        ttk.Label(
+            pro,
+            text="Anti-Ransomware",
+            font=Fonts.title(),
+        ).pack()
+        ttk.Label(
+            pro,
+            text="High Security",
+            font=Fonts.title(),
+        ).pack()
+        ttk.Label(
+            pro,
+            text="Backup to Amazon AWS S3\nserver with Object Lock.\n\n" "Your data is IMMUTABLE.",
+            justify="center",
+        ).pack(pady=Spacing.MEDIUM)
+
+        s3_available = FEAT_S3 in self._features
+        pro_btn = ttk.Button(
+            pro,
+            text="Choose Anti-Ransomware",
+            style="Accent.TButton",
+            command=lambda: self._select_mode(MODE_PROFESSIONAL),
+            state="normal" if s3_available else "disabled",
+        )
+        pro_btn.pack(pady=Spacing.MEDIUM)
+
+        if not s3_available:
+            ttk.Label(
+                pro,
+                text="Requires boto3 (pip install boto3)",
+                foreground=Colors.DANGER,
+                font=Fonts.small(),
+            ).pack()
+
+    def _select_mode(self, mode: str) -> None:
+        """Set the wizard mode and start the flow."""
+        self._mode = mode
+        if mode == MODE_PERSONAL:
+            self._total_steps = 3
+        else:
+            self._total_steps = 10
+            # Auto-detect nearest AWS region in background (no UI freeze)
+            self._data["pro_region"] = "eu-west-1"  # Default until detected
+
+            # Detect region and currency in background
+            self._data["pro_currency"] = ("$", 1.0)
+
+            def _detect_region_and_currency() -> None:
+                from src.storage.s3_setup import detect_nearest_region
+
+                self._data["pro_region"] = detect_nearest_region()
+                self._data["pro_currency"] = detect_local_currency()
+
+            threading.Thread(
+                target=_detect_region_and_currency,
+                daemon=True,
+            ).start()
+        self._step = 1
+        self._show_step()
 
     # ------------------------------------------------------------------
-    # Step 2: Profile name
+    # Step 1: Profile name (shared)
     # ------------------------------------------------------------------
 
     def _step_name(self) -> None:
@@ -531,9 +735,9 @@ class SetupWizard:
         config_frames["s3"] = f
 
         ttk.Label(f, text="Provider:").pack(anchor="w")
-        s3_provider_var = tk.StringVar(value=saved.get("s3_provider", "aws"))
+        s3_provider_var = tk.StringVar(value=saved.get("s3_provider", "Amazon AWS"))
         providers = [
-            "aws",
+            "Amazon AWS",
             "scaleway",
             "wasabi",
             "ovh",
@@ -668,7 +872,7 @@ class SetupWizard:
                 else:
                     setattr(config, key, val)
         elif stype == StorageType.S3:
-            config.s3_provider = vd.get("s3_provider", "aws")
+            config.s3_provider = vd.get("s3_provider", "Amazon AWS")
             for key, val in vd.items():
                 if key != "s3_provider":
                     setattr(config, key, val)
@@ -764,11 +968,789 @@ class SetupWizard:
         self._build_storage_config_ui(self._content, "storage")
 
     # ------------------------------------------------------------------
-    # Profile creation
+    # Professional steps (3-9)
     # ------------------------------------------------------------------
 
+    def _step_pro_aws_guide(self) -> None:
+        """Step 3 (pro): Guide for creating an AWS account + enter keys."""
+        self._set_header("Amazon AWS Account Setup")
+
+        ttk.Label(
+            self._content,
+            text="Follow these steps to create your Amazon AWS account:",
+            font=Fonts.large(),
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        steps = [
+            (
+                "1. Create an Amazon AWS account (skip if you already have one)",
+                "https://aws.amazon.com/free/",
+                "Go to the link below and click 'Create an AWS Account'.\n"
+                "You will need an email address, a password, and a credit card.\n"
+                "The Free Tier is sufficient \u2014 you only pay for the storage you use.",
+            ),
+            (
+                "2. Create the security policy",
+                "https://console.aws.amazon.com/iam/home#/policies/create",
+                "Go to the link below. You will see 'Specify permissions' page.\n"
+                "In the 'Policy editor' section, click on the 'JSON' tab.\n"
+                "Select all the default text in the editor (Ctrl+A) and delete it.\n"
+                "Copy the policy displayed below and paste it (Ctrl+V).\n"
+                "Click the 'Next' button at the bottom right.\n"
+                "In the 'Policy name' field, type: BackupManagerPolicy\n"
+                "Leave the 'Description' field empty.\n"
+                "Click 'Create policy'.",
+            ),
+            (
+                "3. Create the user and attach the policy",
+                "https://console.aws.amazon.com/iam/home#/users/create",
+                "Go to the link below. You will see 'Specify user details' page.\n"
+                "In the 'User name' field, type: BackupManager\n"
+                "Do NOT check 'Provide user access to the AWS Management Console'.\n"
+                "Click 'Next'.\n"
+                "In 'Permissions options', select 'Attach policies directly'.\n"
+                "In the 'Search' box under 'Permissions policies', "
+                "type: BackupManagerPolicy\n"
+                "Check the box next to 'BackupManagerPolicy' (1 match).\n"
+                "Click 'Next', then click 'Create user'.",
+            ),
+            (
+                "4. Generate Access Keys",
+                "https://console.aws.amazon.com/iam/home#/users",
+                "In the 'Users' list, click on 'BackupManager'.\n"
+                "Click on the 'Security credentials' tab.\n"
+                "In the 'Access keys' section, click 'Create access key'.\n"
+                "Select 'Application running outside AWS'.\n"
+                "Click 'Next', then click 'Create access key'.\n"
+                "You will see the 'Retrieve access keys' page.\n"
+                "Copy the 'Access key' and click 'Show' next to the "
+                "'Secret access key' to reveal it, then copy it too.\n"
+                "Paste both keys in the fields below.\n"
+                "WARNING: The Secret access key will only be shown once.",
+            ),
+        ]
+
+        for i, (title, url, desc) in enumerate(steps):
+            f = ttk.LabelFrame(self._content, text="", padding=Spacing.PAD)
+            f.pack(fill="x", pady=Spacing.SMALL)
+            ttk.Label(f, text=title, font=Fonts.bold()).pack(anchor="w")
+            ttk.Label(
+                f,
+                text=desc,
+                foreground=Colors.TEXT_SECONDARY,
+                wraplength=900,
+                justify="left",
+            ).pack(anchor="w", pady=(Spacing.SMALL, 0))
+            if url:
+                link = ttk.Label(
+                    f,
+                    text=url,
+                    foreground=Colors.ACCENT,
+                    cursor="hand2",
+                )
+                link.pack(anchor="w", pady=(Spacing.SMALL, 0))
+                link.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+
+            # Insert the IAM policy right after step 2 (index 1)
+            if i == 1:
+                policy_frame = ttk.LabelFrame(
+                    f,
+                    text="Policy to copy and paste in the JSON editor",
+                    padding=Spacing.PAD,
+                )
+                policy_frame.pack(fill="x", pady=(Spacing.MEDIUM, 0))
+
+                policy_text = tk.Text(
+                    policy_frame,
+                    height=10,
+                    font=Fonts.mono(),
+                    wrap="word",
+                )
+                policy_text.insert("1.0", REQUIRED_IAM_POLICY)
+                policy_text.config(state="disabled")
+                policy_text.pack(fill="x")
+
+                def _copy_policy() -> None:
+                    self._win.clipboard_clear()
+                    self._win.clipboard_append(REQUIRED_IAM_POLICY)
+
+                ttk.Button(
+                    policy_frame,
+                    text="Copy to clipboard",
+                    command=_copy_policy,
+                ).pack(anchor="w", pady=(Spacing.SMALL, 0))
+        # Credentials input
+        cred_frame = ttk.LabelFrame(
+            self._content,
+            text="Your Amazon AWS Credentials",
+            padding=Spacing.PAD,
+        )
+        cred_frame.pack(fill="x", pady=Spacing.MEDIUM)
+
+        ttk.Label(cred_frame, text="Access Key:").pack(anchor="w")
+        key_var = tk.StringVar(value=self._data.get("pro_aws_key", ""))
+        ttk.Entry(cred_frame, textvariable=key_var, show="\u25cf").pack(fill="x")
+        key_var.trace_add(
+            "write",
+            lambda *a: self._data.update(pro_aws_key=key_var.get()),
+        )
+
+        ttk.Label(cred_frame, text="Secret Key:").pack(
+            anchor="w",
+            pady=(Spacing.SMALL, 0),
+        )
+        secret_var = tk.StringVar(value=self._data.get("pro_aws_secret", ""))
+        ttk.Entry(cred_frame, textvariable=secret_var, show="\u25cf").pack(fill="x")
+        secret_var.trace_add(
+            "write",
+            lambda *a: self._data.update(pro_aws_secret=secret_var.get()),
+        )
+
+        # Test credentials button
+        test_frame = ttk.Frame(self._content)
+        test_frame.pack(fill="x", pady=Spacing.SMALL)
+        test_lbl = ttk.Label(test_frame, text="")
+        test_btn = ttk.Button(
+            test_frame,
+            text="Test credentials",
+            command=lambda: self._test_aws_credentials(test_btn, test_lbl),
+        )
+        test_btn.pack(side="left")
+        test_lbl.pack(side="left", padx=Spacing.MEDIUM)
+
+    def _test_aws_credentials(self, btn: ttk.Button, lbl: ttk.Label) -> None:
+        """Test AWS credentials in background thread."""
+        btn.state(["disabled"])
+        lbl.config(text="Testing...", foreground=Colors.WARNING)
+
+        ak = self._data.get("pro_aws_key", "")
+        sk = self._data.get("pro_aws_secret", "")
+        region = self._data.get("pro_region", "eu-west-1")
+        result: list = [None]
+
+        def _do() -> None:
+            try:
+                setup = S3ObjectLockSetup(ak, sk, region)
+                result[0] = setup.validate_credentials()
+            except Exception as e:
+                result[0] = (False, str(e))
+
+        def _poll() -> None:
+            if result[0] is not None:
+                ok, msg = result[0]
+                btn.state(["!disabled"])
+                lbl.config(
+                    text=msg,
+                    foreground=Colors.SUCCESS if ok else Colors.DANGER,
+                )
+            else:
+                self._win.after(200, _poll)
+
+        threading.Thread(target=_do, daemon=True).start()
+        self._win.after(200, _poll)
+
+    def _step_pro_protection_info(self) -> None:
+        """Step 1 (pro): Explain what we will do and why."""
+        self._set_header("Anti-Ransomware Protection")
+
+        # Introduction
+        ttk.Label(
+            self._content,
+            text="What we are going to set up together:",
+            font=Fonts.large(),
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        info_texts = [
+            (
+                "The problem",
+                "Ransomware, hackers, and human errors can destroy your data "
+                "at any time. A simple backup on an external drive is not enough: "
+                "if the drive is connected when the attack happens, your backups "
+                "are destroyed too. Moreover, the most sophisticated ransomware "
+                "does not activate immediately \u2014 it waits for you to run a "
+                "backup, thereby contaminating your backups as well.",
+            ),
+            (
+                "The solution: immutable cloud backups",
+                "We will store your backups on Amazon AWS S3 with Object Lock "
+                "technology. Once uploaded, your data becomes INDESTRUCTIBLE "
+                "for the duration you choose (from 1 month to 13 years).\n\n"
+                "No one can delete or modify your data during this period \u2014 "
+                "not you, not a hacker, not even Amazon.",
+            ),
+            (
+                "What this wizard will do",
+                "1. Offer you different protection durations and the estimated "
+                "storage cost based on the duration you select and the "
+                "amount of data you want to secure\n"
+                "2. Help you create an Amazon AWS account\n"
+                "3. Set up your backup profile (name, folders to protect)\n"
+                "4. Automatically create and lock your backup vault\n\n"
+                "Everything is guided step by step. No technical knowledge required.",
+            ),
+            (
+                "Why this is the best method",
+                "This is the same technology used by banks, hospitals, and "
+                "governments to protect critical data. Object Lock Compliance "
+                "mode is the highest level of data protection available "
+                "in the cloud. Your data is guaranteed to survive any attack "
+                "during the entire retention period.",
+            ),
+        ]
+
+        for title, text in info_texts:
+            f = ttk.LabelFrame(self._content, text=title, padding=Spacing.PAD)
+            f.pack(fill="x", pady=Spacing.SMALL)
+            ttk.Label(f, text=text, wraplength=900, justify="left").pack(anchor="w")
+
+    def _step_pro_retention_choice(self) -> None:
+        """Step 2 (pro): Choose retention duration."""
+        self._set_header("Retention Duration")
+
+        ttk.Label(
+            self._content,
+            text="How long should your backups be protected?",
+            font=Fonts.large(),
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        ttk.Label(
+            self._content,
+            text=(
+                "Choose the duration during which your data will be "
+                "impossible to delete. This is the core of your "
+                "anti-ransomware protection."
+            ),
+            wraplength=900,
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(0, Spacing.SMALL))
+
+        # Recommendation based on ransomware dwell time
+        tip = ttk.LabelFrame(
+            self._content,
+            text="Good to know",
+            padding=Spacing.PAD,
+        )
+        tip.pack(fill="x", pady=(0, Spacing.LARGE))
+        ttk.Label(
+            tip,
+            text=(
+                "Since the standard recommended data retention period is "
+                "3 months, the most sophisticated ransomware waits 3 months "
+                "and one day before activating. For this reason, it is often "
+                "appropriate to keep your data for at least 4 months in order "
+                "to be able to restore a clean version that predates "
+                "the infection."
+            ),
+            wraplength=880,
+            foreground=Colors.TEXT_SECONDARY,
+            justify="left",
+        ).pack(anchor="w")
+
+        ret_var = tk.IntVar(value=self._data.get("pro_retention_idx", 2))
+
+        for i, (label, _months, _days) in enumerate(RETENTION_OPTIONS):
+            ttk.Radiobutton(
+                self._content,
+                text=label,
+                value=i,
+                variable=ret_var,
+            ).pack(anchor="w", pady=2)
+
+        ret_var.trace_add(
+            "write",
+            lambda *_a: self._data.update(pro_retention_idx=ret_var.get()),
+        )
+
+        # Single warning — always visible, in red
+        ttk.Label(
+            self._content,
+            text=(
+                "\u26a0 Because data is impossible to delete during the "
+                "retention period, you will be billed by Amazon AWS for "
+                "the entire duration. Neither you, nor Backup Manager, "
+                "nor Amazon can cancel this commitment. "
+                "This decision will be irreversible after you configure "
+                "your Amazon AWS account."
+            ),
+            wraplength=900,
+            foreground=Colors.DANGER,
+        ).pack(fill="x", pady=(Spacing.MEDIUM, 0))
+
+    def _step_pro_s3_config(self) -> None:
+        """Step 9 (pro): S3 region and bucket name."""
+        self._set_header("S3 Configuration")
+
+        from src.storage.s3 import PROVIDER_REGIONS
+
+        # Region
+        ttk.Label(self._content, text="Amazon AWS Region:", font=Fonts.bold()).pack(
+            anchor="w",
+        )
+        region_var = tk.StringVar(value=self._data.get("pro_region", "eu-west-1"))
+        regions = PROVIDER_REGIONS.get("Amazon AWS", ["eu-west-1"])
+        ttk.Combobox(
+            self._content,
+            textvariable=region_var,
+            values=regions,
+            state="readonly",
+        ).pack(fill="x", pady=(0, Spacing.MEDIUM))
+        region_var.trace_add(
+            "write",
+            lambda *a: self._data.update(pro_region=region_var.get()),
+        )
+
+        # Bucket name — auto-generated from profile name
+        import re
+
+        profile_name = self._data.get("name", "backup")
+        sanitized = re.sub(r"[^a-z0-9-]", "-", profile_name.lower()).strip("-")[:30]
+        short_id = uuid.uuid4().hex[:6]
+        auto_bucket = f"bm-{sanitized}-{short_id}" if sanitized else f"bm-{short_id}"
+        if not self._data.get("pro_bucket") or self._data["pro_bucket"].startswith("bm-"):
+            self._data["pro_bucket"] = auto_bucket
+
+        ttk.Label(
+            self._content,
+            text="Bucket name (auto-generated, you can modify if needed):",
+            font=Fonts.bold(),
+        ).pack(anchor="w", pady=(Spacing.MEDIUM, 0))
+        bucket_var = tk.StringVar(value=self._data.get("pro_bucket", ""))
+        ttk.Entry(self._content, textvariable=bucket_var).pack(fill="x")
+        ttk.Label(
+            self._content,
+            text="Must be globally unique across all Amazon AWS accounts.",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w")
+        bucket_var.trace_add(
+            "write",
+            lambda *a: self._data.update(pro_bucket=bucket_var.get()),
+        )
+
+    def _step_pro_cost_simulation(self) -> None:
+        """Step 3 (pro): Total cost simulation for all durations."""
+        self._set_header("Cost Simulation")
+
+        region = self._data.get("pro_region", "eu-west-1")
+        cur_symbol, cur_rate = self._data.get("pro_currency", ("$", 1.0))
+
+        ttk.Label(
+            self._content,
+            text="Estimated total cost by retention duration and data size:",
+            font=Fonts.large(),
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        ttk.Label(
+            self._content,
+            text=(
+                "This simulation includes monthly full backups and daily "
+                "differential backups (only changed files). The cost increases "
+                "progressively as backups accumulate, then stabilizes."
+            ),
+            foreground=Colors.TEXT_SECONDARY,
+            wraplength=900,
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        # Full table: all durations × all sizes (total cost only)
+        table = ttk.Frame(self._content)
+        table.pack(fill="x", pady=Spacing.MEDIUM)
+
+        sizes = [10, 50, 100, 200]
+
+        # Header row
+        ttk.Label(table, text="Retention", font=Fonts.bold()).grid(
+            row=0,
+            column=0,
+            padx=Spacing.MEDIUM,
+            pady=Spacing.SMALL,
+            sticky="w",
+        )
+        for col, size_gb in enumerate(sizes, start=1):
+            ttk.Label(table, text=f"{size_gb} GB", font=Fonts.bold()).grid(
+                row=0,
+                column=col,
+                padx=Spacing.MEDIUM,
+                pady=Spacing.SMALL,
+            )
+
+        # Data rows — one per retention option, total cost
+        for row, (label, months, _days) in enumerate(RETENTION_OPTIONS, start=1):
+            ttk.Label(table, text=label).grid(
+                row=row,
+                column=0,
+                padx=Spacing.MEDIUM,
+                pady=2,
+                sticky="w",
+            )
+            for col, size_gb in enumerate(sizes, start=1):
+                total = estimate_total_cost(size_gb, region, months)
+                cost_text = format_cost(total, cur_symbol, cur_rate)
+                ttk.Label(table, text=cost_text).grid(
+                    row=row,
+                    column=col,
+                    padx=Spacing.MEDIUM,
+                    pady=2,
+                )
+
+        # Pricing source
+        price = GLACIER_IR_PRICE_PER_GB.get(region, 0.004)
+        ttk.Label(
+            self._content,
+            text=(
+                f"Pricing based on Amazon AWS S3 Glacier Instant Retrieval "
+                f"(~${price}/GB/month) as of April 2026."
+            ),
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w", pady=(Spacing.MEDIUM, 0))
+
+        # Disclaimer
+        ttk.Label(
+            self._content,
+            text=(
+                "This is an indicative and informative simulation. "
+                "Amazon AWS pricing may vary. This is not a contractual commitment. "
+                "Actual costs depend on your usage and Amazon AWS pricing conditions."
+            ),
+            wraplength=900,
+            foreground=Colors.DANGER,
+            font=Fonts.small(),
+        ).pack(fill="x")
+
+    def _step_pro_encryption(self) -> None:
+        """Step 8 (pro): Optional client-side encryption.
+
+        Skipped automatically if retention > 13 months.
+        AWS already encrypts server-side; disabling BM encryption
+        allows direct file access via the AWS Console.
+        """
+        # Auto-skip for long retention periods
+        idx = self._data.get("pro_retention_idx", 0)
+        _label, months, _days = RETENTION_OPTIONS[idx]
+        if months > 13:
+            self._data["pro_encrypt"] = False
+            self._step += 1
+            self._show_step()
+            return
+
+        self._set_header("Encryption (Optional)")
+
+        # Explanation
+        info = [
+            (
+                "Amazon AWS already encrypts your data",
+                "Amazon AWS automatically encrypts all data stored on S3 "
+                "(server-side encryption). Your backups are protected "
+                "by default without any action on your part.",
+                Colors.TEXT_SECONDARY,
+            ),
+            (
+                "Without Backup Manager encryption",
+                "You can access and restore your files directly from "
+                "the Amazon S3 web console, without needing Backup "
+                "Manager. This can be useful if you need to recover "
+                "data independently.",
+                Colors.TEXT_SECONDARY,
+            ),
+            (
+                "With Backup Manager encryption (AES-256)",
+                "Your files are double-encrypted for maximum "
+                "confidentiality. Nobody \u2014 including Amazon \u2014 can "
+                "read the content of your files. However, you will "
+                "ALWAYS need Backup Manager AND your password to "
+                "restore your data.",
+                Colors.TEXT_SECONDARY,
+            ),
+        ]
+
+        for title, text, color in info:
+            f = ttk.LabelFrame(self._content, text=title, padding=Spacing.PAD)
+            f.pack(fill="x", pady=Spacing.SMALL)
+            ttk.Label(
+                f,
+                text=text,
+                wraplength=900,
+                foreground=color,
+                justify="left",
+            ).pack(anchor="w")
+
+        # Toggle
+        encrypt_var = tk.BooleanVar(value=self._data.get("pro_encrypt", False))
+
+        pw_frame = ttk.LabelFrame(
+            self._content,
+            text="Encryption password",
+            padding=Spacing.PAD,
+        )
+
+        def _toggle(*_a: object) -> None:
+            self._data["pro_encrypt"] = encrypt_var.get()
+            if encrypt_var.get():
+                pw_frame.pack(fill="x", pady=Spacing.SMALL)
+            else:
+                pw_frame.pack_forget()
+
+        ttk.Checkbutton(
+            self._content,
+            text="Enable Backup Manager encryption (AES-256)",
+            variable=encrypt_var,
+            command=_toggle,
+        ).pack(anchor="w", pady=Spacing.MEDIUM)
+
+        # Password fields
+        ttk.Label(pw_frame, text="Password:").pack(anchor="w")
+        pw_var = tk.StringVar(value=self._data.get("pro_encrypt_password", ""))
+        ttk.Entry(pw_frame, textvariable=pw_var, show="\u25cf").pack(fill="x")
+        pw_var.trace_add(
+            "write",
+            lambda *a: self._data.update(pro_encrypt_password=pw_var.get()),
+        )
+
+        ttk.Label(pw_frame, text="Confirm password:").pack(
+            anchor="w",
+            pady=(Spacing.SMALL, 0),
+        )
+        pw2_var = tk.StringVar()
+        ttk.Entry(pw_frame, textvariable=pw2_var, show="\u25cf").pack(fill="x")
+
+        _toggle()
+
+    def _step_pro_disclaimers(self) -> None:
+        """Step 4 (pro): Informational disclaimers (no acceptance required)."""
+        self._set_header("Important Information")
+
+        idx = self._data.get("pro_retention_idx", 0)
+        label, _months, _days = RETENTION_OPTIONS[idx]
+
+        ttk.Label(
+            self._content,
+            text="Please read the following information before continuing:",
+            font=Fonts.large(),
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        notices = [
+            (
+                "Data immutability",
+                f"Data backed up with Object Lock will be IMPOSSIBLE to delete "
+                f"before the expiration of the chosen retention period ({label}).",
+            ),
+            (
+                "Amazon AWS billing commitment",
+                f"Amazon Web Services will bill you for the storage during "
+                f"the entire lock duration ({label}). Even if you stop using "
+                f"Backup Manager, already locked data will remain billed "
+                f"by Amazon AWS until expiration.",
+            ),
+            (
+                "No early unlock possible",
+                "No one \u2014 not you, not Backup Manager, not even Amazon \u2014 "
+                "can unlock your data before expiration. In case of "
+                "configuration error, data remains locked and billed "
+                "for the entire duration.",
+            ),
+            (
+                "Cost estimate",
+                "The cost simulation presented earlier is indicative. "
+                "Actual costs depend on your usage and current Amazon AWS "
+                "pricing conditions.",
+            ),
+            (
+                "Backup Manager liability",
+                "Backup Manager provides this information for informational "
+                "purposes only. The use of Amazon AWS S3 is subject to "
+                "Amazon Web Services terms and conditions. Backup Manager "
+                "provides no guarantee regarding data protection, recovery, "
+                "or the effectiveness of the chosen retention duration "
+                "against any specific threat. Backup Manager cannot be held "
+                "responsible for data loss, costs related to your Amazon AWS "
+                "account, or any consequence resulting from the use of "
+                "this service.",
+            ),
+        ]
+
+        for title, text in notices:
+            f = ttk.LabelFrame(self._content, text=title, padding=Spacing.PAD)
+            f.pack(fill="x", pady=Spacing.SMALL)
+            ttk.Label(
+                f,
+                text=text,
+                wraplength=900,
+                foreground=Colors.TEXT_SECONDARY,
+                justify="left",
+            ).pack(anchor="w")
+
+    def _step_pro_local_mirror(self) -> None:
+        """Step 9 (pro): Optional secondary backup destination."""
+        self._set_header("Additional Backup (Optional)")
+
+        ttk.Label(
+            self._content,
+            text="Would you like to also save your backups to another location?",
+            font=Fonts.large(),
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        ttk.Label(
+            self._content,
+            text=(
+                "Your data is already protected in the cloud with Object Lock. "
+                "Adding a secondary copy gives you faster access to your files "
+                "for restoration. You can choose an external drive, a network "
+                "share, or an SSH server."
+            ),
+            wraplength=900,
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        # Toggle
+        mirror_var = tk.BooleanVar(value=self._data.get("pro_mirror_local", False))
+        ttk.Checkbutton(
+            self._content,
+            text="Enable secondary backup destination",
+            variable=mirror_var,
+        ).pack(anchor="w", pady=Spacing.MEDIUM)
+
+        # Storage config (reuse the factorized builder — without S3)
+        mirror_frame = ttk.Frame(self._content)
+
+        # Initialize mirror data if not present
+        if "mirror1" not in self._data:
+            self._data["mirror1"] = {
+                "type": StorageType.LOCAL.value,
+                "vars": {},
+            }
+
+        def _toggle(*_a: object) -> None:
+            self._data["pro_mirror_local"] = mirror_var.get()
+            if mirror_var.get():
+                mirror_frame.pack(fill="x", pady=Spacing.SMALL)
+            else:
+                mirror_frame.pack_forget()
+
+        mirror_var.trace_add("write", _toggle)
+
+        self._build_storage_config_ui(mirror_frame, "mirror1")
+
+        _toggle()
+
+    def _step_pro_auto_setup(self) -> None:
+        """Step 10 (pro): Automatic S3 bucket provisioning."""
+        self._set_header("Amazon AWS Automatic Configuration")
+
+        # Auto-generate bucket name from profile name
+        import re
+
+        profile_name = self._data.get("name", "backup")
+        sanitized = re.sub(r"[^a-z0-9-]", "-", profile_name.lower()).strip("-")[:30]
+        short_id = uuid.uuid4().hex[:6]
+        auto_bucket = f"bm-{sanitized}-{short_id}" if sanitized else f"bm-{short_id}"
+        if not self._data.get("pro_bucket") or self._data["pro_bucket"].startswith("bm-"):
+            self._data["pro_bucket"] = auto_bucket
+
+        ttk.Label(
+            self._content,
+            text="Automatic configuration of your Amazon AWS S3 bucket...",
+            font=Fonts.large(),
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        # Summary
+        idx = self._data.get("pro_retention_idx", 0)
+        label, _months, days = RETENTION_OPTIONS[idx]
+        region = self._data.get("pro_region", "eu-west-1")
+        bucket = self._data.get("pro_bucket", "")
+
+        summary = ttk.LabelFrame(
+            self._content,
+            text="Configuration summary",
+            padding=Spacing.PAD,
+        )
+        summary.pack(fill="x", pady=Spacing.MEDIUM)
+
+        summary_items = [
+            ("Bucket", bucket),
+            ("Region", region),
+            ("Retention", f"{label} ({days} days)"),
+            ("Mode", "Compliance (immutable)"),
+            ("Cleanup", "Automatic (S3 Lifecycle)"),
+        ]
+        if self._data.get("pro_encrypt"):
+            summary_items.append(("Encryption", "AES-256 (Backup Manager)"))
+        if self._data.get("pro_mirror_local") and self._data.get("pro_mirror_path"):
+            summary_items.append(("Local mirror", self._data["pro_mirror_path"]))
+
+        for k, v in summary_items:
+            row = ttk.Frame(summary)
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=f"{k}:", font=Fonts.bold(), width=15).pack(
+                side="left",
+            )
+            ttk.Label(row, text=v).pack(side="left")
+
+        # Setup log area
+        self._setup_log = tk.Text(
+            self._content,
+            height=8,
+            font=Fonts.mono(),
+            state="disabled",
+        )
+
+        self._setup_log.pack(fill="x", pady=Spacing.SMALL)
+
+        # Auto-launch setup when page is displayed
+        self._win.after(500, self._run_pro_setup)
+
+    def _run_pro_setup(self) -> None:
+        """Execute S3 bucket provisioning in a background thread."""
+        self._next_btn.state(["disabled"])
+
+        ak = self._data["pro_aws_key"]
+        sk = self._data["pro_aws_secret"]
+        region = self._data["pro_region"]
+        bucket = self._data["pro_bucket"]
+        idx = self._data["pro_retention_idx"]
+        _label, _months, days = RETENTION_OPTIONS[idx]
+
+        result: list = [None]
+
+        def _do() -> None:
+            try:
+                setup = S3ObjectLockSetup(ak, sk, region)
+                result[0] = setup.full_setup(bucket, days, full_extra_days=30)
+            except Exception as e:
+                result[0] = [("Setup", False, str(e))]
+
+        def _append_log(text: str) -> None:
+            self._setup_log.config(state="normal")
+            self._setup_log.insert("end", text + "\n")
+            self._setup_log.config(state="disabled")
+            self._setup_log.see("end")
+
+        def _poll() -> None:
+            if result[0] is None:
+                self._win.after(300, _poll)
+                return
+
+            steps = result[0]
+            all_ok = True
+            for step_name, ok, msg in steps:
+                icon = "\u2713" if ok else "\u2717"
+                _append_log(f"  {icon} {step_name}: {msg}")
+                if not ok:
+                    all_ok = False
+
+            if all_ok:
+                _append_log("\n  Configuration complete!")
+                self._data["pro_setup_done"] = True
+                self._next_btn.state(["!disabled"])
+                self._next_btn.config(text="Finish")
+            else:
+                _append_log("\n  Setup failed. Please go back and check your settings.")
+
+        _append_log("Starting S3 configuration...")
+        threading.Thread(target=_do, daemon=True).start()
+        self._win.after(300, _poll)
+
     # ------------------------------------------------------------------
-    # Profile creation
+    # Profile creation (personal — unchanged)
     # ------------------------------------------------------------------
 
     def _create_profile(self) -> None:
@@ -785,11 +1767,81 @@ class SetupWizard:
             name=d["name"],
             source_paths=d["sources"],
             storage=storage,
+            backup_type=BackupType.FULL,
+            schedule=ScheduleConfig(
+                enabled=True,
+                frequency=ScheduleFrequency.WEEKLY,
+                time="10:00",
+            ),
+            retention=RetentionConfig(
+                gfs_daily=1,
+                gfs_weekly=4,
+                gfs_monthly=7,
+            ),
+        )
+
+        self.result_profile = profile
+        self._canvas.unbind_all("<MouseWheel>")
+        self._win.destroy()
+
+    def _create_pro_profile(self) -> None:
+        """Build a professional BackupProfile with S3 Object Lock settings.
+
+        Configures: S3 storage with Object Lock, daily schedule,
+        differential with monthly full, GFS disabled, optional
+        encryption, optional local mirror.
+        """
+        d = self._data
+        idx = d.get("pro_retention_idx", 0)
+        _label, _months, days = RETENTION_OPTIONS[idx]
+
+        storage = StorageConfig(
+            storage_type=StorageType.S3,
+            s3_bucket=d["pro_bucket"],
+            s3_region=d["pro_region"],
+            s3_access_key=d["pro_aws_key"],
+            s3_secret_key=d["pro_aws_secret"],
+            s3_provider="Amazon AWS",
+            s3_object_lock=True,
+            s3_object_lock_mode="COMPLIANCE",
+            s3_object_lock_days=days,
+            s3_object_lock_full_extra_days=30,
+        )
+
+        mirrors: list[StorageConfig] = []
+        if d.get("pro_mirror_local") and "mirror1" in d:
+            try:
+                mirror_config = self._build_storage_config_from_key("mirror1")
+                mirrors.append(mirror_config)
+            except Exception:
+                pass  # Mirror config incomplete, skip
+
+        encryption = EncryptionConfig()
+        if d.get("pro_encrypt") and d.get("pro_encrypt_password"):
+            encryption = EncryptionConfig(
+                enabled=True,
+                stored_password=d["pro_encrypt_password"],
+            )
+
+        profile = BackupProfile(
+            name=d["name"],
+            source_paths=d["sources"],
+            backup_type=BackupType.DIFFERENTIAL,
+            storage=storage,
+            mirror_destinations=mirrors,
             schedule=ScheduleConfig(
                 enabled=True,
                 frequency=ScheduleFrequency.DAILY,
                 time="10:00",
             ),
+            encryption=encryption,
+            encrypt_primary=encryption.enabled,
+            retention=RetentionConfig(
+                policy=RetentionPolicy.GFS,
+                gfs_enabled=False,
+            ),
+            full_backup_every=30,
+            object_lock_enabled=True,
         )
 
         self.result_profile = profile

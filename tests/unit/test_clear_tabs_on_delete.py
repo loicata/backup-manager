@@ -67,7 +67,7 @@ def _make_s3_profile() -> BackupProfile:
         s3_region="eu-west-1",
         s3_access_key="OLDACCESSKEY",
         s3_secret_key="OLDSECRETKEY",
-        s3_provider="aws",
+        s3_provider="Amazon AWS",
     )
     return profile
 

@@ -44,7 +44,7 @@ class TestProviderRegions:
 
     def test_aws_default_region_is_first(self):
         """AWS default region should be first in the list."""
-        regions = PROVIDER_REGIONS["aws"]
+        regions = PROVIDER_REGIONS["Amazon AWS"]
         assert len(regions) > 0
         assert regions[0] == "eu-west-1"
 

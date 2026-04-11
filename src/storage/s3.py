@@ -14,7 +14,7 @@ from src.storage.base import StorageBackend, long_path_mkdir, long_path_str, wit
 logger = logging.getLogger(__name__)
 
 PROVIDER_ENDPOINTS = {
-    "aws": None,  # Default AWS endpoint
+    "Amazon AWS": None,  # Default AWS endpoint
     "wasabi": "https://s3.{region}.wasabisys.com",
     "ovh": "https://s3.{region}.cloud.ovh.net",
     "scaleway": "https://s3.{region}.scw.cloud",
@@ -26,7 +26,7 @@ PROVIDER_ENDPOINTS = {
 
 # Regions per provider — first entry is the default for new configurations
 PROVIDER_REGIONS: dict[str, list[str]] = {
-    "aws": [
+    "Amazon AWS": [
         "eu-west-1",
         "eu-west-2",
         "eu-west-3",
@@ -83,7 +83,7 @@ class S3Storage(StorageBackend):
         access_key: str = "",
         secret_key: str = "",
         endpoint_url: str = "",
-        provider: str = "aws",
+        provider: str = "Amazon AWS",
     ):
         super().__init__()
         self._bucket = bucket
@@ -93,6 +93,30 @@ class S3Storage(StorageBackend):
         self._secret_key = secret_key
         self._endpoint_url = endpoint_url or self._resolve_endpoint(provider, region)
         self._provider = provider
+        self._retain_until = None  # Object Lock retain-until-date (datetime)
+
+    def set_retain_until(self, retain_until) -> None:
+        """Set the Object Lock retain-until-date for subsequent uploads.
+
+        Args:
+            retain_until: datetime (UTC) when the lock expires, or None
+                to disable per-object retention.
+        """
+        self._retain_until = retain_until
+
+    def _build_lock_extra_args(self) -> dict:
+        """Build ExtraArgs dict for Object Lock uploads.
+
+        Returns:
+            Dict with ObjectLockMode and ObjectLockRetainUntilDate if
+            retain_until is set, empty dict otherwise.
+        """
+        if self._retain_until is None:
+            return {}
+        return {
+            "ObjectLockMode": "COMPLIANCE",
+            "ObjectLockRetainUntilDate": self._retain_until,
+        }
 
     def _resolve_endpoint(self, provider: str, region: str) -> str:
         """Resolve endpoint URL for a provider."""
@@ -149,18 +173,29 @@ class S3Storage(StorageBackend):
     def _upload_one(self, client, local_path: Path, key: str) -> None:
         """Upload a single file to S3 with optional throttling."""
         file_size = local_path.stat().st_size
+        extra_args = self._build_lock_extra_args()
 
         if self._bandwidth_limit_kbps > 0 or self._progress_callback:
             with open(local_path, "rb") as f:
                 reader = self._get_throttled_reader(f)
-                client.upload_fileobj(
-                    reader,
-                    self._bucket,
-                    key,
-                    Callback=self._make_progress_cb(file_size),
-                )
+                kwargs: dict = {
+                    "Fileobj": reader,
+                    "Bucket": self._bucket,
+                    "Key": key,
+                    "Callback": self._make_progress_cb(file_size),
+                }
+                if extra_args:
+                    kwargs["ExtraArgs"] = extra_args
+                client.upload_fileobj(**kwargs)
         else:
-            client.upload_file(str(local_path), self._bucket, key)
+            kwargs_file: dict = {
+                "Filename": str(local_path),
+                "Bucket": self._bucket,
+                "Key": key,
+            }
+            if extra_args:
+                kwargs_file["ExtraArgs"] = extra_args
+            client.upload_file(**kwargs_file)
 
     @with_retry(max_retries=3, base_delay=2.0)
     def upload_file(self, fileobj: BinaryIO, remote_path: str, size: int = 0) -> None:
@@ -168,12 +203,16 @@ class S3Storage(StorageBackend):
         client = self._get_client()
         key = self._s3_key(remote_path)
         reader = self._get_throttled_reader(fileobj)
-        client.upload_fileobj(
-            reader,
-            self._bucket,
-            key,
-            Callback=self._make_progress_cb(size),
-        )
+        extra_args = self._build_lock_extra_args()
+        kwargs: dict = {
+            "Fileobj": reader,
+            "Bucket": self._bucket,
+            "Key": key,
+            "Callback": self._make_progress_cb(size),
+        }
+        if extra_args:
+            kwargs["ExtraArgs"] = extra_args
+        client.upload_fileobj(**kwargs)
 
     def list_backups(self) -> list[dict]:
         """List top-level backups in the S3 prefix."""

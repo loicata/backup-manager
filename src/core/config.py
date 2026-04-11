@@ -77,7 +77,13 @@ class StorageConfig:
     s3_access_key: str = ""
     s3_secret_key: str = ""
     s3_endpoint_url: str = ""
-    s3_provider: str = "aws"
+    s3_provider: str = "Amazon AWS"
+
+    # S3 Object Lock (Compliance mode — anti-ransomware)
+    s3_object_lock: bool = False
+    s3_object_lock_mode: str = "COMPLIANCE"
+    s3_object_lock_days: int = 30  # Lock duration for differential backups
+    s3_object_lock_full_extra_days: int = 30  # Extra lock days for full backups
 
     # Mirror-specific
     mirror_encrypt: bool = False
@@ -161,6 +167,7 @@ class RetentionConfig:
     gfs_daily: int = 7
     gfs_weekly: int = 3
     gfs_monthly: int = 5
+    gfs_enabled: bool = True  # False when S3 Object Lock manages retention
 
 
 @dataclass
@@ -233,6 +240,7 @@ class BackupProfile:
     last_backup_completed: bool = True  # False while any backup is in progress
     incomplete_backup_name: str = ""  # Name of interrupted backup to clean up
     incomplete_backup_was_full: bool = False  # True if the interrupted backup was full
+    object_lock_enabled: bool = False  # True for professional S3 Object Lock profiles
 
 
 # --- Profile fingerprint ---

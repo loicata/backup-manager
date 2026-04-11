@@ -276,9 +276,9 @@ class RecoveryTab(ScrollableTab):
         self._retrieve_config_frames["s3"] = frame
 
         ttk.Label(frame, text="Provider:").pack(anchor="w")
-        self._ret_s3_provider_var = tk.StringVar(value="aws")
+        self._ret_s3_provider_var = tk.StringVar(value="Amazon AWS")
         providers = [
-            "aws",
+            "Amazon AWS",
             "scaleway",
             "wasabi",
             "ovh",
@@ -410,7 +410,7 @@ class RecoveryTab(ScrollableTab):
                 val = getattr(config, key, "")
                 var.set(str(val) if val else "")
             # Set provider last and force Combobox sync.
-            provider = config.s3_provider or "aws"
+            provider = config.s3_provider or "Amazon AWS"
             self._ret_s3_provider_var.set(provider)
             self._ret_s3_provider_cb.set(provider)
 

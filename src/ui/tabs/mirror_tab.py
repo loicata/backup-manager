@@ -154,13 +154,13 @@ class MirrorTab(ScrollableTab):
         f = ttk.Frame(self._config_container)
         self._config_frames["s3"] = f
         self._s3_vars = {}
-        self.s3_provider_var = tk.StringVar(value="aws")
+        self.s3_provider_var = tk.StringVar(value="Amazon AWS")
         ttk.Label(f, text="Provider:").pack(anchor="w")
         ttk.Combobox(
             f,
             textvariable=self.s3_provider_var,
             values=[
-                "aws",
+                "Amazon AWS",
                 "scaleway",
                 "wasabi",
                 "ovh",
@@ -173,7 +173,7 @@ class MirrorTab(ScrollableTab):
         ).pack(fill="x")
 
         # Region — Combobox with provider-specific values
-        default_regions = PROVIDER_REGIONS.get("aws", [])
+        default_regions = PROVIDER_REGIONS.get("Amazon AWS", [])
         ttk.Label(f, text="Region:").pack(anchor="w")
         region_var = tk.StringVar(value=default_regions[0] if default_regions else "")
         self._s3_vars["s3_region"] = region_var
@@ -336,7 +336,7 @@ class MirrorTab(ScrollableTab):
             for key, var in self._sftp_vars.items():
                 var.set("22" if key == "sftp_port" else "")
         if hasattr(self, "_s3_vars"):
-            self.s3_provider_var.set("aws")
+            self.s3_provider_var.set("Amazon AWS")
             for var in self._s3_vars.values():
                 var.set("")
 
@@ -356,7 +356,7 @@ class MirrorTab(ScrollableTab):
                 for key, var in self._sftp_vars.items():
                     var.set(str(getattr(m, key, "")))
             elif m.storage_type == StorageType.S3 and hasattr(self, "_s3_vars"):
-                self.s3_provider_var.set(getattr(m, "s3_provider", "aws"))
+                self.s3_provider_var.set(getattr(m, "s3_provider", "Amazon AWS"))
                 for key, var in self._s3_vars.items():
                     var.set(str(getattr(m, key, "")))
                 saved_region = str(getattr(m, "s3_region", ""))

@@ -108,7 +108,7 @@ class SetupWizard:
         """Build the wizard window, header, progress bar, content area, and footer."""
         self._win = tk.Toplevel(self._parent) if self._parent else tk.Tk()
         self._win.title("Backup Manager \u2014 Setup Wizard")
-        win_w, win_h = 1000, 700
+        win_w, win_h = 1000, 780
         screen_w = self._win.winfo_screenwidth()
         screen_h = self._win.winfo_screenheight()
         x = (screen_w - win_w) // 2
@@ -467,7 +467,7 @@ class SetupWizard:
         ).pack()
         ttk.Label(
             pro,
-            text="Backup to Amazon AWS S3\nserver with Object Lock.\n\n" "Your data is IMMUTABLE.",
+            text="Backup to Amazon AWS S3\nserver with Object Lock.\n\n" "Your data is IMMUTABLE\nand impossible to delete.",
             justify="center",
         ).pack(pady=Spacing.MEDIUM)
 

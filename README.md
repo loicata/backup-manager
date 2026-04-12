@@ -3,28 +3,82 @@
 [![CI](https://github.com/loicata/backup-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/loicata/backup-manager/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-837%20passed-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/coverage-84%25-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-971%20passed-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-83%25-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
-A production-grade, security-focused Windows backup application built for personal and small-business use. Multi-destination backups with end-to-end AES-256-GCM encryption, automated scheduling, and Grandfather-Father-Son retention.
-
-| Profile configuration | Backup in progress |
-|:---------------------:|:------------------:|
-| ![General tab](assets/screenshots/general_tab.png) | ![Run backup](assets/screenshots/run_backup.png) |
+A production-grade, security-focused Windows backup application with **anti-ransomware protection**. Designed for personal and small-business use, it combines multi-destination backups, end-to-end AES-256-GCM encryption, automated scheduling, and **Amazon AWS S3 Object Lock** to make your data truly indestructible.
 
 ---
 
-## Highlights
+## Two Modes, One Application
+
+Backup Manager offers two distinct operating modes to match your security needs:
+
+| Setup Wizard | Anti-Ransomware Backup Complete |
+|:------------:|:-------------------------------:|
+| ![Wizard](assets/screenshots/wizard_mode_choice.png) | ![Anti-Ransomware](assets/screenshots/anti_ransomware_backup.png) |
+
+### Classic Mode
+
+Traditional backup to external drives, network shares, SSH servers, or S3 cloud storage. Simple, fast, and flexible. Full and differential backups with GFS rotation.
+
+### Anti-Ransomware Mode (High Security)
+
+**Your data becomes IMMUTABLE and impossible to delete.**
+
+Backups are stored on Amazon AWS S3 with **Object Lock Compliance** technology. Once uploaded, no one can delete or modify your data during the retention period you choose - not you, not a hacker, not even Amazon.
+
+This is the same technology used by banks, hospitals, and governments to protect critical data against ransomware, insider threats, and human error.
+
+---
+
+## Why Anti-Ransomware Protection Matters
+
+Traditional backups are vulnerable:
+
+- **External drives** connected to your computer are encrypted by ransomware alongside your files
+- **Network shares** accessible from your machine are compromised in the same attack
+- **Sophisticated ransomware** stays dormant for months before activating, contaminating your backups before you detect the infection
+
+**Backup Manager's Anti-Ransomware mode solves this** by making backups physically impossible to delete or modify for the duration you choose. Even if an attacker gains complete control of your computer and your Amazon AWS account, your data remains untouchable.
+
+### How It Works
+
+1. **Monthly full backups** — A complete copy of all your data, locked for the entire retention period plus 30 days
+2. **Daily differential backups** — Only modified files, locked for 30 days
+3. **Automatic cleanup** — Amazon AWS S3 Lifecycle rules remove expired backups automatically
+4. **No manual intervention** — Backup Manager runs silently in the background
+
+### Retention Options
+
+| Duration | Use Case |
+|----------|----------|
+| **1 month** | Testing and evaluation |
+| **4 months** | Protection against sophisticated ransomware (standard dwell time: 3 months) |
+| **13 months** | Annual protection with margin |
+| **7 years** | Regulatory compliance |
+| **13 years** | Long-term archival |
+| **Custom** | 2 to 20 years |
+
+### Cost Transparency
+
+The 11-step guided wizard includes a **detailed cost simulation** based on Amazon AWS S3 Glacier Instant Retrieval pricing. All costs are displayed upfront - no hidden fees, no surprises. Backup Manager provides no guarantee and cannot be held responsible for Amazon AWS costs.
+
+---
+
+## Key Features
 
 | | Feature | Details |
 |---|---------|---------|
+| **S3 Object Lock** | **Anti-Ransomware** | Compliance mode - data is IMMUTABLE during retention period |
 | **4** | **Storage backends** | Local/USB, Network (UNC), SFTP (SSH), S3-compatible cloud |
 | **+2** | **Mirror copies** | Independent replication with per-destination encryption |
 | **AES-256** | **Streaming encryption** | GCM authenticated, no plaintext on disk (`.tar.wbenc`) |
 | **GFS** | **Retention rotation** | Grandfather-Father-Son (daily/weekly/monthly) |
 | **SHA-256** | **Integrity verification** | Pre-backup manifest + post-write check + periodic audits |
 | **DPAPI** | **Password protection** | Windows user-bound, never in plaintext |
+| **Adaptive** | **Bandwidth management** | Auto-detect link speed, configurable throttling (25/50/75/100%) |
 
 ---
 
@@ -34,17 +88,29 @@ A production-grade, security-focused Windows backup application built for person
 
 Download **[BackupManager.msi](https://github.com/loicata/backup-manager/releases/latest)** and run it. That's it.
 
-### First launch
+### First Launch
 
-A 3-step wizard creates your first profile:
+The setup wizard guides you through creating your first backup profile:
 
-1. **Name** your backup
-2. **Pick source folders** to protect
-3. **Choose a destination** (USB, network, SFTP, or S3)
+**Classic mode** (3 steps):
+1. Name your backup
+2. Pick source folders to protect
+3. Choose a destination (USB, network, SFTP, or S3)
 
-Click **Finish** — daily backups are enabled by default.
+**Anti-Ransomware mode** (11 steps):
+1. Understand the protection
+2. Choose retention duration
+3. Learn the backup strategy (monthly full + daily differential)
+4. Review cost simulation
+5. Read important information
+6. Create your Amazon AWS account (guided step-by-step)
+7. Name your backup
+8. Pick source folders
+9. Optional encryption
+10. Optional local mirror
+11. Automatic S3 bucket configuration with Object Lock
 
-### From source
+### From Source
 
 ```bash
 git clone https://github.com/loicata/backup-manager.git
@@ -55,12 +121,13 @@ python -m src
 
 ---
 
-## Features
+## Features in Detail
 
-### Multi-profile management
+### Multi-Profile Management
 
 - Unlimited profiles with independent sources, destinations, schedule, encryption, and retention.
-- **Active / Inactive** profiles — inactive profiles are paused but preserved.
+- **Classic / Anti-Ransomware mode selector** in the General tab - profiles are filtered by mode.
+- **Active / Inactive** profiles - inactive profiles are paused but preserved.
 - Reorder with Up/Down controls; switch in a single click.
 - Configuration validated before every backup with clear error messages.
 
@@ -68,78 +135,69 @@ python -m src
 
 | Destination | Description |
 |-------------|-------------|
-| **Local / USB** | Any local drive, external HDD, or removable USB storage |
+| **Local / USB** | Any local drive, external HDD, or removable USB storage. Auto-detection by hardware serial for drive letter changes. |
 | **Network (UNC)** | Windows shared folders (`\\server\share`) with username/password |
-| **SFTP (SSH)** | Remote servers with password or private key (Ed25519, ECDSA, RSA) |
-| **S3 Cloud** | AWS, Scaleway, Wasabi, OVH, DigitalOcean, Cloudflare R2, Backblaze B2, MinIO |
+| **SFTP (SSH)** | Remote servers with password or private key (Ed25519, ECDSA, RSA). Fast tar streaming via exec channel. |
+| **Amazon AWS S3** | With optional Object Lock for anti-ransomware protection |
+| **S3-compatible** | Scaleway, Wasabi, OVH, DigitalOcean, Cloudflare R2, Backblaze B2, MinIO |
 
-### Mirrors (multi-destination replication)
+### Mirrors (Multi-Destination Replication)
 
 - Up to **2 independent mirror copies** in addition to the primary destination.
-- Each mirror can use a **different storage type** and **independent encryption settings** (e.g. primary on USB unencrypted, Mirror 1 on SFTP encrypted, Mirror 2 on S3 encrypted).
-- Mirrors execute automatically after each successful primary write.
-- Mirror failures are reported independently — the primary backup is never affected.
+- Each mirror can use a **different storage type** and **independent encryption settings**.
+- In Anti-Ransomware mode, mirror failures are **warnings** (not errors) - the primary S3 backup is always safe.
 - GFS rotation is applied independently on each destination.
 
-### Backup modes
+### Backup Modes
 
 | Mode | Description |
 |------|-------------|
 | **Full** | Complete copy of all selected files. Self-contained restore point. |
 | **Differential** | Only files changed since last full backup. SHA-256 manifest comparison. Configurable full backup cycle. |
 
-### Retention (GFS rotation)
+### Retention
 
-Grandfather-Father-Son rotation keeps backups organized and storage predictable:
+**Classic mode:** Grandfather-Father-Son (GFS) rotation with configurable daily, weekly, and monthly counts. Rotation applied independently on each destination.
 
-- **Daily:** number of daily backups to keep beyond today.
-- **Weekly:** number of weekly full backups to keep beyond the current week.
-- **Monthly:** number of monthly full backups to keep beyond the current month.
-
-Rotation is applied independently on each destination (primary + mirrors).
+**Anti-Ransomware mode:** Amazon AWS Object Lock Compliance with S3 Lifecycle automatic cleanup. No rotation needed - data is physically locked until expiration.
 
 ### Scheduling & Reliability
 
-- **Manual, Hourly, Daily, Weekly, or Monthly** via Windows Task Scheduler.
+- **Manual, Hourly, Daily, Weekly, or Monthly** scheduling.
 - **Auto-start at logon** for unattended operation.
 - **Retry on failure** with progressive delays: 2, 10, 30, 90, and 240 minutes.
-- **Pre-backup target check** — all destinations verified before backup starts.
+- **Pre-backup target check** - all destinations verified before backup starts. Option to **continue without mirror** if primary storage is available.
 - **System tray** mode for silent background operation.
-- **Missed backup detection** — runs automatically on next startup.
-- **Schedule journal** — all backups logged with profile, status, and details.
+- **Missed backup detection** - runs automatically on next startup.
+- **Adaptive bandwidth test** - 16 MB probe for slow links, 128 MB full test for fast connections. Prevents network saturation on slow connections like Starlink.
 
 ### Recovery
 
-- **Local restore** — browse a backup folder or select an encrypted `.tar.wbenc` file.
-- **Remote retrieve** — download from SFTP or S3 directly from the Recovery tab.
-- **Automatic decryption** — encrypted archives decrypted on-the-fly.
-- **Long path support** — Windows 260-character limit handled transparently.
+- **Local restore** - browse a backup folder or select an encrypted `.tar.wbenc` file.
+- **Remote retrieve** - download from SFTP or S3 directly from the Recovery tab.
+- **Automatic decryption** - encrypted archives decrypted on-the-fly.
+- **Long path support** - Windows 260-character limit handled transparently.
 
-### Periodic Integrity Verification
-
-- **On-demand** — verify all backups across all destinations from the Verify tab.
-- **Scheduled** — automatic periodic verification (default: every 7 days).
-- **Email reports** — structured HTML table with results per destination and backup.
-
-### Email notifications
+### Email Notifications
 
 - SMTP alerts on backup **success** or **failure**.
 - HTML-formatted reports with file count, duration, destination, errors.
 - Provider presets for Gmail, Outlook, Yahoo.
 
-### Main interface
+### Main Interface
 
 | Tab | Description |
 |-----|-------------|
-| **Run** | Launch backup, view real-time progress and logs |
-| **General** | Profile name, backup type, source folders, exclusion patterns |
+| **Run** | Launch backup, view real-time progress, bandwidth measurement, and detailed logs |
+| **General** | Mode selector, profile name, backup type, source folders, exclusion patterns, bandwidth |
 | **Storage** | Primary destination type and connection settings |
-| **Mirror 1 / 2** | Optional mirror destinations |
+| **Mirror 1 / 2** | Optional mirror destinations with independent storage and encryption |
 | **Encryption** | AES-256-GCM toggle per destination with password management |
-| **Schedule** | Frequency, time, auto-retry, periodic verification, journal |
-| **Retention** | GFS rotation policy (daily, weekly, monthly counts) |
+| **Schedule** | Frequency, time, auto-retry, periodic verification |
+| **Protection** | Object Lock status, retention duration, region, bucket (Anti-Ransomware mode) |
+| **Retention** | GFS rotation policy - daily, weekly, monthly counts (Classic mode) |
 | **Email** | SMTP settings with provider presets and test button |
-| **Recovery** | Restore from local or retrieve from remote |
+| **Recovery** | Restore from local or retrieve from remote (SFTP, S3) |
 | **Verify** | On-demand integrity verification with real-time results |
 | **History** | Browse past backup logs |
 
@@ -147,9 +205,19 @@ Rotation is applied independently on each destination (primary + mirrors).
 
 ## Security Architecture
 
-Defense-in-depth model with multiple independent security layers. Even if an attacker gains access to the backup storage, the data remains unreadable without the encryption password.
+Defense-in-depth model with multiple independent security layers.
 
-### Encryption at rest — `.tar.wbenc` streaming format
+### Anti-Ransomware Protection (Object Lock)
+
+| Layer | Mechanism |
+|-------|-----------|
+| **Immutability** | S3 Object Lock Compliance - no deletion possible during retention |
+| **Full backups** | Locked for retention period + 30 days (covers all dependent differentials) |
+| **Differential backups** | Locked for retention period |
+| **Cleanup** | S3 Lifecycle auto-deletes after lock expiration |
+| **No app deletion** | Backup Manager never attempts to delete Object Lock data |
+
+### Encryption at Rest - `.tar.wbenc` Streaming Format
 
 No plaintext data is ever written to disk:
 
@@ -157,27 +225,21 @@ No plaintext data is ever written to disk:
 .tar.wbenc file layout:
 
 Header (37 bytes):
-  [4B magic: "WBEC"]        — file format identifier
-  [1B version: 0x01]        — format version
-  [16B salt]                 — random salt for key derivation
-  [16B reserved]             — future use (zeroed)
+  [4B magic: "WBEC"]        - file format identifier
+  [1B version: 0x01]        - format version
+  [16B salt]                 - random salt for key derivation
+  [16B reserved]             - future use (zeroed)
 
 Body (repeating chunks):
-  [4B plaintext_length]     — big-endian chunk size
-  [12B nonce]                — sequential counter (never reused)
-  [ciphertext + 16B GCM tag] — authenticated encrypted data
+  [4B plaintext_length]     - big-endian chunk size
+  [12B nonce]                - sequential counter (never reused)
+  [ciphertext + 16B GCM tag] - authenticated encrypted data
 
 EOF sentinel:
-  [4B zeros]                 — marks end of stream
+  [4B zeros]                 - marks end of stream
 ```
 
-1. Source files are streamed into a tar archive in memory.
-2. The tar stream is split into 1 MB chunks.
-3. Each chunk is encrypted independently with AES-256-GCM before writing to disk.
-4. The integrity manifest (`.wbverify`) is embedded inside the archive.
-5. The original plaintext files are never written to the destination.
-
-### Cipher and key derivation
+### Cipher and Key Derivation
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
@@ -189,43 +251,18 @@ EOF sentinel:
 | **Iterations** | 600,000 | OWASP 2024 recommendation |
 | **Salt** | 16 random bytes | `os.urandom()`, prevents rainbow tables |
 
-### Password storage
+### Password Storage
 
 | Platform | Method | Details |
 |----------|--------|---------|
 | **Windows** | DPAPI (`CryptProtectData`) | Tied to current Windows user account |
 | **Fallback** | AES-256-GCM with machine key | DPAPI-protected 32-byte machine key |
 
-- Minimum password length: **16 characters**.
-- Passwords **never logged**, **never in plaintext files**, **never in error messages**.
-
-### Secure memory handling
-
-- Passwords wrapped in `SecurePassword` context manager during pipeline execution.
-- `bytearray` buffers explicitly **zeroed after use**.
-- Derived keys zeroed immediately after encryption/decryption.
-
-### Integrity verification pipeline
-
-1. **Pre-backup manifest** — SHA-256 hash of every source file.
-2. **Post-write verification** — re-read and re-hash against manifest.
-3. **Remote verification** — SFTP: server-side `sha256sum`; S3: ETag comparison.
-4. **GCM authentication** — per-chunk tamper detection.
-5. **Zero-tolerance** — any mismatch marks the backup as **failed**.
-
-### Transport security
-
-| Transport | Protection |
-|-----------|------------|
-| **SFTP** | SSH encrypted channel, host key verification (TOFU) |
-| **S3** | HTTPS/TLS, AWS Signature V4 |
-| **Network** | Windows SMB, DPAPI credentials |
-| **Local** | Direct filesystem access |
-
-### Security summary
+### Security Summary
 
 | Layer | Mechanism |
 |-------|-----------|
+| **Anti-ransomware** | S3 Object Lock Compliance (immutable backups) |
 | **Data at rest** | AES-256-GCM streaming (`.tar.wbenc`) |
 | **Key derivation** | PBKDF2-HMAC-SHA256, 600K iterations, random salt |
 | **Password storage** | Windows DPAPI (user-bound) + AES-256-GCM fallback |
@@ -250,9 +287,9 @@ pytest --cov=src --cov-report=term-missing
 pytest tests/unit/test_hashing.py -v
 ```
 
-**Current status:** 837 tests | 84% coverage | 0 failures
+**Current status:** 971 tests | 83% coverage | 0 failures
 
-CI pipeline: GitHub Actions on every push — Black formatting, Ruff linting (Ubuntu), full test suite with coverage enforcement (Windows, Python 3.12 + 3.13).
+CI pipeline: GitHub Actions on every push - Black formatting, Ruff linting (Ubuntu), full test suite with coverage enforcement (Windows, Python 3.12 + 3.13).
 
 ---
 
@@ -263,7 +300,7 @@ CI pipeline: GitHub Actions on every push — Black formatting, Ruff linting (Ub
 - Python 3.11+ (tested on 3.12 and 3.13)
 - [WiX Toolset v3.14](https://wixtoolset.org/) (for MSI packaging only)
 
-### Build the executable
+### Build the Executable
 
 ```bash
 python build_pyinstaller.py
@@ -271,7 +308,7 @@ python build_pyinstaller.py
 
 Output: `dist/BackupManager/BackupManager.exe`
 
-### Build the MSI installer
+### Build the MSI Installer
 
 ```bash
 python build_msi.py
@@ -286,30 +323,40 @@ Output: `dist/BackupManager-x.y.z.msi`
 ```
 backup-manager/
 ├── src/
-│   ├── core/                     # Backup engine, scheduler, config, pipeline
-│   │   ├── backup_engine.py         # Main orchestrator (11-phase pipeline)
-│   │   ├── config.py                # Profile dataclasses & JSON persistence
-│   │   ├── events.py                # Thread-safe event bus for UI updates
-│   │   ├── integrity_verifier.py    # Periodic backup integrity verification
-│   │   ├── scheduler.py             # Windows Task Scheduler + in-app scheduler
-│   │   └── phases/                  # Pipeline phases
-│   │       ├── collector.py            # File collection & exclusion filtering
-│   │       ├── filter.py               # Differential change detection
-│   │       ├── encryptor.py            # Streaming tar encryption
-│   │       ├── writer.py               # Write dispatcher (local/remote)
-│   │       ├── verifier.py             # Post-write integrity verification
-│   │       ├── mirror.py               # Mirror replication orchestrator
-│   │       └── rotator.py              # GFS retention rotation
-│   ├── storage/                  # Storage backends
-│   │   ├── local.py, network.py, sftp.py, s3.py
-│   │   └── base.py                  # Abstract backend + retry decorator
-│   ├── security/                 # Encryption, DPAPI, secure memory
-│   ├── notifications/            # SMTP email with HTML reports
-│   └── ui/                       # Tkinter GUI (Sun Valley theme)
-├── tests/                        # 837 tests (unit + integration)
-├── CHANGELOG.md                  # Release history
-├── requirements.txt              # Runtime dependencies
-└── pyproject.toml                # Project metadata & tool config
+│   ├── core/                        # Backup engine, scheduler, config, pipeline
+│   │   ├── backup_engine.py            # Main orchestrator (11-phase pipeline)
+│   │   ├── config.py                   # Profile dataclasses & JSON persistence
+│   │   ├── events.py                   # Thread-safe event bus for UI updates
+│   │   ├── bandwidth_tester.py         # Adaptive bandwidth measurement
+│   │   ├── integrity_verifier.py       # Periodic backup integrity verification
+│   │   ├── scheduler.py                # In-app scheduler + auto-start
+│   │   └── phases/                     # Pipeline phases
+│   │       ├── collector.py               # File collection & exclusion filtering
+│   │       ├── filter.py                  # Differential change detection
+│   │       ├── encryptor.py               # Streaming tar encryption
+│   │       ├── writer.py                  # Write dispatcher (local/remote)
+│   │       ├── verifier.py                # Post-write integrity verification
+│   │       ├── mirror.py                  # Mirror replication orchestrator
+│   │       └── rotator.py                # GFS retention rotation
+│   ├── storage/                     # Storage backends
+│   │   ├── local.py                    # Local/USB with drive serial detection
+│   │   ├── network.py                  # SMB/CIFS network shares
+│   │   ├── sftp.py                     # SSH with fast tar streaming
+│   │   ├── s3.py                       # S3 + Object Lock support
+│   │   ├── s3_setup.py                 # Object Lock provisioning & cost simulation
+│   │   └── base.py                     # Abstract backend + retry + throttling
+│   ├── security/                    # Encryption, DPAPI, secure memory
+│   ├── notifications/               # SMTP email with HTML reports
+│   └── ui/                          # Tkinter GUI (Sun Valley theme)
+│       ├── wizard.py                   # 11-step anti-ransomware setup wizard
+│       ├── app.py                      # Main window with mode selector
+│       └── tabs/                       # Tab implementations
+│           ├── protection_tab.py          # Object Lock status (Anti-Ransomware)
+│           └── ...                        # General, Storage, Mirror, etc.
+├── tests/                           # 971 tests (unit + integration)
+├── CHANGELOG.md                     # Release history
+├── requirements.txt                 # Runtime dependencies
+└── pyproject.toml                   # Project metadata & tool config
 ```
 
 ---
@@ -319,7 +366,7 @@ backup-manager/
 | Requirement | Version |
 |-------------|---------|
 | **OS** | Windows 10 / 11 |
-| **Python** | 3.11+ (development only — end users install the MSI) |
+| **Python** | 3.11+ (development only - end users install the MSI) |
 | **cryptography** | >= 43.0.0 |
 | **paramiko** | >= 3.0.0 |
 | **boto3** | >= 1.35.0 |
@@ -331,7 +378,7 @@ backup-manager/
 
 ## License
 
-[GNU General Public License v3.0](LICENSE) — Copyright (c) 2026 Loic Ader [loicata.com](https://loicata.com)
+[GNU General Public License v3.0](LICENSE) - Copyright (c) 2026 Loic Ader [loicata.com](https://loicata.com)
 
 ---
 

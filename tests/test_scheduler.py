@@ -38,6 +38,21 @@ class TestScheduleJournal:
         assert entries[0]["status"] == "success"
         assert entries[0]["files_count"] == 42
 
+    def test_update_last_overwrites_timestamp(self, tmp_path):
+        """update_last with timestamp= overwrites the original start time."""
+        journal = ScheduleJournal(tmp_path)
+        journal.add(
+            ScheduleLogEntry(
+                profile_id="ts",
+                status="started",
+                timestamp="2026-01-01T00:00:00",
+            )
+        )
+        journal.update_last(status="success", timestamp="2026-01-01T02:30:00")
+        entries = journal.get_entries()
+        assert entries[0]["timestamp"] == "2026-01-01T02:30:00"
+        assert entries[0]["status"] == "success"
+
     def test_filter_by_profile(self, tmp_path):
         journal = ScheduleJournal(tmp_path)
         journal.add(ScheduleLogEntry(profile_id="a", profile_name="A"))

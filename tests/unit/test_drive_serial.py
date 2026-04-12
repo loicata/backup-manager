@@ -36,6 +36,18 @@ class TestGetHardwareSerial:
 
     @patch("src.storage.drive_serial.subprocess.run")
     @patch("src.storage.drive_serial.sys")
+    def test_subprocess_uses_create_no_window(self, mock_sys, mock_run):
+        """PowerShell must run hidden to avoid CMD window flash."""
+        import subprocess
+
+        mock_sys.platform = "win32"
+        mock_run.return_value = MagicMock(returncode=0, stdout="SERIAL\n")
+        get_hardware_serial("G")
+        _, kwargs = mock_run.call_args
+        assert kwargs.get("creationflags") == subprocess.CREATE_NO_WINDOW
+
+    @patch("src.storage.drive_serial.subprocess.run")
+    @patch("src.storage.drive_serial.sys")
     def test_returns_none_on_powershell_error(self, mock_sys, mock_run):
         mock_sys.platform = "win32"
         mock_run.return_value = MagicMock(returncode=1, stdout="")

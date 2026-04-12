@@ -878,7 +878,13 @@ class BackupEngine:
 
         # Previous backup was interrupted — clean up and decide
         if not ctx.profile.last_backup_completed:
-            self._cleanup_incomplete_backup(ctx)
+            if ctx.profile.object_lock_enabled:
+                self._log(
+                    "Previous backup was incomplete — skipping cleanup "
+                    "(Object Lock prevents deletion)"
+                )
+            else:
+                self._cleanup_incomplete_backup(ctx)
             if ctx.profile.incomplete_backup_was_full:
                 # Interrupted full → must redo a full backup
                 ctx.forced_full = True
@@ -1009,6 +1015,7 @@ class BackupEngine:
                     apply_throttle=lambda backend, label: (
                         self._apply_bandwidth_throttle(backend, ctx.profile, label)
                     ),
+                    allow_partial=ctx.profile.object_lock_enabled,
                 )
             finally:
                 if secure_pw:

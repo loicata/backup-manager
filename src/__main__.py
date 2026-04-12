@@ -190,7 +190,7 @@ def main():
     try:
         import tkinter as tk
 
-        from src.core.config import ConfigManager
+        from src.core.config import BackupProfile, ConfigManager
         from src.security.integrity_check import verify_integrity
         from src.ui.app import BackupManagerApp
         from src.ui.wizard import SetupWizard
@@ -210,6 +210,20 @@ def main():
         logger.info("Found %d profiles", len(profiles))
 
         from_wizard = False
+
+        # Auto-detect mode from existing profiles if settings don't match
+        if profiles:
+            app_settings = config_mgr.load_app_settings()
+            saved_mode = app_settings.get("mode", "classic")
+            is_anti_ran = saved_mode == "anti-ransomware"
+            mode_profiles = [p for p in profiles if p.object_lock_enabled == is_anti_ran]
+            if not mode_profiles:
+                # No profiles in saved mode — switch to the other mode
+                new_mode = "anti-ransomware" if not is_anti_ran else "classic"
+                app_settings["mode"] = new_mode
+                config_mgr.save_app_settings(app_settings)
+                logger.info("Auto-switched mode to %s (no profiles in %s)", new_mode, saved_mode)
+
         if not profiles:
             # Show setup wizard — keep root hidden but move it
             # off-screen so the transient wizard Toplevel is visible.
@@ -220,9 +234,16 @@ def main():
             if profile:
                 config_mgr.save_profile(profile)
                 logger.info("Wizard completed — profile saved")
+                # Set app mode to match the profile type
+                mode = "anti-ransomware" if profile.object_lock_enabled else "classic"
+                settings = config_mgr.load_app_settings()
+                settings["mode"] = mode
+                config_mgr.save_app_settings(settings)
                 from_wizard = True
             else:
-                logger.info("Wizard cancelled — launching app without profile")
+                logger.info("Wizard cancelled — exiting")
+                root.destroy()
+                return
 
         # Enable auto-start on first frozen launch if not already configured
         if getattr(sys, "frozen", False):

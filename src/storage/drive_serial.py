@@ -13,6 +13,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Hide the console window when spawning PowerShell on Windows
+_SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 logger = logging.getLogger(__name__)
 
 _PS_TIMEOUT = 5  # seconds
@@ -51,6 +54,7 @@ def get_hardware_serial(drive_letter: str) -> str | None:
             capture_output=True,
             text=True,
             timeout=_PS_TIMEOUT,
+            creationflags=_SUBPROCESS_FLAGS,
         )
         serial = result.stdout.strip()
         if result.returncode == 0 and serial:

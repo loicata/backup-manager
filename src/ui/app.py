@@ -1,5 +1,6 @@
 """Main application window with sidebar and tabbed interface."""
 
+import contextlib
 import logging
 import os
 import threading
@@ -76,12 +77,18 @@ class BackupManagerApp:
             quit_callback=self._quit_app,
         )
 
+        # Load active mode from settings
+        app_settings = self.config_manager.load_app_settings()
+        self._current_mode = app_settings.get("mode", "classic")
+
         # Build UI
         self._build_ui()
-        self._load_profiles()
 
-        # Restore last verification timestamp
-        app_settings = self.config_manager.load_app_settings()
+        # Connect mode change callback
+        self.tab_general.mode_var.set(self._current_mode)
+        self.tab_general.mode_var.trace_add("write", self._on_mode_changed)
+
+        self._load_profiles()
         if "last_verify" in app_settings:
             self.tab_verify.update_last_verify(app_settings["last_verify"])
 
@@ -339,6 +346,60 @@ class BackupManagerApp:
         }
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
+    def _on_mode_changed(self, *_args: object) -> None:
+        """Handle mode switch between Classic and Anti-Ransomware.
+
+        Saves the new mode, reloads profiles filtered by mode,
+        and launches the wizard if no profiles exist in the new mode.
+        """
+        new_mode = self.tab_general.mode_var.get()
+        if new_mode == self._current_mode:
+            return
+
+        old_mode = self._current_mode
+        self._current_mode = new_mode
+
+        # Persist mode to app settings
+        settings = self.config_manager.load_app_settings()
+        settings["mode"] = new_mode
+        self.config_manager.save_app_settings(settings)
+
+        # Reload profiles filtered by new mode
+        self._load_profiles()
+
+        # If no profiles in this mode, launch the wizard
+        if not self._profiles:
+            from src.ui.wizard import MODE_PERSONAL, MODE_PROFESSIONAL, SetupWizard
+
+            self.root.withdraw()
+            wizard = SetupWizard(self.root, standalone=True)
+            if new_mode == "anti-ransomware":
+                wizard._select_mode(MODE_PROFESSIONAL)
+            else:
+                wizard._select_mode(MODE_PERSONAL)
+            profile = wizard.run()
+            self.root.deiconify()
+
+            if profile:
+                self.config_manager.save_profile(profile)
+                self._load_profiles()
+            else:
+                # Wizard cancelled — revert to previous mode
+                self._current_mode = old_mode
+                self.tab_general.mode_var.set(old_mode)
+                settings["mode"] = old_mode
+                self.config_manager.save_app_settings(settings)
+                self._load_profiles()
+                return
+
+        # Select the first profile in the new mode
+        for i, (_idx, p) in enumerate(self._listbox_profile_map):
+            if p is not None:
+                self.profile_listbox.selection_clear(0, "end")
+                self.profile_listbox.selection_set(i)
+                self._on_profile_selected(None)
+                break
+
     def _on_tab_changed(self, event=None):
         """Show or hide the Save button depending on the active tab."""
         current = self.notebook.select()
@@ -350,9 +411,14 @@ class BackupManagerApp:
     # --- Profile management ---
 
     def _load_profiles(self):
-        """Load all profiles into the sidebar list with active/inactive sections."""
+        """Load profiles into the sidebar, filtered by the active mode."""
         self.profile_listbox.delete(0, "end")
-        self._profiles = self.config_manager.get_all_profiles()
+        all_profiles = self.config_manager.get_all_profiles()
+        self._all_profiles = all_profiles  # Keep unfiltered for mode switching
+
+        # Filter by current mode
+        is_anti_ran = self._current_mode == "anti-ransomware"
+        self._profiles = [p for p in all_profiles if p.object_lock_enabled == is_anti_ran]
         self._header_indices = set()
         self._listbox_profile_map = []
 
@@ -410,6 +476,10 @@ class BackupManagerApp:
             self._load_profile(active[0])
 
     def _on_profile_selected(self, event=None):
+        # Save current profile before switching
+        if self._current_profile:
+            self._save_profile(silent=True)
+
         sel = self.profile_listbox.curselection()
         if not sel:
             return
@@ -426,6 +496,7 @@ class BackupManagerApp:
 
     def _load_profile(self, profile: BackupProfile):
         """Load a profile into all tabs."""
+        previous_id = self._current_profile.id if self._current_profile else None
         self._current_profile = profile
 
         self.tab_general.load_profile(profile)
@@ -448,7 +519,9 @@ class BackupManagerApp:
             profile.backup_type.value,
             profile.last_backup,
         )
-        self.tab_run.clear_log()
+        # Only clear log when switching to a different profile
+        if profile.id != previous_id:
+            self.tab_run.clear_log()
 
         self._update_health_dashboard(profile)
 
@@ -573,7 +646,6 @@ class BackupManagerApp:
             index: Destination index (0=storage, 1+=mirrors).
             health: DestinationHealth result.
         """
-        import contextlib
 
         with contextlib.suppress(Exception):
             self.tab_run.after(
@@ -800,18 +872,29 @@ class BackupManagerApp:
         if not messagebox.askyesno("Delete", f"Delete profile '{name}'?"):
             return
 
-        delete_backups = messagebox.askyesno(
-            "Delete backups",
-            f"Also delete all backups created by '{name}'?\n\n"
-            "This will remove backups from all destinations "
-            "(primary storage, mirrors).\n\n"
-            "This cannot be undone.",
-        )
-
-        if delete_backups:
-            self._delete_profile_backups_async(profile)
-        else:
+        if profile.object_lock_enabled:
+            # Object Lock profiles: backups cannot be deleted
+            messagebox.showinfo(
+                "Object Lock",
+                f"Profile '{name}' will be removed.\n\n"
+                "Backups on Amazon AWS S3 are protected by Object Lock "
+                "and cannot be deleted. They will expire automatically "
+                "at the end of the retention period.",
+            )
             self._finalize_profile_deletion(profile)
+        else:
+            delete_backups = messagebox.askyesno(
+                "Delete backups",
+                f"Also delete all backups created by '{name}'?\n\n"
+                "This will remove backups from all destinations "
+                "(primary storage, mirrors).\n\n"
+                "This cannot be undone.",
+            )
+
+            if delete_backups:
+                self._delete_profile_backups_async(profile)
+            else:
+                self._finalize_profile_deletion(profile)
 
     def _finalize_profile_deletion(self, profile: BackupProfile) -> None:
         """Remove profile config and refresh the UI."""
@@ -1025,10 +1108,15 @@ class BackupManagerApp:
             if not failures:
                 self._start_backup_thread(profile)
             else:
+                # Check if primary storage is OK (only mirrors failed)
+                primary_ok = all(r[2] for r in result[0] if r[0] == "Storage")
                 self._show_target_alert(
                     failures,
                     on_retry=lambda: self._on_precheck_retry(profile),
                     on_cancel=lambda: self._on_precheck_cancel(),
+                    on_continue=(
+                        lambda: self._on_precheck_continue(profile) if primary_ok else None
+                    ),
                 )
 
         threading.Thread(target=_do_check, daemon=True, name="Precheck").start()
@@ -1066,6 +1154,11 @@ class BackupManagerApp:
         """User clicked Retry — hide alert and re-run precheck."""
         self._hide_target_alert()
         self._precheck_and_run(profile)
+
+    def _on_precheck_continue(self, profile: BackupProfile) -> None:
+        """User clicked Continue without mirror — run backup anyway."""
+        self._hide_target_alert()
+        self._start_backup_thread(profile)
 
     def _on_precheck_cancel(self) -> None:
         """User clicked Cancel — hide alert, set tray to error."""
@@ -1484,6 +1577,7 @@ class BackupManagerApp:
         failures: list[tuple[str, str, bool, str]],
         on_retry: callable,
         on_cancel: callable,
+        on_continue=None,
     ) -> None:
         """Replace notebook with an alert frame listing unreachable targets.
 
@@ -1575,6 +1669,13 @@ class BackupManagerApp:
             text="Cancel backup",
             command=on_cancel,
         ).pack(side="left", padx=10)
+
+        if on_continue is not None:
+            ttk.Button(
+                btn_frame,
+                text="Continue without mirror",
+                command=on_continue,
+            ).pack(side="left", padx=10)
 
     def _hide_target_alert(self) -> None:
         """Remove the alert frame and restore the notebook."""

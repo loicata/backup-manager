@@ -38,6 +38,7 @@ def mirror_backup(
     cancel_check: Callable[[], None] | None = None,
     integrity_manifest: dict | None = None,
     apply_throttle: Callable | None = None,
+    allow_partial: bool = False,
 ) -> list[tuple[str, bool, str]]:
     """Upload backup to mirror destinations.
 
@@ -185,11 +186,15 @@ def mirror_backup(
             results.append((mirror_name, False, msg, mirror_desc))
             phase_log.error(f"{mirror_name}: upload failed — {msg}")
 
-    # Any mirror failure = backup failure
+    # Mirror failure handling
     failed = [name for name, ok, *_ in results if not ok]
     if failed:
         details = "; ".join(f"{name}: {msg}" for name, ok, msg, *_ in results if not ok)
-        raise RuntimeError(f"Mirror upload failed: {details}")
+        if allow_partial:
+            # Object Lock mode: primary S3 is already saved, mirror is optional
+            phase_log.warning(f"Mirror failed but primary backup is safe: {details}")
+        else:
+            raise RuntimeError(f"Mirror upload failed: {details}")
 
     return results
 

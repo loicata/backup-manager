@@ -1,8 +1,10 @@
 """Bandwidth tester: measures real write throughput to a storage backend.
 
-Uploads a sample file and waits for the remote server to confirm the
-write is complete before measuring elapsed time.  This gives the true
-end-to-end throughput instead of just measuring local buffer fill speed.
+Uses an adaptive approach:
+1. Small probe (2 MB) to detect link speed
+2. If fast link (>10 MB/s): full 128 MB sample for accurate measurement
+3. If slow link: use the probe result directly (avoids saturating
+   slow connections for extended periods which can freeze the OS)
 
 For SFTP backends, uses ``sync`` via exec channel to ensure data is
 flushed to disk on the remote before stopping the timer.
@@ -18,9 +20,17 @@ from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-# Sample size: 16 MB (large enough for accurate measurement,
-# small enough to complete in reasonable time on slow links)
-SAMPLE_SIZE = 16 * 1024 * 1024
+# Probe size: 16 MB — detects link speed and serves as measurement
+# for slow links. At 1 MB/s = 16 seconds, at 9 MB/s = ~2 seconds.
+PROBE_SIZE = 16 * 1024 * 1024
+
+# Full sample: 128 MB — used only on fast links (>10 MB/s)
+# At 100 MB/s this takes ~1.3 seconds. Accurate measurement.
+FULL_SAMPLE_SIZE = 128 * 1024 * 1024
+
+# Speed threshold: links faster than this get the full sample
+# 10 MB/s = fast enough that 128 MB completes in ~13 seconds
+FAST_LINK_THRESHOLD = 10 * 1024 * 1024  # 10 MB/s
 
 # Warmup size: 1 MB (establish connection, fill OS buffers)
 WARMUP_SIZE = 1 * 1024 * 1024
@@ -32,11 +42,11 @@ TEMP_PREFIX = ".bm_speedtest_"
 def measure_bandwidth(backend: StorageBackend) -> float:
     """Measure real write speed to a storage backend.
 
-    Performs a 1 MB warmup upload, then a 16 MB measurement that
-    waits for the remote to confirm the write is complete.  Returns
-    the true end-to-end throughput in bytes per second.
-
-    If the measurement fails, returns 0.0 (no throttling applied).
+    Adaptive approach:
+    - Starts with a 2 MB probe to detect if the link is fast or slow.
+    - Fast links (>10 MB/s): runs a full 128 MB test for precision.
+    - Slow links: uses the 2 MB probe result to avoid saturating
+      the connection and freezing the OS.
 
     Args:
         backend: Connected storage backend to test.
@@ -51,15 +61,41 @@ def measure_bandwidth(backend: StorageBackend) -> float:
     except Exception as exc:
         logger.warning("Bandwidth warmup failed: %s", exc)
 
-    # Measurement: timed upload with remote confirmation
+    # Probe: quick 2 MB test to detect link speed
     try:
-        speed = _write_sample(backend, SAMPLE_SIZE)
-        if speed > 0:
+        probe_speed = _write_sample(backend, PROBE_SIZE)
+        if probe_speed <= 0:
+            logger.error("Bandwidth probe returned 0 — no throttling")
+            return 0.0
+
+        probe_mbps = probe_speed / (1024 * 1024)
+        logger.info("Bandwidth probe: %.2f MB/s (16 MB probe)", probe_mbps)
+
+        # Fast link: run full measurement for accuracy
+        if probe_speed >= FAST_LINK_THRESHOLD:
             logger.info(
-                "Bandwidth test: %.2f MB/s (16 MB sample, end-to-end)",
-                speed / (1024 * 1024),
+                "Fast link detected (%.1f MB/s) — running full 128 MB test",
+                probe_mbps,
             )
-            return speed
+            try:
+                full_speed = _write_sample(backend, FULL_SAMPLE_SIZE)
+                if full_speed > 0:
+                    logger.info(
+                        "Bandwidth test: %.2f MB/s (128 MB sample, end-to-end)",
+                        full_speed / (1024 * 1024),
+                    )
+                    return full_speed
+            except Exception as exc:
+                logger.warning("Full bandwidth test failed: %s", exc)
+                # Fall back to probe result
+
+        # Slow link or full test failed: use probe result
+        logger.info(
+            "Using probe result: %.2f MB/s (slow link, 16 MB probe)",
+            probe_mbps,
+        )
+        return probe_speed
+
     except Exception as exc:
         logger.warning("Bandwidth measurement failed: %s", exc)
 

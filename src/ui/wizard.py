@@ -49,6 +49,27 @@ MODE_PERSONAL = "personal"
 MODE_PROFESSIONAL = "professional"
 
 
+def _resolve_retention(data: dict) -> tuple[str, int, int]:
+    """Resolve the selected retention option from wizard data.
+
+    Handles both predefined options and custom year input.
+
+    Args:
+        data: Wizard data dict with pro_retention_idx and pro_custom_years.
+
+    Returns:
+        (label, months, days) tuple.
+    """
+    idx = data.get("pro_retention_idx", 2)
+    if idx < len(RETENTION_OPTIONS):
+        return RETENTION_OPTIONS[idx]
+    # Custom duration
+    years = data.get("pro_custom_years", 2)
+    months = years * 12
+    days = years * 365
+    return f"{years} years (custom)", months, days
+
+
 class SetupWizard:
     """Setup wizard with personal/professional paths."""
 
@@ -256,14 +277,15 @@ class SetupWizard:
             builders = {
                 1: self._step_pro_protection_info,
                 2: self._step_pro_retention_choice,
-                3: self._step_pro_cost_simulation,
-                4: self._step_pro_disclaimers,
-                5: self._step_pro_aws_guide,
-                6: self._step_name,
-                7: self._step_sources,
-                8: self._step_pro_encryption,
-                9: self._step_pro_local_mirror,
-                10: self._step_pro_auto_setup,
+                3: self._step_pro_backup_strategy,
+                4: self._step_pro_cost_simulation,
+                5: self._step_pro_disclaimers,
+                6: self._step_pro_aws_guide,
+                7: self._step_name,
+                8: self._step_sources,
+                9: self._step_pro_encryption,
+                10: self._step_pro_local_mirror,
+                11: self._step_pro_auto_setup,
             }
 
         builder = builders.get(self._step, lambda: None)
@@ -329,23 +351,23 @@ class SetupWizard:
     def _validate_pro_step(self) -> str | None:
         """Validate professional mode steps.
 
-        Step order: 1=info, 2=retention, 3=cost, 4=disclaimers,
-        5=AWS keys, 6=name, 7=sources, 8=encryption,
-        9=local mirror, 10=setup.
+        Step order: 1=info, 2=strategy, 3=retention, 4=cost,
+        5=disclaimers, 6=AWS keys, 7=name, 8=sources,
+        9=encryption, 10=local mirror, 11=setup.
         """
-        if self._step == 5:
+        if self._step == 6:
             if not self._data.get("pro_aws_key", "").strip():
                 return "Please enter your Amazon AWS Access Key."
             if not self._data.get("pro_aws_secret", "").strip():
                 return "Please enter your Amazon AWS Secret Key."
-        elif self._step == 6:
+        elif self._step == 7:
             name = self._data.get("name", "").strip()
             if not name:
                 return "Please enter a profile name."
-        elif self._step == 7:
+        elif self._step == 8:
             if not self._data.get("sources"):
                 return "Please add at least one source folder."
-        elif self._step == 8:
+        elif self._step == 9:
             if self._data.get("pro_encrypt"):
                 pw = self._data.get("pro_encrypt_password", "")
                 if not pw or len(pw) < 8:
@@ -359,12 +381,11 @@ class SetupWizard:
             self._step = 0
         else:
             self._step -= 1
-            # Skip encryption step (8) going back if retention > 13 months
-            if self._mode == MODE_PROFESSIONAL and self._step == 8:
-                idx = self._data.get("pro_retention_idx", 0)
-                _label, months, _days = RETENTION_OPTIONS[idx]
+            # Skip encryption step (9) going back if retention > 13 months
+            if self._mode == MODE_PROFESSIONAL and self._step == 9:
+                _label, months, _days = _resolve_retention(self._data)
                 if months > 13:
-                    self._step = 7
+                    self._step = 8
         self._show_step()
 
     def _cancel(self) -> None:
@@ -474,7 +495,7 @@ class SetupWizard:
         if mode == MODE_PERSONAL:
             self._total_steps = 3
         else:
-            self._total_steps = 10
+            self._total_steps = 11
             # Auto-detect nearest AWS region in background (no UI freeze)
             self._data["pro_region"] = "eu-west-1"  # Default until detected
 
@@ -1203,8 +1224,58 @@ class SetupWizard:
             f.pack(fill="x", pady=Spacing.SMALL)
             ttk.Label(f, text=text, wraplength=900, justify="left").pack(anchor="w")
 
+    def _step_pro_backup_strategy(self) -> None:
+        """Step 2 (pro): Explain the backup strategy."""
+        self._set_header("Backup Strategy")
+
+        ttk.Label(
+            self._content,
+            text="How Backup Manager protects your data:",
+            font=Fonts.large(),
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        strategy_items = [
+            (
+                "Monthly full backup",
+                "Once a month, Backup Manager performs a full backup of all "
+                "your data. This backup is self-contained and is sufficient "
+                "on its own to restore all your files.",
+            ),
+            (
+                "Daily differential backup",
+                "Every day, Backup Manager backs up only the files that have "
+                "been modified since the last full backup. This significantly "
+                "reduces the volume of data sent and storage costs.",
+            ),
+            (
+                "Retention and cleanup",
+                "Monthly full backups are kept for the entire retention "
+                "period that you will choose in the next step. "
+                "Daily differential backups are kept for 1 month, then "
+                "automatically deleted by Amazon AWS. "
+                "You have nothing to manage.",
+            ),
+            (
+                "Fully automatic",
+                "Once configured, Backup Manager runs in the background "
+                "without any intervention on your part. You can continue "
+                "working normally.",
+            ),
+        ]
+
+        for title, text in strategy_items:
+            f = ttk.LabelFrame(self._content, text=title, padding=Spacing.PAD)
+            f.pack(fill="x", pady=Spacing.SMALL)
+            ttk.Label(
+                f,
+                text=text,
+                wraplength=900,
+                foreground=Colors.TEXT_SECONDARY,
+                justify="left",
+            ).pack(anchor="w")
+
     def _step_pro_retention_choice(self) -> None:
-        """Step 2 (pro): Choose retention duration."""
+        """Step 3 (pro): Choose retention duration."""
         self._set_header("Retention Duration")
 
         ttk.Label(
@@ -1235,11 +1306,13 @@ class SetupWizard:
             tip,
             text=(
                 "Since the standard recommended data retention period is "
-                "3 months, the most sophisticated ransomware waits 3 months "
-                "and one day before activating. For this reason, it is often "
-                "appropriate to keep your data for at least 4 months in order "
-                "to be able to restore a clean version that predates "
-                "the infection."
+                "3 months, sophisticated ransomware waits 3 months and one "
+                "day before activating. For this reason, it is often "
+                "appropriate to keep your data for at least 4 months in "
+                "order to be able to restore a clean version that predates "
+                "the infection if the ransomware waited 3 months and one "
+                "day. Of course, a retention period of 13 months protects "
+                "you even better, and so on."
             ),
             wraplength=880,
             foreground=Colors.TEXT_SECONDARY,
@@ -1247,6 +1320,7 @@ class SetupWizard:
         ).pack(anchor="w")
 
         ret_var = tk.IntVar(value=self._data.get("pro_retention_idx", 2))
+        custom_idx = len(RETENTION_OPTIONS)  # Index for "Custom" option
 
         for i, (label, _months, _days) in enumerate(RETENTION_OPTIONS):
             ttk.Radiobutton(
@@ -1256,10 +1330,37 @@ class SetupWizard:
                 variable=ret_var,
             ).pack(anchor="w", pady=2)
 
-        ret_var.trace_add(
-            "write",
-            lambda *_a: self._data.update(pro_retention_idx=ret_var.get()),
+        # Custom duration option
+        custom_frame = ttk.Frame(self._content)
+        custom_frame.pack(anchor="w", pady=2)
+        ttk.Radiobutton(
+            custom_frame,
+            text="Custom:",
+            value=custom_idx,
+            variable=ret_var,
+        ).pack(side="left")
+        custom_years_var = tk.IntVar(
+            value=self._data.get("pro_custom_years", 2),
         )
+        custom_spin = ttk.Spinbox(
+            custom_frame,
+            textvariable=custom_years_var,
+            from_=2,
+            to=20,
+            width=4,
+        )
+        custom_spin.pack(side="left", padx=Spacing.SMALL)
+        ttk.Label(custom_frame, text="years").pack(side="left")
+
+        def _on_retention_change(*_a: object) -> None:
+            idx = ret_var.get()
+            self._data["pro_retention_idx"] = idx
+            if idx == custom_idx:
+                years = custom_years_var.get()
+                self._data["pro_custom_years"] = years
+
+        ret_var.trace_add("write", _on_retention_change)
+        custom_years_var.trace_add("write", _on_retention_change)
 
         # Single warning — always visible, in red
         ttk.Label(
@@ -1373,8 +1474,14 @@ class SetupWizard:
                 pady=Spacing.SMALL,
             )
 
-        # Data rows — one per retention option, total cost
-        for row, (label, months, _days) in enumerate(RETENTION_OPTIONS, start=1):
+        # Data rows — predefined options + custom if selected
+        all_options = list(RETENTION_OPTIONS)
+        selected = _resolve_retention(self._data)
+        # Add custom row if not a predefined option
+        if self._data.get("pro_retention_idx", 0) >= len(RETENTION_OPTIONS):
+            all_options.append(selected)
+
+        for row, (label, months, _days) in enumerate(all_options, start=1):
             ttk.Label(table, text=label).grid(
                 row=row,
                 column=0,
@@ -1425,8 +1532,7 @@ class SetupWizard:
         allows direct file access via the AWS Console.
         """
         # Auto-skip for long retention periods
-        idx = self._data.get("pro_retention_idx", 0)
-        _label, months, _days = RETENTION_OPTIONS[idx]
+        _label, months, _days = _resolve_retention(self._data)
         if months > 13:
             self._data["pro_encrypt"] = False
             self._step += 1
@@ -1519,8 +1625,7 @@ class SetupWizard:
         """Step 4 (pro): Informational disclaimers (no acceptance required)."""
         self._set_header("Important Information")
 
-        idx = self._data.get("pro_retention_idx", 0)
-        label, _months, _days = RETENTION_OPTIONS[idx]
+        label, _months, _days = _resolve_retention(self._data)
 
         ttk.Label(
             self._content,
@@ -1653,8 +1758,7 @@ class SetupWizard:
         ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
 
         # Summary
-        idx = self._data.get("pro_retention_idx", 0)
-        label, _months, days = RETENTION_OPTIONS[idx]
+        label, _months, days = _resolve_retention(self._data)
         region = self._data.get("pro_region", "eu-west-1")
         bucket = self._data.get("pro_bucket", "")
 
@@ -1706,8 +1810,7 @@ class SetupWizard:
         sk = self._data["pro_aws_secret"]
         region = self._data["pro_region"]
         bucket = self._data["pro_bucket"]
-        idx = self._data["pro_retention_idx"]
-        _label, _months, days = RETENTION_OPTIONS[idx]
+        _label, _months, days = _resolve_retention(self._data)
 
         result: list = [None]
 
@@ -1792,8 +1895,7 @@ class SetupWizard:
         encryption, optional local mirror.
         """
         d = self._data
-        idx = d.get("pro_retention_idx", 0)
-        _label, _months, days = RETENTION_OPTIONS[idx]
+        _label, _months, days = _resolve_retention(d)
 
         storage = StorageConfig(
             storage_type=StorageType.S3,

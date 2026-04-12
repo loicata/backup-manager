@@ -268,3 +268,52 @@ class TestDestinationHealth:
         )
         assert h.online is True
         assert h.free_bytes == 1024
+
+
+class TestHealthPollingIdempotent:
+    """_check_destination is idempotent — safe for continuous polling."""
+
+    def test_poll_recovers_after_initial_failure(self):
+        """Simulates a destination going from offline to online on re-poll."""
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path="/tmp/backup",
+        )
+        mock_backend = MagicMock()
+        mock_backend.test_connection.side_effect = [
+            (False, "Permission denied: G:\\"),
+            (True, "Connected — 75.8 GB free"),
+        ]
+
+        with patch(
+            "src.core.health_checker.create_backend",
+            return_value=mock_backend,
+        ):
+            # First check: offline
+            health1 = _check_destination(config, "Storage")
+            assert health1.online is False
+            assert "Permission denied" in health1.error
+
+            # Retry: now online
+            health2 = _check_destination(config, "Storage")
+            assert health2.online is True
+            assert health2.free_bytes == int(75.8 * 1024**3)
+
+    def test_repeated_failures_produce_consistent_results(self):
+        """Multiple failures return the same error each time."""
+        config = StorageConfig(
+            storage_type=StorageType.SFTP,
+            sftp_host="unreachable",
+            sftp_username="user",
+            sftp_remote_path="/backup",
+        )
+
+        with patch(
+            "src.core.health_checker.create_backend",
+            side_effect=ConnectionRefusedError("Connection refused"),
+        ):
+            results = [_check_destination(config, "Mirror 1") for _ in range(3)]
+
+        for h in results:
+            assert h.online is False
+            assert "Connection refused" in h.error

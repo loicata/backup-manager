@@ -27,9 +27,27 @@ class GeneralTab(ScrollableTab):
         self._build_ui()
 
     def _build_ui(self):
+        # Mode selector
+        mode_frame = ttk.LabelFrame(self.inner, text="Mode", padding=Spacing.PAD)
+        mode_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.LARGE, Spacing.MEDIUM))
+
+        self.mode_var = tk.StringVar(value="classic")
+        ttk.Radiobutton(
+            mode_frame,
+            text="Classic",
+            value="classic",
+            variable=self.mode_var,
+        ).pack(anchor="w", pady=2)
+        ttk.Radiobutton(
+            mode_frame,
+            text="Anti-Ransomware",
+            value="anti-ransomware",
+            variable=self.mode_var,
+        ).pack(anchor="w", pady=2)
+
         # Profile name
         name_frame = ttk.LabelFrame(self.inner, text="Profile", padding=Spacing.PAD)
-        name_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.LARGE, Spacing.MEDIUM))
+        name_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.MEDIUM))
 
         ttk.Label(name_frame, text="Profile name:").pack(anchor="w")
         self.name_var = tk.StringVar(value="New profile")
@@ -326,9 +344,12 @@ class GeneralTab(ScrollableTab):
         self.name_var.set(profile.name)
         self.type_var.set(profile.backup_type.value)
 
-        # Hide backup type controls in Object Lock mode (managed automatically)
+        # Set mode based on profile
         if profile.object_lock_enabled:
+            self.mode_var.set("anti-ransomware")
             self._type_frame.pack_forget()
+        else:
+            self.mode_var.set("classic")
 
         # Clear and reload sources
         for item in self.sources_tree.get_children():

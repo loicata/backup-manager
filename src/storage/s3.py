@@ -231,18 +231,19 @@ class S3Storage(StorageBackend):
         pages = paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/")
 
         for page in pages:
-            # Common prefixes (directories) — no LastModified from S3 API.
+            # Common prefixes (directories) — no Size or LastModified
+            # from S3 API.  Sum all objects inside each prefix.
             for cp in page.get("CommonPrefixes", []):
                 dir_prefix = cp["Prefix"]
                 name = dir_prefix.rstrip("/").rsplit("/", 1)[-1]
-                # Fetch the newest object inside this prefix to get a date.
-                mtime = self._get_prefix_mtime(client, dir_prefix)
+                total_size, mtime, has_wbenc = self._get_prefix_stats(client, dir_prefix)
                 backups.append(
                     {
                         "name": name,
-                        "size": 0,
+                        "size": total_size,
                         "modified": mtime,
                         "is_dir": True,
+                        "encrypted": has_wbenc,
                     }
                 )
 
@@ -261,39 +262,49 @@ class S3Storage(StorageBackend):
                             "size": obj.get("Size", 0),
                             "modified": last_mod,
                             "is_dir": False,
+                            "encrypted": ".wbenc" in name.lower(),
                         }
                     )
 
         return backups
 
-    def _get_prefix_mtime(self, client, dir_prefix: str) -> float:
-        """Get the modification time of the newest object under a prefix.
+    def _get_prefix_stats(self, client, dir_prefix: str) -> tuple[int, float, bool]:
+        """Get total size, newest modification time, and encryption flag.
 
-        S3 CommonPrefixes (virtual directories) have no LastModified.
-        This method fetches one object from the prefix to approximate
-        the backup date.
+        S3 CommonPrefixes (virtual directories) have no Size or
+        LastModified.  This method lists all objects under the prefix
+        to compute the total size, find the newest modification time,
+        and detect encrypted archives (.wbenc files).
 
         Args:
             client: boto3 S3 client.
             dir_prefix: The S3 prefix ending with '/'.
 
         Returns:
-            Unix timestamp of the newest object, or 0 if empty.
+            Tuple of (total_size_bytes, newest_mtime_timestamp, has_wbenc).
         """
+        total_size = 0
+        newest_mtime = 0.0
+        has_wbenc = False
         try:
-            resp = client.list_objects_v2(
-                Bucket=self._bucket,
-                Prefix=dir_prefix,
-                MaxKeys=1,
-            )
-            for obj in resp.get("Contents", []):
-                last_mod = obj.get("LastModified", 0)
-                if hasattr(last_mod, "timestamp"):
-                    return last_mod.timestamp()
-                return float(last_mod) if last_mod else 0.0
+            paginator = client.get_paginator("list_objects_v2")
+            pages = paginator.paginate(Bucket=self._bucket, Prefix=dir_prefix)
+            for page in pages:
+                for obj in page.get("Contents", []):
+                    total_size += obj.get("Size", 0)
+                    key = obj.get("Key", "")
+                    if ".wbenc" in key:
+                        has_wbenc = True
+                    last_mod = obj.get("LastModified", 0)
+                    if hasattr(last_mod, "timestamp"):
+                        ts = last_mod.timestamp()
+                    else:
+                        ts = float(last_mod) if last_mod else 0.0
+                    if ts > newest_mtime:
+                        newest_mtime = ts
         except Exception:
-            logger.warning("Failed to get mtime for prefix %s", dir_prefix)
-        return 0.0
+            logger.warning("Failed to get stats for prefix %s", dir_prefix)
+        return total_size, newest_mtime, has_wbenc
 
     @with_retry(max_retries=3, base_delay=2.0)
     def delete_backup(self, remote_name: str) -> None:

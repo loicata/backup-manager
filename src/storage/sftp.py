@@ -714,6 +714,7 @@ class SFTPStorage(StorageBackend):
                             "size": entry.st_size or 0,
                             "modified": entry.st_mtime or 0,
                             "is_dir": stat.S_ISDIR(entry.st_mode) if entry.st_mode else False,
+                            "encrypted": ".wbenc" in entry.filename.lower(),
                         }
                     )
                 return sorted(backups, key=lambda b: b["modified"], reverse=True)

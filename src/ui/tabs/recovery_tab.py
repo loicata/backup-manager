@@ -1,31 +1,119 @@
-"""Recovery tab: restore local backups and retrieve remote ones."""
+"""Recovery tab: unified retrieve + restore workflow.
+
+Single linear flow:
+  1. Source  (External drive / Network / SFTP / S3 with scan)
+  2. Select backups  (treeview — remote only, grouped by bucket for S3)
+  3. Destination
+  4. Encryption password  (only when encrypted backups are selected)
+"""
 
 import logging
-import os
 import shutil
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from src.core.config import BackupProfile, StorageConfig, StorageType
 from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
 from src.security.encryption import DecryptingReader
-from src.storage.base import long_path_mkdir, long_path_str
+from src.storage.base import StorageBackend, long_path_mkdir, long_path_str
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
 
 logger = logging.getLogger(__name__)
 
-# Placeholder value when profile has a stored password.
 _PASSWORD_PLACEHOLDER = "****************"
 
-# Local directory for downloaded backups (user's Desktop).
-_DOWNLOAD_DIR = Path(os.path.expanduser("~/Desktop"))
+# Patterns that identify a Backup Manager backup in an S3 bucket.
+_BACKUP_PATTERNS = ("_FULL_", "_DIFF_", ".wbverify")
+
+
+def _parse_backup_type(name: str) -> str:
+    """Extract backup type (FULL / DIFF) from a backup name.
+
+    Args:
+        name: Backup name, e.g. 'loicata_FULL_2026-04-10_120000'.
+
+    Returns:
+        'FULL', 'DIFF', or '' if not detected.
+    """
+    upper = name.upper()
+    if "_FULL_" in upper or upper.startswith("FULL_"):
+        return "FULL"
+    if "_DIFF_" in upper or upper.startswith("DIFF_"):
+        return "DIFF"
+    return ""
+
+
+def _is_encrypted_name(name: str) -> bool:
+    """Check if a backup name indicates an encrypted archive.
+
+    Args:
+        name: Backup name or filename.
+
+    Returns:
+        True if the name contains '.wbenc'.
+    """
+    return ".wbenc" in name.lower()
+
+
+def _human_size(size_bytes: int) -> str:
+    """Format byte count as human-readable string.
+
+    Args:
+        size_bytes: Size in bytes.
+
+    Returns:
+        Formatted string, e.g. '2.1 GB', '340 MB'.
+    """
+    if size_bytes < 0:
+        return "?"
+    value = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(value) < 1024:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} PB"
+
+
+def _format_date(timestamp: float) -> str:
+    """Format a Unix timestamp as a short date string.
+
+    Args:
+        timestamp: Unix timestamp (seconds since epoch).
+
+    Returns:
+        Formatted string, e.g. '10/04/2026'.
+    """
+    if not timestamp or timestamp <= 0:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(timestamp, tz=UTC)
+        return dt.strftime("%d/%m/%Y")
+    except (OSError, ValueError):
+        return ""
+
+
+def _is_backup_object(key: str) -> bool:
+    """Check if an S3 object key looks like a Backup Manager backup.
+
+    Args:
+        key: S3 object key.
+
+    Returns:
+        True if the key matches known backup patterns.
+    """
+    upper = key.upper()
+    return any(pat in upper for pat in ("_FULL_", "_DIFF_")) or key.endswith(".wbverify")
 
 
 class RecoveryTab(ScrollableTab):
-    """Restore local backups and retrieve remote ones."""
+    """Unified restore / retrieve tab."""
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
@@ -33,8 +121,11 @@ class RecoveryTab(ScrollableTab):
         self._user_modified_pw = False
         self._profile: BackupProfile | None = None
         self._features = get_available_features()
-        self._retrieve_config_frames: dict[str, ttk.Frame] = {}
-        self._filling_retrieve = False
+        self._config_frames: dict[str, ttk.Frame] = {}
+        self._filling = False
+        self._listed_backups: list[dict] = []
+        self._selected_backups: set[str] = set()
+        self._scan_animation_id: str | None = None
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -42,18 +133,95 @@ class RecoveryTab(ScrollableTab):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        """Build all UI sections."""
-        self._build_select_backup()
-        self._build_restore_destination()
-        self._build_encryption_password()
-        self._build_restore_button()
-        self._build_retrieve_section()
+        """Build all UI sections.
 
-    def _build_select_backup(self) -> None:
-        """Build the 'Select backup' section."""
-        frame = ttk.LabelFrame(self.inner, text="Select backup", padding=Spacing.PAD)
-        frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
+        The backup list, destination, encryption, and execute sections
+        are built first (unpacked) so that _build_source_section can
+        reference them when it triggers _on_source_type_changed.
+        """
+        # Build unpacked sections first (order doesn't matter for these)
+        self._build_backup_list_section()
+        self._build_destination_section()
+        self._build_encryption_section()
+        self._build_execute_section()
 
+        # Build and pack the source section (calls _on_source_type_changed)
+        self._build_source_section()
+
+    # --- Step 1: Source ---
+
+    def _build_source_section(self) -> None:
+        """Build the source selection section with 4 storage types."""
+        self._source_frame = ttk.LabelFrame(self.inner, text="1. Source", padding=Spacing.PAD)
+        self._source_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
+
+        # Auto-fill combo (hidden when no profile)
+        self._autofill_frame = ttk.Frame(self._source_frame)
+        self._autofill_frame.pack(fill="x", pady=(0, Spacing.MEDIUM))
+
+        ttk.Label(self._autofill_frame, text="Auto-fill from profile:").pack(side="left")
+        self.source_var = tk.StringVar(value="Storage")
+        self._source_combo = ttk.Combobox(
+            self._autofill_frame,
+            textvariable=self.source_var,
+            values=["Storage", "Mirror 1", "Mirror 2"],
+            state="readonly",
+            width=20,
+        )
+        self._source_combo.pack(side="left", padx=(Spacing.SMALL, 0))
+        self._source_combo.bind("<<ComboboxSelected>>", self._on_source_changed)
+
+        # Storage type radio buttons
+        self.source_type_var = tk.StringVar(value=StorageType.LOCAL.value)
+        self.source_type_var.trace_add("write", self._on_source_type_changed)
+
+        type_options = [
+            (StorageType.LOCAL, "External drive", True),
+            (StorageType.NETWORK, "Network folder", True),
+            (StorageType.SFTP, "Remote server (SFTP)", FEAT_SFTP in self._features),
+            (StorageType.S3, "S3 cloud", FEAT_S3 in self._features),
+        ]
+        for stype, label, available in type_options:
+            ttk.Radiobutton(
+                self._source_frame,
+                text=label,
+                value=stype.value,
+                variable=self.source_type_var,
+                state="normal" if available else "disabled",
+            ).pack(anchor="w", pady=2)
+
+        # Dynamic config container
+        self._config_container = ttk.Frame(self._source_frame)
+        self._config_container.pack(fill="x", padx=(Spacing.XLARGE, 0))
+
+        self._build_local_config()
+        self._build_network_config()
+        self._build_sftp_config()
+        self._build_s3_config()
+
+        # List / Scan button (for remote types) — Accent style, full width
+        self._list_btn = ttk.Button(
+            self._source_frame,
+            text="List available backups",
+            style="Accent.TButton",
+            command=self._list_remote_backups,
+        )
+        # Not packed initially
+
+        # Scan status label (animated for S3 scan)
+        self._scan_label = ttk.Label(
+            self._source_frame, text="", foreground=Colors.TEXT_SECONDARY, font=Fonts.small()
+        )
+
+        # Show initial config frame
+        self._on_source_type_changed()
+
+    def _build_local_config(self) -> None:
+        """Build config fields for external drive."""
+        frame = ttk.Frame(self._config_container)
+        self._config_frames["local"] = frame
+
+        ttk.Label(frame, text="Destination path:").pack(anchor="w", pady=(Spacing.SMALL, 0))
         row = ttk.Frame(frame)
         row.pack(fill="x")
         self.backup_path_var = tk.StringVar()
@@ -63,180 +231,28 @@ class RecoveryTab(ScrollableTab):
             side="right", padx=(Spacing.SMALL, 0)
         )
 
-    def _build_restore_destination(self) -> None:
-        """Build the 'Restore destination' section."""
-        frame = ttk.LabelFrame(self.inner, text="Restore destination", padding=Spacing.PAD)
-        frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
-
-        row = ttk.Frame(frame)
-        row.pack(fill="x")
-        self.dest_path_var = tk.StringVar()
-        ttk.Entry(row, textvariable=self.dest_path_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Browse...", command=self._browse_dest).pack(
-            side="right", padx=(Spacing.SMALL, 0)
-        )
-
-    def _build_encryption_password(self) -> None:
-        """Build the 'Encryption password' section."""
-        pw_frame = ttk.LabelFrame(
-            self.inner, text="Encryption password (optional)", padding=Spacing.PAD
-        )
-        pw_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
-
-        self.password_var = tk.StringVar()
-        self.password_var.trace_add("write", self._on_password_changed)
-        self._pw_entry = ttk.Entry(pw_frame, textvariable=self.password_var, show="●")
-        self._pw_entry.pack(fill="x")
-
-    def _build_restore_button(self) -> None:
-        """Build the Restore button and status label."""
-        btn_frame = ttk.Frame(self.inner)
-        btn_frame.pack(
-            fill="x",
-            padx=Spacing.LARGE,
-            pady=(Spacing.MEDIUM, Spacing.LARGE),
-        )
-
-        self.restore_btn = ttk.Button(
-            btn_frame,
-            text="Restore",
-            style="Accent.TButton",
-            command=self._restore,
-        )
-        self.restore_btn.pack(side="left")
-
-        self.status_label = ttk.Label(btn_frame, text="", foreground=Colors.TEXT_SECONDARY)
-        self.status_label.pack(side="left", padx=Spacing.LARGE)
-
-    def _build_retrieve_section(self) -> None:
-        """Build the 'Retrieve backup' section at the bottom."""
-        retrieve_frame = ttk.LabelFrame(self.inner, text="Retrieve backup", padding=Spacing.PAD)
-        retrieve_frame.pack(
-            fill="x",
-            padx=Spacing.LARGE,
-            pady=(Spacing.MEDIUM, Spacing.LARGE),
-        )
-
-        # --- Backup source ---
-        src_row = ttk.Frame(retrieve_frame)
-        src_row.pack(fill="x")
-        ttk.Label(src_row, text="Backup source:").pack(side="left")
-        self.source_var = tk.StringVar(value="Storage")
-        self._source_combo = ttk.Combobox(
-            src_row,
-            textvariable=self.source_var,
-            values=["Storage", "Mirror 1", "Mirror 2"],
-            state="readonly",
-            width=20,
-        )
-        self._source_combo.pack(side="left", padx=(Spacing.SMALL, 0))
-        self._source_combo.bind("<<ComboboxSelected>>", self._on_source_changed)
-
-        # --- Storage type (radio buttons) ---
-        self._type_frame = ttk.LabelFrame(retrieve_frame, text="Storage type", padding=Spacing.PAD)
-        self._type_frame.pack(fill="x", pady=(Spacing.MEDIUM, 0))
-
-        self.retrieve_type_var = tk.StringVar(value=StorageType.SFTP.value)
-        self.retrieve_type_var.trace_add("write", self._on_retrieve_type_changed)
-
-        type_options = [
-            (StorageType.SFTP, "Remote server", FEAT_SFTP in self._features),
-            (StorageType.S3, "S3 cloud", FEAT_S3 in self._features),
-        ]
-
-        for stype, label, available in type_options:
-            rb = ttk.Radiobutton(
-                self._type_frame,
-                text=label,
-                value=stype.value,
-                variable=self.retrieve_type_var,
-                state="normal" if available else "disabled",
-            )
-            rb.pack(anchor="w", pady=2)
-
-        # --- Configuration container (dynamic) ---
-        self._retrieve_config_container = ttk.Frame(retrieve_frame)
-        self._retrieve_config_container.pack(fill="x", pady=(Spacing.SMALL, 0))
-
-        self._build_retrieve_local_config()
-        self._build_retrieve_network_config()
-        self._build_retrieve_sftp_config()
-        self._build_retrieve_s3_config()
-
-        # --- Retrieve destination ---
-        dest_frame = ttk.LabelFrame(
-            retrieve_frame, text="Retrieve destination", padding=Spacing.PAD
-        )
-        dest_frame.pack(fill="x", pady=(Spacing.MEDIUM, 0))
-
-        dest_row = ttk.Frame(dest_frame)
-        dest_row.pack(fill="x")
-        self.retrieve_dest_var = tk.StringVar(value=str(_DOWNLOAD_DIR))
-        ttk.Entry(dest_row, textvariable=self.retrieve_dest_var).pack(
-            side="left", fill="x", expand=True
-        )
-        ttk.Button(dest_row, text="Browse...", command=self._browse_retrieve_dest).pack(
-            side="right", padx=(Spacing.SMALL, 0)
-        )
-
-        # --- Retrieve button ---
-        dl_row = ttk.Frame(retrieve_frame)
-        dl_row.pack(fill="x", pady=(Spacing.MEDIUM, 0))
-
-        self.retrieve_btn = ttk.Button(
-            dl_row,
-            text="Retrieve",
-            style="Accent.TButton",
-            command=self._retrieve_all,
-        )
-        self.retrieve_btn.pack(side="left")
-
-        self.retrieve_label = ttk.Label(dl_row, text="", foreground=Colors.TEXT_SECONDARY)
-        self.retrieve_label.pack(side="left", padx=Spacing.LARGE)
-
-        # Show initial config
-        self._on_retrieve_type_changed()
-
-    # --- Retrieve storage config frames ---
-
-    def _build_retrieve_local_config(self) -> None:
-        """Build config fields for local/external drive."""
-        frame = ttk.Frame(self._retrieve_config_container)
-        self._retrieve_config_frames["local"] = frame
-
-        ttk.Label(frame, text="Backup path:").pack(anchor="w")
-        path_row = ttk.Frame(frame)
-        path_row.pack(fill="x", pady=Spacing.SMALL)
-
-        self._ret_local_path_var = tk.StringVar()
-        ttk.Entry(path_row, textvariable=self._ret_local_path_var).pack(
-            side="left", fill="x", expand=True
-        )
-        ttk.Button(
-            path_row,
-            text="Browse...",
-            command=lambda: self._browse_to_var(self._ret_local_path_var),
-        ).pack(side="right", padx=(Spacing.SMALL, 0))
-
-    def _build_retrieve_network_config(self) -> None:
+    def _build_network_config(self) -> None:
         """Build config fields for network folder."""
-        frame = ttk.Frame(self._retrieve_config_container)
-        self._retrieve_config_frames["network"] = frame
+        frame = ttk.Frame(self._config_container)
+        self._config_frames["network"] = frame
 
-        ttk.Label(frame, text="Network path (UNC):").pack(anchor="w")
-        self._ret_network_path_var = tk.StringVar()
-        ttk.Entry(frame, textvariable=self._ret_network_path_var).pack(fill="x")
-        ttk.Label(
-            frame,
-            text=r"e.g. \\server\share\backups",
-            foreground=Colors.TEXT_SECONDARY,
-            font=Fonts.small(),
-        ).pack(anchor="w")
+        ttk.Label(frame, text="Network path (UNC):").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._net_path_var = tk.StringVar()
+        self._net_path_var.trace_add("write", self._on_backup_path_changed)
+        ttk.Entry(frame, textvariable=self._net_path_var).pack(fill="x")
 
-    def _build_retrieve_sftp_config(self) -> None:
+        ttk.Label(frame, text="Username:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._net_user_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=self._net_user_var).pack(fill="x")
+
+        ttk.Label(frame, text="Password:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._net_pass_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=self._net_pass_var, show="\u25cf").pack(fill="x")
+
+    def _build_sftp_config(self) -> None:
         """Build config fields for SFTP."""
-        frame = ttk.Frame(self._retrieve_config_container)
-        self._retrieve_config_frames["sftp"] = frame
+        frame = ttk.Frame(self._config_container)
+        self._config_frames["sftp"] = frame
 
         fields = [
             ("Host SFTP", "sftp_host", ""),
@@ -255,28 +271,38 @@ class RecoveryTab(ScrollableTab):
             self._ret_sftp_vars[key] = var
 
             if key == "sftp_key_path":
-                f = ttk.Frame(frame)
-                f.pack(fill="x")
-                ttk.Entry(f, textvariable=var).pack(side="left", fill="x", expand=True)
+                row = ttk.Frame(frame)
+                row.pack(fill="x")
+                ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True)
                 ttk.Button(
-                    f,
+                    row,
                     text="Browse...",
                     command=lambda v=var: self._browse_key_to_var(v),
                 ).pack(side="right", padx=(Spacing.SMALL, 0))
             elif "password" in key or "passphrase" in key:
-                ttk.Entry(frame, textvariable=var, show="●").pack(fill="x")
+                ttk.Entry(frame, textvariable=var, show="\u25cf").pack(fill="x")
             elif key == "sftp_port":
                 ttk.Spinbox(frame, textvariable=var, from_=1, to=65535, width=8).pack(anchor="w")
             else:
                 ttk.Entry(frame, textvariable=var).pack(fill="x")
 
-    def _build_retrieve_s3_config(self) -> None:
-        """Build config fields for S3."""
-        frame = ttk.Frame(self._retrieve_config_container)
-        self._retrieve_config_frames["s3"] = frame
+    def _build_s3_config(self) -> None:
+        """Build config fields for S3 cloud.
 
-        ttk.Label(frame, text="Provider:").pack(anchor="w")
+        Layout: Provider, Access Key, Secret Key, then Region label
+        that changes between 'Region (optional):' for Amazon and
+        'Region:' for other providers.  Followed by optional Bucket,
+        Prefix, and Endpoint URL.
+        """
+        frame = ttk.Frame(self._config_container)
+        self._config_frames["s3"] = frame
+
+        self._ret_s3_vars: dict[str, tk.StringVar] = {}
+
+        # Provider
+        ttk.Label(frame, text="Provider:").pack(anchor="w", pady=(Spacing.SMALL, 0))
         self._ret_s3_provider_var = tk.StringVar(value="Amazon AWS")
+        self._ret_s3_provider_var.trace_add("write", self._on_s3_provider_changed)
         providers = [
             "Amazon AWS",
             "scaleway",
@@ -295,65 +321,298 @@ class RecoveryTab(ScrollableTab):
         )
         self._ret_s3_provider_cb.pack(fill="x")
 
-        fields = [
-            ("Bucket", "s3_bucket", ""),
-            ("Prefix (optional)", "s3_prefix", ""),
-            ("Region", "s3_region", "eu-west-1"),
-            ("Access Key", "s3_access_key", ""),
-            ("Secret Key", "s3_secret_key", ""),
-            ("Endpoint URL (optional — auto-detected from provider)", "s3_endpoint_url", ""),
-        ]
+        # Access Key
+        ttk.Label(frame, text="Access Key:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._ret_s3_vars["s3_access_key"] = tk.StringVar()
+        ttk.Entry(frame, textvariable=self._ret_s3_vars["s3_access_key"]).pack(fill="x")
 
-        self._ret_s3_vars: dict[str, tk.StringVar] = {}
-        for label, key, default in fields:
-            ttk.Label(frame, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
-            var = tk.StringVar(value=default)
-            self._ret_s3_vars[key] = var
-            if "secret" in key:
-                ttk.Entry(frame, textvariable=var, show="●").pack(fill="x")
+        # Secret Key
+        ttk.Label(frame, text="Secret Key:").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._ret_s3_vars["s3_secret_key"] = tk.StringVar()
+        ttk.Entry(frame, textvariable=self._ret_s3_vars["s3_secret_key"], show="\u25cf").pack(
+            fill="x"
+        )
+
+        # Region (label changes depending on provider)
+        self._s3_region_label = ttk.Label(frame, text="Region (optional):")
+        self._s3_region_label.pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._ret_s3_vars["s3_region"] = tk.StringVar(value="eu-west-1")
+        ttk.Entry(frame, textvariable=self._ret_s3_vars["s3_region"]).pack(fill="x")
+
+        # Bucket (optional)
+        ttk.Label(frame, text="Bucket (optional):").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._ret_s3_vars["s3_bucket"] = tk.StringVar()
+        ttk.Entry(frame, textvariable=self._ret_s3_vars["s3_bucket"]).pack(fill="x")
+
+        # Prefix (optional)
+        ttk.Label(frame, text="Prefix (optional):").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._ret_s3_vars["s3_prefix"] = tk.StringVar()
+        ttk.Entry(frame, textvariable=self._ret_s3_vars["s3_prefix"]).pack(fill="x")
+
+        # Endpoint URL (optional)
+        ttk.Label(frame, text="Endpoint URL (optional):").pack(anchor="w", pady=(Spacing.SMALL, 0))
+        self._ret_s3_vars["s3_endpoint_url"] = tk.StringVar()
+        ttk.Entry(frame, textvariable=self._ret_s3_vars["s3_endpoint_url"]).pack(fill="x")
+
+    def _on_s3_provider_changed(self, *_args) -> None:
+        """Update Region label and re-fill fields when provider changes.
+
+        Amazon AWS uses a global endpoint so region is optional.
+        All other providers require region to build the endpoint URL.
+
+        When the user manually changes provider, try to find a matching
+        config in the profile.  If found, fill from it.  Otherwise clear
+        all S3 fields so stale credentials from another provider are not
+        shown.
+        """
+        provider = self._ret_s3_provider_var.get()
+        if provider == "Amazon AWS":
+            self._s3_region_label.config(text="Region (optional):")
+        else:
+            self._s3_region_label.config(text="Region:")
+
+        # Skip field updates during programmatic fills
+        if self._filling:
+            return
+
+        # Try to find a matching config in profile for the new provider
+        if self._profile:
+            configs = [self._profile.storage] + list(self._profile.mirror_destinations)
+            for cfg in configs:
+                if cfg.storage_type == StorageType.S3 and cfg.s3_provider == provider:
+                    self._filling = True
+                    try:
+                        self._fill_fields(cfg)
+                    finally:
+                        self._filling = False
+                    return
+
+        # No matching config — clear S3 fields
+        for key, var in self._ret_s3_vars.items():
+            if key not in ("s3_access_key", "s3_secret_key"):
+                var.set("")
             else:
-                ttk.Entry(frame, textvariable=var).pack(fill="x")
+                var.set("")
+
+    # --- Step 2: Select backups ---
+
+    def _build_backup_list_section(self) -> None:
+        """Build the backup selection treeview."""
+        self._list_frame = ttk.LabelFrame(self.inner, text="2. Select backups", padding=Spacing.PAD)
+
+        ttk.Label(
+            self._list_frame,
+            text="Each DIFF contains all changes since the last FULL. "
+            "To restore: select 1 FULL + 1 DIFF.",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w", pady=(0, Spacing.SMALL))
+
+        tree_container = ttk.Frame(self._list_frame)
+        tree_container.pack(fill="both", expand=True)
+
+        columns = ("type", "encrypted", "size", "date")
+        self._tree = ttk.Treeview(
+            tree_container,
+            columns=columns,
+            show="tree headings",
+            height=12,
+            selectmode="none",
+        )
+        self._tree.heading("#0", text="Name", anchor="w")
+        self._tree.heading("type", text="Type", anchor="w")
+        self._tree.heading("encrypted", text="Encrypted", anchor="w")
+        self._tree.heading("size", text="Size", anchor="e")
+        self._tree.heading("date", text="Date", anchor="w")
+
+        self._tree.column("#0", width=280, minwidth=180)
+        self._tree.column("type", width=55, minwidth=45)
+        self._tree.column("encrypted", width=75, minwidth=60)
+        self._tree.column("size", width=80, minwidth=60, anchor="e")
+        self._tree.column("date", width=90, minwidth=70)
+
+        tree_scroll = ttk.Scrollbar(tree_container, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=tree_scroll.set)
+        self._tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+        self._tree.bind("<ButtonRelease-1>", self._on_tree_click)
+
+        bottom_row = ttk.Frame(self._list_frame)
+        bottom_row.pack(fill="x", pady=(Spacing.SMALL, 0))
+
+        self._selection_summary = ttk.Label(
+            bottom_row, text="", foreground=Colors.TEXT_SECONDARY, font=Fonts.small()
+        )
+        self._selection_summary.pack(side="left")
+
+        ttk.Button(bottom_row, text="None", command=self._select_none).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
+        ttk.Button(bottom_row, text="All", command=self._select_all).pack(side="right")
+        ttk.Button(bottom_row, text="\u21bb", width=3, command=self._list_remote_backups).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
+
+    # --- Step 3: Destination ---
+
+    def _build_destination_section(self) -> None:
+        """Build the destination selection."""
+        self._dest_frame = ttk.LabelFrame(self.inner, text="3. Destination", padding=Spacing.PAD)
+        row = ttk.Frame(self._dest_frame)
+        row.pack(fill="x")
+        self.dest_path_var = tk.StringVar()
+        ttk.Entry(row, textvariable=self.dest_path_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Browse...", command=self._browse_dest).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
+
+    # --- Step 4: Encryption password ---
+
+    def _build_encryption_section(self) -> None:
+        """Build the encryption password input."""
+        self._pw_frame = ttk.LabelFrame(
+            self.inner, text="4. Encryption password", padding=Spacing.PAD
+        )
+        self.password_var = tk.StringVar()
+        self.password_var.trace_add("write", self._on_password_changed)
+        self._pw_entry = ttk.Entry(self._pw_frame, textvariable=self.password_var, show="\u25cf")
+        self._pw_entry.pack(fill="x")
+        self._pw_hint = ttk.Label(
+            self._pw_frame, text="", foreground=Colors.TEXT_SECONDARY, font=Fonts.small()
+        )
+        self._pw_hint.pack(anchor="w", pady=(Spacing.SMALL, 0))
+
+    # --- Execute button ---
+
+    def _build_execute_section(self) -> None:
+        """Build the main action button and progress label."""
+        self._exec_frame = ttk.Frame(self.inner)
+        self._exec_btn = ttk.Button(
+            self._exec_frame,
+            text="Restore",
+            style="Accent.TButton",
+            command=self._execute,
+        )
+        self._exec_btn.pack(side="left")
+        self.status_label = ttk.Label(self._exec_frame, text="", foreground=Colors.TEXT_SECONDARY)
+        self.status_label.pack(side="left", padx=Spacing.LARGE)
 
     # ------------------------------------------------------------------
-    # Retrieve callbacks
+    # Visibility management
+    # ------------------------------------------------------------------
+
+    def _on_source_type_changed(self, *_args) -> None:
+        """Show config for selected type, update button visibility."""
+        for frame in self._config_frames.values():
+            frame.pack_forget()
+
+        stype = self.source_type_var.get()
+        frame = self._config_frames.get(stype)
+        if frame:
+            frame.pack(fill="x", pady=(Spacing.SMALL, 0))
+
+        # Show list/scan button for remote types
+        is_remote = stype in (StorageType.SFTP.value, StorageType.S3.value)
+        if is_remote:
+            btn_text = (
+                "Scan for backups" if stype == StorageType.S3.value else "List available backups"
+            )
+            self._list_btn.config(text=btn_text)
+            self._list_btn.pack(anchor="w", pady=(Spacing.LARGE, 0))
+            self._scan_label.pack(anchor="w", pady=(Spacing.SMALL, 0))
+        else:
+            self._list_btn.pack_forget()
+            self._scan_label.pack_forget()
+
+        # Hide treeview when type changes
+        self._list_frame.pack_forget()
+        self._listed_backups.clear()
+        self._selected_backups.clear()
+
+        # Update downstream sections
+        if is_remote:
+            self._hide_post_source_sections()
+        else:
+            self._update_post_source_sections()
+
+    def _update_post_source_sections(self) -> None:
+        """Show or hide destination, password, execute based on state."""
+        stype = self.source_type_var.get()
+        has_source = False
+        has_encrypted = False
+
+        if stype in (StorageType.LOCAL.value, StorageType.NETWORK.value):
+            path = self._get_local_path().strip()
+            if path:
+                has_source = True
+                src = Path(path)
+                if src.exists():
+                    has_encrypted = src.suffix == ".wbenc" or (
+                        src.is_dir() and any(src.rglob("*.wbenc"))
+                    )
+        else:
+            has_source = len(self._selected_backups) > 0
+            has_encrypted = any(
+                b.get("encrypted", False)
+                for b in self._listed_backups
+                if b.get("name") in self._selected_backups
+            )
+
+        if has_source:
+            self._dest_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, 0))
+            if has_encrypted:
+                self._pw_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, 0))
+                self._update_password_hint()
+            else:
+                self._pw_frame.pack_forget()
+            self._exec_frame.pack(
+                fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, Spacing.LARGE)
+            )
+        else:
+            self._hide_post_source_sections()
+
+    def _hide_post_source_sections(self) -> None:
+        """Hide destination, password, and execute sections."""
+        self._dest_frame.pack_forget()
+        self._pw_frame.pack_forget()
+        self._exec_frame.pack_forget()
+
+    def _update_password_hint(self) -> None:
+        """Update the hint text below the password field."""
+        if self._stored_password:
+            self._pw_hint.config(text="Saved password will be used if left unchanged")
+        else:
+            self._pw_hint.config(text="")
+
+    def _get_local_path(self) -> str:
+        """Return the browse path for local/network source types.
+
+        Returns:
+            Path string from the appropriate field.
+        """
+        stype = self.source_type_var.get()
+        if stype == StorageType.NETWORK.value:
+            return self._net_path_var.get()
+        return self.backup_path_var.get()
+
+    # ------------------------------------------------------------------
+    # Auto-fill from profile
     # ------------------------------------------------------------------
 
     def _on_source_changed(self, _event=None) -> None:
-        """Pre-fill storage type and config from profile when source changes."""
+        """Pre-fill type and config from profile when combo changes."""
         config = self._get_source_storage_config()
         if not config:
             return
-        self._fill_retrieve_from_config(config)
-
-    def _on_retrieve_type_changed(self, *_args) -> None:
-        """Show config fields for the selected storage type and auto-fill."""
-        # Always switch visible frame, even during programmatic fill.
-        for frame in self._retrieve_config_frames.values():
-            frame.pack_forget()
-
-        stype = self.retrieve_type_var.get()
-        frame = self._retrieve_config_frames.get(stype)
-        if frame:
-            frame.pack(fill="x")
-
-        # Skip auto-fill when called from _fill_retrieve_from_config
-        # to avoid overwriting the values it is about to set.
-        if self._filling_retrieve:
-            return
-
-        # Auto-fill from profile: find a config matching the selected type.
-        self._filling_retrieve = True
+        self._filling = True
         try:
-            config = self._find_profile_config_by_type(StorageType(stype))
-            if config:
-                self._fill_retrieve_fields(config)
+            self.source_type_var.set(config.storage_type.value)
+            self._fill_fields(config)
         finally:
-            self._filling_retrieve = False
+            self._filling = False
 
     def _find_profile_config_by_type(self, stype: StorageType) -> StorageConfig | None:
-        """Search all profile storage configs for one matching the given type.
-
-        Checks main storage first, then mirrors in order.
+        """Search profile configs for one matching the given type.
 
         Args:
             stype: The storage type to look for.
@@ -370,10 +629,10 @@ class RecoveryTab(ScrollableTab):
         return None
 
     def _get_source_storage_config(self) -> StorageConfig | None:
-        """Get storage config from profile based on selected source.
+        """Get storage config from profile based on combo selection.
 
         Returns:
-            StorageConfig or None if not available.
+            StorageConfig or None.
         """
         if not self._profile:
             return None
@@ -388,58 +647,56 @@ class RecoveryTab(ScrollableTab):
             return mirrors[1] if len(mirrors) > 1 else None
         return None
 
-    def _fill_retrieve_fields(self, config: StorageConfig) -> None:
-        """Fill retrieve field values from a StorageConfig without changing type.
+    def _fill_fields(self, config: StorageConfig) -> None:
+        """Fill UI fields from a StorageConfig.
 
         Args:
             config: Storage configuration to read from.
         """
         stype = config.storage_type
 
-        if stype in (StorageType.LOCAL, StorageType.NETWORK):
-            self._ret_local_path_var.set(config.destination_path or "")
-            self._ret_network_path_var.set(config.destination_path or "")
-
+        if stype == StorageType.LOCAL:
+            self.backup_path_var.set(config.destination_path or "")
+        elif stype == StorageType.NETWORK:
+            self._net_path_var.set(config.destination_path or "")
+            self._net_user_var.set(config.network_username or "")
+            self._net_pass_var.set(config.network_password or "")
         elif stype == StorageType.SFTP:
             for key, var in self._ret_sftp_vars.items():
                 val = getattr(config, key, "")
                 var.set(str(val) if val else "")
-
         elif stype == StorageType.S3:
+            provider = config.s3_provider or "Amazon AWS"
             for key, var in self._ret_s3_vars.items():
+                # For Amazon AWS, skip bucket/prefix/region to encourage
+                # full-account scan (user may not know which bucket).
+                if provider == "Amazon AWS" and key in (
+                    "s3_bucket",
+                    "s3_prefix",
+                    "s3_region",
+                ):
+                    var.set("")
+                    continue
                 val = getattr(config, key, "")
                 var.set(str(val) if val else "")
-            # Set provider last and force Combobox sync.
-            provider = config.s3_provider or "Amazon AWS"
             self._ret_s3_provider_var.set(provider)
             self._ret_s3_provider_cb.set(provider)
 
-    def _fill_retrieve_from_config(self, config: StorageConfig) -> None:
-        """Pre-fill retrieve fields from a StorageConfig (sets type + fields).
-
-        Args:
-            config: Storage configuration to read from.
-        """
-        self._filling_retrieve = True
-        try:
-            self.retrieve_type_var.set(config.storage_type.value)
-            self._fill_retrieve_fields(config)
-        finally:
-            self._filling_retrieve = False
-
-    def _build_retrieve_storage_config(self) -> StorageConfig:
-        """Build a StorageConfig from the retrieve UI fields.
+    def _build_storage_config(self) -> StorageConfig:
+        """Build a StorageConfig from current UI fields.
 
         Returns:
             Configured StorageConfig.
         """
-        stype = StorageType(self.retrieve_type_var.get())
+        stype = StorageType(self.source_type_var.get())
         config = StorageConfig()
 
         if stype == StorageType.LOCAL:
-            config.destination_path = self._ret_local_path_var.get()
+            config.destination_path = self.backup_path_var.get()
         elif stype == StorageType.NETWORK:
-            config.destination_path = self._ret_network_path_var.get()
+            config.destination_path = self._net_path_var.get()
+            config.network_username = self._net_user_var.get()
+            config.network_password = self._net_pass_var.get()
         elif stype == StorageType.SFTP:
             for key, var in self._ret_sftp_vars.items():
                 val = var.get()
@@ -454,76 +711,412 @@ class RecoveryTab(ScrollableTab):
         config.storage_type = stype
         return config
 
-    def _retrieve_all(self) -> None:
-        """Download everything from the configured remote source."""
-        retrieve_dest = self.retrieve_dest_var.get().strip()
-        if not retrieve_dest:
-            messagebox.showwarning("Retrieve", "Please select a retrieve destination.")
-            return
+    # ------------------------------------------------------------------
+    # Backup listing (SFTP) / Scan (S3)
+    # ------------------------------------------------------------------
 
-        config = self._build_retrieve_storage_config()
-        dest = Path(retrieve_dest)
+    def _list_remote_backups(self) -> None:
+        """List or scan backups depending on source type."""
+        stype = self.source_type_var.get()
+        self._list_btn.state(["disabled"])
+        self._hide_post_source_sections()
+        self._list_frame.pack_forget()
 
-        self.retrieve_label.config(
-            text="Retrieving... This may take a long time depending on the backup size.",
-            foreground=Colors.WARNING,
-        )
-        self.retrieve_btn.state(["disabled"])
+        if stype == StorageType.S3.value:
+            bucket = self._ret_s3_vars.get("s3_bucket", tk.StringVar()).get().strip()
+            if bucket:
+                # Direct listing on a specific bucket
+                self._scan_label.config(text="Listing...", foreground=Colors.WARNING)
+                threading.Thread(target=self._do_s3_direct_list, daemon=True).start()
+            else:
+                # Scan all buckets
+                self._start_scan_animation("Listing buckets")
+                threading.Thread(target=self._do_s3_scan, daemon=True).start()
+        else:
+            self._scan_label.config(text="Listing...", foreground=Colors.WARNING)
+            threading.Thread(target=self._do_sftp_list, daemon=True).start()
 
-        def _do_retrieve():
-            try:
-                from src.core.backup_engine import BackupEngine
+    def _do_s3_direct_list(self) -> None:
+        """List backups on a specific S3 bucket (bucket is known)."""
+        try:
+            config = self._build_storage_config()
+            backend = self._create_backend(config)
+            backups = backend.list_backups()
+            self.after(0, lambda: self._on_list_done(backups, grouped=False))
+        except Exception as e:
+            logger.error("Failed to list S3 backups: %s", e)
+            self.after(0, lambda _e=e: self._on_list_error(str(_e)))
 
-                engine = BackupEngine.__new__(BackupEngine)
-                backend = engine._get_backend(config)
-                logger.info("Retrieve: listing backups on %s", config.storage_type.value)
-                backups = backend.list_backups()
-                logger.info("Retrieve: found %d backup(s)", len(backups))
-                if not backups:
+    def _do_sftp_list(self) -> None:
+        """List backups on SFTP in background."""
+        try:
+            config = self._build_storage_config()
+            backend = self._create_backend(config)
+            backups = backend.list_backups()
+            self.after(0, lambda: self._on_list_done(backups, grouped=False))
+        except Exception as e:
+            logger.error("Failed to list backups: %s", e)
+            self.after(0, lambda _e=e: self._on_list_error(str(_e)))
+
+    def _do_s3_scan(self) -> None:
+        """Scan all S3 buckets for Backup Manager backups in background."""
+        try:
+            import boto3
+            from botocore.config import Config as BotoConfig
+
+            from src.storage.s3 import PROVIDER_ENDPOINTS
+
+            provider = self._ret_s3_provider_var.get()
+            access_key = self._ret_s3_vars["s3_access_key"].get()
+            secret_key = self._ret_s3_vars["s3_secret_key"].get()
+            endpoint_url = self._ret_s3_vars["s3_endpoint_url"].get().strip()
+            user_region = self._ret_s3_vars.get("s3_region", tk.StringVar()).get().strip()
+
+            if not endpoint_url:
+                template = PROVIDER_ENDPOINTS.get(provider)
+                if template:
+                    region_for_url = user_region or "us-east-1"
+                    endpoint_url = template.format(region=region_for_url, account_id="")
+
+            boto_config = BotoConfig(
+                connect_timeout=30,
+                read_timeout=60,
+                retries={"max_attempts": 2, "mode": "adaptive"},
+            )
+            client_kwargs = {
+                "service_name": "s3",
+                "aws_access_key_id": access_key,
+                "aws_secret_access_key": secret_key,
+                "config": boto_config,
+            }
+            if endpoint_url:
+                client_kwargs["endpoint_url"] = endpoint_url
+
+            client = boto3.client(**client_kwargs)
+
+            # Step 1: List all buckets
+            response = client.list_buckets()
+            buckets = [b["Name"] for b in response.get("Buckets", [])]
+
+            if not buckets:
+                self.after(0, lambda: self._on_list_error("No buckets found"))
+                return
+
+            total = len(buckets)
+            all_backups: list[dict] = []
+            found_count = 0
+
+            # Step 2: Scan each bucket in parallel
+            def _scan_one_bucket(bucket_name: str) -> list[dict]:
+                try:
+                    region_resp = client.get_bucket_location(Bucket=bucket_name)
+                    region = region_resp.get("LocationConstraint") or "us-east-1"
+
+                    regional_kwargs = dict(client_kwargs)
+                    regional_kwargs["region_name"] = region
+                    if endpoint_url and provider != "Amazon AWS":
+                        tpl = PROVIDER_ENDPOINTS.get(provider)
+                        if tpl:
+                            regional_kwargs["endpoint_url"] = tpl.format(
+                                region=region, account_id=""
+                            )
+
+                    regional_client = boto3.client(**regional_kwargs)
+
+                    resp = regional_client.list_objects_v2(Bucket=bucket_name, MaxKeys=50)
+                    keys = [o["Key"] for o in resp.get("Contents", [])]
+                    has_backups = any(_is_backup_object(k) for k in keys)
+                    if not has_backups:
+                        return []
+
+                    # This bucket has backups — do a full listing
+                    from src.storage.s3 import S3Storage
+
+                    storage = S3Storage(
+                        bucket=bucket_name,
+                        prefix="",
+                        region=region,
+                        access_key=access_key,
+                        secret_key=secret_key,
+                        endpoint_url=regional_kwargs.get("endpoint_url", ""),
+                        provider=provider,
+                    )
+                    backup_list = storage.list_backups()
+                    resolved_endpoint = regional_kwargs.get("endpoint_url", "")
+                    for b in backup_list:
+                        b["_bucket"] = bucket_name
+                        b["_region"] = region
+                        b["_endpoint"] = resolved_endpoint
+                    return backup_list
+                except Exception as exc:
+                    logger.warning("Failed to scan bucket %s: %s", bucket_name, exc)
+                    return []
+
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {pool.submit(_scan_one_bucket, name): name for name in buckets}
+                for scanned, future in enumerate(as_completed(futures), 1):
+                    result = future.result()
+                    if result:
+                        found_count += len(result)
+                        all_backups.extend(result)
                     self.after(
                         0,
-                        lambda: self._on_retrieve_error("No files found on remote."),
+                        lambda s=scanned, t=total, f=found_count: (
+                            self._update_scan_animation(
+                                f"Scanning bucket {s}/{t}",
+                                f"found {f} backups" if f > 0 else "",
+                            )
+                        ),
                     )
-                    return
-                for b in backups:
-                    logger.info("Retrieve: downloading %s", b["name"])
-                    backend.download_backup(b["name"], dest)
-                self.after(0, lambda: self._on_retrieve_done(str(dest)))
-            except Exception as e:
-                logger.error("Failed to retrieve: %s", e)
-                self.after(0, lambda _e=e: self._on_retrieve_error(str(_e)))
 
-        threading.Thread(target=_do_retrieve, daemon=True).start()
+            self.after(0, lambda: self._on_list_done(all_backups, grouped=True))
 
-    def _on_retrieve_done(self, local_path: str) -> None:
-        """Handle successful retrieve.
+        except Exception as e:
+            logger.error("S3 scan failed: %s", e)
+            self.after(0, lambda _e=e: self._on_list_error(str(_e)))
+
+    # ------------------------------------------------------------------
+    # Scan animation
+    # ------------------------------------------------------------------
+
+    def _start_scan_animation(self, base_text: str) -> None:
+        """Start animated scanning message.
 
         Args:
-            local_path: Path to the downloaded backup folder.
+            base_text: Base text to animate with dots.
         """
-        self.retrieve_btn.state(["!disabled"])
-        self.retrieve_label.config(text="Retrieve complete", foreground=Colors.SUCCESS)
-        self.backup_path_var.set(local_path)
+        self._scan_base_text = base_text
+        self._scan_extra = ""
+        self._scan_dot_count = 0
+        self._animate_scan()
 
-    def _on_retrieve_error(self, error: str) -> None:
-        """Handle retrieve error.
+    def _animate_scan(self) -> None:
+        """Animate the scan label with cycling dots."""
+        self._scan_dot_count = (self._scan_dot_count % 3) + 1
+        dots = "." * self._scan_dot_count
+        text = f"\u23f3 {self._scan_base_text}{dots}"
+        if self._scan_extra:
+            text += f" {self._scan_extra}"
+        self._scan_label.config(text=text, foreground=Colors.WARNING)
+        self._scan_animation_id = self.after(500, self._animate_scan)
+
+    def _update_scan_animation(self, base_text: str, extra: str = "") -> None:
+        """Update scan animation text from main thread.
+
+        Args:
+            base_text: New base text.
+            extra: Extra info (e.g. 'found 5 backups').
+        """
+        self._scan_base_text = base_text
+        self._scan_extra = extra
+
+    def _stop_scan_animation(self) -> None:
+        """Stop the scan animation."""
+        if self._scan_animation_id:
+            self.after_cancel(self._scan_animation_id)
+            self._scan_animation_id = None
+
+    # ------------------------------------------------------------------
+    # Listing results
+    # ------------------------------------------------------------------
+
+    def _on_list_done(self, backups: list[dict], grouped: bool = False) -> None:
+        """Handle successful backup listing.
+
+        Args:
+            backups: List of backup dicts.
+            grouped: If True, backups have '_bucket' key for grouping.
+        """
+        self._stop_scan_animation()
+        self._list_btn.state(["!disabled"])
+        self._listed_backups = backups
+        self._selected_backups.clear()
+
+        if grouped:
+            bucket_count = len({b.get("_bucket", "") for b in backups})
+            self._scan_label.config(
+                text=f"\u2713 Scan complete \u2014 {len(backups)} backups in {bucket_count} bucket(s)",
+                foreground=Colors.SUCCESS,
+            )
+        else:
+            self._scan_label.config(text="", foreground=Colors.TEXT_SECONDARY)
+
+        self._populate_tree(grouped=grouped)
+        self._list_frame.pack(
+            fill="x",
+            padx=Spacing.LARGE,
+            pady=(Spacing.MEDIUM, 0),
+            after=self._source_frame,
+        )
+        self._update_post_source_sections()
+
+    def _on_list_error(self, error: str) -> None:
+        """Handle listing error.
 
         Args:
             error: Error message.
         """
-        self.retrieve_btn.state(["!disabled"])
-        self.retrieve_label.config(text=f"Error: {error}", foreground=Colors.DANGER)
+        self._stop_scan_animation()
+        self._list_btn.state(["!disabled"])
+        self._listed_backups.clear()
+        self._selected_backups.clear()
+        self._scan_label.config(text=f"\u2717 {error}", foreground=Colors.DANGER)
+        self._populate_tree()
+        self._list_frame.pack(
+            fill="x",
+            padx=Spacing.LARGE,
+            pady=(Spacing.MEDIUM, 0),
+            after=self._source_frame,
+        )
+        self._hide_post_source_sections()
+        self._selection_summary.config(text="", foreground=Colors.TEXT_SECONDARY)
+
+    def _populate_tree(self, grouped: bool = False) -> None:
+        """Populate the treeview with listed backups.
+
+        Args:
+            grouped: If True, group by _bucket field.
+        """
+        for item in self._tree.get_children():
+            self._tree.delete(item)
+
+        sorted_backups = sorted(
+            self._listed_backups,
+            key=lambda b: b.get("modified", 0),
+            reverse=True,
+        )
+
+        if grouped:
+            # Group by bucket
+            buckets: dict[str, list[dict]] = {}
+            for b in sorted_backups:
+                bucket = b.get("_bucket", "unknown")
+                buckets.setdefault(bucket, []).append(b)
+
+            for bucket_name, bucket_backups in buckets.items():
+                bucket_id = f"_bucket_{bucket_name}"
+                self._tree.insert(
+                    "",
+                    "end",
+                    iid=bucket_id,
+                    text=f"\u25b8 {bucket_name}",
+                    values=("", "", "", ""),
+                    open=True,
+                )
+                for backup in bucket_backups:
+                    name = backup.get("name", "")
+                    btype = _parse_backup_type(name)
+                    enc = "Yes" if backup.get("encrypted") else ""
+                    size = _human_size(backup.get("size", 0))
+                    date = _format_date(backup.get("modified", 0))
+                    self._tree.insert(
+                        bucket_id,
+                        "end",
+                        iid=name,
+                        text=f"  {name}",
+                        values=(btype, enc, size, date),
+                    )
+        else:
+            for backup in sorted_backups:
+                name = backup.get("name", "")
+                btype = _parse_backup_type(name)
+                enc = "Yes" if backup.get("encrypted") else ""
+                size = _human_size(backup.get("size", 0))
+                date = _format_date(backup.get("modified", 0))
+                self._tree.insert(
+                    "",
+                    "end",
+                    iid=name,
+                    text=f"  {name}",
+                    values=(btype, enc, size, date),
+                )
+
+        self._update_selection_summary()
+
+    # ------------------------------------------------------------------
+    # Treeview selection
+    # ------------------------------------------------------------------
+
+    def _on_tree_click(self, event) -> None:
+        """Toggle backup selection on click."""
+        item = self._tree.identify_row(event.y)
+        if not item or item.startswith("_bucket_"):
+            return
+
+        if item in self._selected_backups:
+            self._selected_backups.discard(item)
+            self._tree.item(item, text=f"  {item}")
+        else:
+            self._selected_backups.add(item)
+            self._tree.item(item, text=f"\u2713 {item}")
+
+        self._update_selection_summary()
+        self._update_post_source_sections()
+
+    def _select_all(self) -> None:
+        """Select all listed backups (skip bucket headers)."""
+        self._selected_backups.clear()
+        for item in self._get_all_backup_items():
+            self._selected_backups.add(item)
+            self._tree.item(item, text=f"\u2713 {item}")
+        self._update_selection_summary()
+        self._update_post_source_sections()
+
+    def _select_none(self) -> None:
+        """Deselect all backups."""
+        for item in self._selected_backups:
+            if self._tree.exists(item):
+                self._tree.item(item, text=f"  {item}")
+        self._selected_backups.clear()
+        self._update_selection_summary()
+        self._update_post_source_sections()
+
+    def _get_all_backup_items(self) -> list[str]:
+        """Get all selectable backup item IDs (skip bucket headers).
+
+        Returns:
+            List of treeview item IDs that are actual backups.
+        """
+        items = []
+        for item in self._tree.get_children():
+            if item.startswith("_bucket_"):
+                for child in self._tree.get_children(item):
+                    items.append(child)
+            else:
+                items.append(item)
+        return items
+
+    def _update_selection_summary(self) -> None:
+        """Update the selection summary label."""
+        if not self._listed_backups and not self._selected_backups:
+            self._selection_summary.config(
+                text="No backups found", foreground=Colors.TEXT_SECONDARY
+            )
+            return
+
+        count = len(self._selected_backups)
+        if count == 0:
+            self._selection_summary.config(
+                text="No backups selected", foreground=Colors.TEXT_SECONDARY
+            )
+            return
+
+        total_size = sum(
+            b.get("size", 0)
+            for b in self._listed_backups
+            if b.get("name") in self._selected_backups
+        )
+        self._selection_summary.config(
+            text=f"Selected: {count} backup(s) ({_human_size(total_size)})",
+            foreground=Colors.TEXT,
+        )
 
     # ------------------------------------------------------------------
     # Browse helpers
     # ------------------------------------------------------------------
 
     def _browse_backup(self) -> None:
-        """Browse for a backup folder or encrypted .tar.wbenc file.
-
-        Opens a file dialog first (to allow selecting .tar.wbenc files).
-        If the user cancels, falls back to a folder dialog.
-        """
+        """Browse for a backup folder or encrypted .tar.wbenc file."""
         path = filedialog.askopenfilename(
             title="Select backup (.tar.wbenc) or cancel for folder",
             filetypes=[
@@ -537,31 +1130,14 @@ class RecoveryTab(ScrollableTab):
             self.backup_path_var.set(path)
 
     def _browse_dest(self) -> None:
-        """Browse for a restore destination folder."""
-        path = filedialog.askdirectory(title="Select restore destination")
+        """Browse for a destination folder."""
+        path = filedialog.askdirectory(title="Select destination")
         if path:
             self.dest_path_var.set(path)
 
-    def _browse_retrieve_dest(self) -> None:
-        """Browse for a retrieve destination folder."""
-        path = filedialog.askdirectory(title="Select retrieve destination")
-        if path:
-            self.retrieve_dest_var.set(path)
-
-    @staticmethod
-    def _browse_to_var(var: tk.StringVar) -> None:
-        """Browse for a directory and set result to a StringVar.
-
-        Args:
-            var: Target StringVar to update.
-        """
-        path = filedialog.askdirectory(title="Select folder")
-        if path:
-            var.set(path)
-
     @staticmethod
     def _browse_key_to_var(var: tk.StringVar) -> None:
-        """Browse for an SSH key file and set result to a StringVar.
+        """Browse for an SSH key file.
 
         Args:
             var: Target StringVar to update.
@@ -581,15 +1157,23 @@ class RecoveryTab(ScrollableTab):
     # ------------------------------------------------------------------
 
     def _on_backup_path_changed(self, *_args) -> None:
-        """Check for encrypted files when backup path changes."""
-        path = self.backup_path_var.get().strip()
+        """Update sections when backup path changes (local/network mode)."""
+        stype = self.source_type_var.get()
+        if stype not in (StorageType.LOCAL.value, StorageType.NETWORK.value):
+            return
+
+        path = self._get_local_path().strip()
         if not path:
             self.password_var.set("")
             self._user_modified_pw = False
+            self._update_post_source_sections()
             return
+
         src = Path(path)
         if not src.exists():
+            self._update_post_source_sections()
             return
+
         has_encrypted = src.suffix == ".wbenc" or (src.is_dir() and any(src.rglob("*.wbenc")))
         if has_encrypted and self._stored_password:
             self._user_modified_pw = False
@@ -599,10 +1183,11 @@ class RecoveryTab(ScrollableTab):
             self.password_var.set("")
             self._user_modified_pw = False
 
+        self._update_post_source_sections()
+
     def _on_password_changed(self, *_args) -> None:
         """Track manual password edits."""
-        current = self.password_var.get()
-        if current != _PASSWORD_PLACEHOLDER:
+        if self.password_var.get() != _PASSWORD_PLACEHOLDER:
             self._user_modified_pw = True
 
     def _get_effective_password(self) -> str:
@@ -616,56 +1201,116 @@ class RecoveryTab(ScrollableTab):
         return self._stored_password
 
     # ------------------------------------------------------------------
-    # Restore
+    # Execute (restore)
     # ------------------------------------------------------------------
 
-    def _restore(self) -> None:
-        """Validate inputs and launch restore in background."""
-        backup_path = self.backup_path_var.get().strip()
+    def _execute(self) -> None:
+        """Validate inputs and launch restore."""
+        stype = self.source_type_var.get()
         dest_path = self.dest_path_var.get().strip()
 
+        if not dest_path:
+            messagebox.showwarning("Recovery", "Please select a destination.")
+            return
+
+        if stype in (StorageType.LOCAL.value, StorageType.NETWORK.value):
+            self._execute_local(dest_path)
+        else:
+            self._execute_remote(dest_path)
+
+    def _execute_local(self, dest_path: str) -> None:
+        """Handle local/network backup restore.
+
+        Args:
+            dest_path: Destination directory path.
+        """
+        backup_path = self._get_local_path().strip()
         if not backup_path:
-            messagebox.showwarning("Restore", "Please select a backup folder.")
+            messagebox.showwarning("Recovery", "Please select a backup.")
             return
         src = Path(backup_path)
         if not src.exists():
-            messagebox.showwarning("Restore", f"Backup does not exist:\n{backup_path}")
-            return
-        if not dest_path:
-            messagebox.showwarning("Restore", "Please select a restore destination.")
+            messagebox.showwarning("Recovery", f"Backup does not exist:\n{backup_path}")
             return
 
         password = self._get_effective_password()
-
         has_encrypted = src.suffix == ".wbenc" or (
             src.is_dir() and any(f.suffix == ".wbenc" for f in src.rglob("*"))
         )
         if has_encrypted and not password:
             messagebox.showwarning(
-                "Restore",
+                "Recovery",
                 "This backup contains encrypted files but no password "
                 "was provided.\nPlease enter your encryption password.",
             )
             return
 
-        self.status_label.config(
-            text="Restoring... This may take a long time depending on the backup size.",
-            foreground=Colors.WARNING,
-        )
-        self.restore_btn.state(["disabled"])
-
+        self._set_executing(True, "Restoring...")
         threading.Thread(
-            target=self._do_restore,
+            target=self._do_local_restore,
             args=(src, Path(dest_path), password),
             daemon=True,
         ).start()
 
-    def _do_restore(self, src: Path, dst: Path, password: str) -> None:
-        """Restore files from backup to destination.
+    def _execute_remote(self, dest_path: str) -> None:
+        """Handle remote backup retrieve + restore.
 
-        Supports two backup formats:
-        - .tar.wbenc file: encrypted tar archive (streamed decryption)
-        - Plain directory: copy files as-is
+        Args:
+            dest_path: Destination directory path.
+        """
+        if not self._selected_backups:
+            messagebox.showwarning("Recovery", "Please select at least one backup.")
+            return
+
+        password = self._get_effective_password()
+
+        # Build config for each selected backup (may span multiple buckets)
+        selected_with_config = []
+        for name in self._selected_backups:
+            backup_info = next((b for b in self._listed_backups if b.get("name") == name), None)
+            if not backup_info:
+                continue
+            bucket = backup_info.get("_bucket")
+            if bucket:
+                # Backup came from S3 scan — use stored region and endpoint
+                cfg = self._build_storage_config()
+                cfg.s3_bucket = bucket
+                cfg.s3_prefix = ""
+                cfg.s3_region = backup_info.get("_region", "")
+                cfg.s3_endpoint_url = backup_info.get("_endpoint", "")
+            else:
+                cfg = self._build_storage_config()
+            selected_with_config.append((name, cfg, backup_info.get("modified", 0)))
+
+        selected_with_config.sort(key=lambda x: x[2])
+        dest = Path(dest_path)
+
+        self._set_executing(True, "Restoring...")
+        threading.Thread(
+            target=self._do_remote_restore,
+            args=(selected_with_config, dest, password),
+            daemon=True,
+        ).start()
+
+    def _set_executing(self, running: bool, text: str = "") -> None:
+        """Enable/disable the execute button and update status.
+
+        Args:
+            running: True to disable button, False to re-enable.
+            text: Status text.
+        """
+        if running:
+            self._exec_btn.state(["disabled"])
+            self.status_label.config(text=text, foreground=Colors.WARNING)
+        else:
+            self._exec_btn.state(["!disabled"])
+
+    # ------------------------------------------------------------------
+    # Local restore (background thread)
+    # ------------------------------------------------------------------
+
+    def _do_local_restore(self, src: Path, dst: Path, password: str) -> None:
+        """Restore files from a local backup to destination.
 
         Args:
             src: Source backup (directory or .tar.wbenc file).
@@ -673,7 +1318,6 @@ class RecoveryTab(ScrollableTab):
             password: Decryption password (empty string if not needed).
         """
         try:
-            # Detect .tar.wbenc file (either src itself or alongside a dir)
             tar_wbenc = None
             if src.is_file() and src.name.endswith(".tar.wbenc"):
                 tar_wbenc = src
@@ -683,19 +1327,17 @@ class RecoveryTab(ScrollableTab):
                     tar_wbenc = candidate
 
             if tar_wbenc is not None:
-                self._restore_encrypted_tar(tar_wbenc, dst, password)
+                count = self._decrypt_and_extract(tar_wbenc, dst, password)
+                msg = f"Restore complete \u2014 {count} files decrypted"
+                self.after(0, lambda: self._on_done(True, msg))
                 return
 
-            # Plain directory: copy files (skip internal .wbverify manifests)
-            copied = 0
             files = [f for f in src.rglob("*") if f.is_file() and not f.name.endswith(".wbverify")]
             if not files:
-                self.after(
-                    0,
-                    lambda: self._restore_done(False, "No files found in backup"),
-                )
+                self.after(0, lambda: self._on_done(False, "No files found in backup"))
                 return
 
+            copied = 0
             for f in files:
                 rel = f.relative_to(src)
                 target = dst / rel
@@ -703,54 +1345,141 @@ class RecoveryTab(ScrollableTab):
                 shutil.copy2(f, target)
                 copied += 1
 
-            msg = f"Restore complete — {copied} files copied"
-            self.after(0, lambda: self._restore_done(True, msg))
+            msg = f"Restore complete \u2014 {copied} files copied"
+            self.after(0, lambda: self._on_done(True, msg))
 
         except Exception as e:
             logger.exception("Restore failed")
-            self.after(0, lambda _e=e: self._restore_done(False, str(_e)))
+            self.after(0, lambda _e=e: self._on_done(False, str(_e)))
 
-    def _restore_encrypted_tar(
+    # ------------------------------------------------------------------
+    # Remote restore (background thread)
+    # ------------------------------------------------------------------
+
+    def _do_remote_restore(
         self,
-        tar_path: Path,
-        dst: Path,
+        selected_with_config: list[tuple[str, StorageConfig, float]],
+        dest: Path,
         password: str,
     ) -> None:
-        """Restore from a .tar.wbenc encrypted archive.
+        """Download and restore selected backups from remote.
+
+        Args:
+            selected_with_config: List of (name, config, modified) tuples.
+            dest: Local destination directory.
+            password: Decryption password.
+        """
+        try:
+            total = len(selected_with_config)
+
+            for idx, (name, config, _modified) in enumerate(selected_with_config, 1):
+                self.after(
+                    0,
+                    lambda n=name, i=idx: self.status_label.config(
+                        text=f"Downloading {i}/{total}... {n}",
+                        foreground=Colors.WARNING,
+                    ),
+                )
+                backend = self._create_backend(config)
+                local_path = backend.download_backup(name, dest)
+                logger.info("Downloaded %s to %s", name, local_path)
+
+                # Detect encrypted content in the downloaded backup
+                tar_file = self._find_wbenc_file(local_path, name)
+                if tar_file:
+                    if not password:
+                        msg = (
+                            f"Backup '{name}' is encrypted. "
+                            "Please provide your encryption password."
+                        )
+                        self.after(0, lambda m=msg: self._on_done(False, m))
+                        return
+                    self.after(
+                        0,
+                        lambda n=name, i=idx: self.status_label.config(
+                            text=f"Decrypting {i}/{total}... {n}",
+                            foreground=Colors.WARNING,
+                        ),
+                    )
+                    self._decrypt_and_extract(tar_file, dest, password)
+
+            msg = f"Restore complete \u2014 {total} backup(s) processed"
+            self.after(0, lambda: self._on_done(True, msg))
+
+        except Exception as e:
+            logger.error("Remote restore failed: %s", e)
+            self.after(0, lambda _e=e: self._on_done(False, str(_e)))
+
+    # ------------------------------------------------------------------
+    # Shared decryption
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _find_wbenc_file(local_path: Path, name: str) -> Path | None:
+        """Find the .tar.wbenc file for a downloaded backup.
+
+        Searches the downloaded path itself, sibling files in the parent
+        directory, and recursively inside the directory if it is a folder.
+
+        Args:
+            local_path: Path returned by download_backup().
+            name: Original backup name.
+
+        Returns:
+            Path to .tar.wbenc file, or None.
+        """
+        if local_path.is_file() and str(local_path).endswith(".tar.wbenc"):
+            return local_path
+        if local_path.is_dir():
+            # Check inside the directory
+            internal = list(local_path.rglob("*.wbenc"))
+            if internal:
+                return internal[0]
+            # Check sibling files (e.g. name.tar.wbenc next to name/)
+            siblings = list(local_path.parent.glob(f"{name}*.tar.wbenc"))
+            if siblings:
+                return siblings[0]
+        return None
+
+    @staticmethod
+    def _decrypt_and_extract(tar_path: Path, dst: Path, password: str) -> int:
+        """Decrypt and extract a .tar.wbenc archive.
 
         Args:
             tar_path: Path to the .tar.wbenc file.
             dst: Destination directory.
             password: Decryption password.
+
+        Returns:
+            Number of files extracted.
+
+        Raises:
+            RuntimeError: On wrong password.
+            Exception: On other failures.
         """
         import tarfile
 
-        if not password:
-            self.after(
-                0,
-                lambda: self._restore_done(False, "Password required for encrypted backup"),
-            )
-            return
+        backup_name = tar_path.name
+        if backup_name.endswith(".tar.wbenc"):
+            backup_name = backup_name[: -len(".tar.wbenc")]
+        restore_dir = dst / backup_name
+        long_path_mkdir(restore_dir)
+
+        count = 0
+        strip_prefix = ""
 
         try:
-            # Create a subfolder named after the backup file
-            # e.g. "loicata_FULL_2026-04-01_215315.tar.wbenc" → "loicata_FULL_2026-04-01_215315"
-            backup_name = tar_path.name
-            if backup_name.endswith(".tar.wbenc"):
-                backup_name = backup_name[: -len(".tar.wbenc")]
-            restore_dir = dst / backup_name
-            long_path_mkdir(restore_dir)
+            from cryptography.exceptions import InvalidTag
+        except ImportError:
+            InvalidTag = None
 
-            count = 0
-            strip_prefix = ""
+        try:
             with open(tar_path, "rb") as f:
                 reader = DecryptingReader(f, password)
                 with tarfile.open(fileobj=reader, mode="r|") as tar:
                     for member in tar:
                         if member.name.endswith(".wbverify"):
                             continue
-                        # Strip the first directory level from tar paths
-                        # e.g. "loicata/Documents/file.txt" → "Documents/file.txt"
                         if not strip_prefix and "/" in member.name:
                             strip_prefix = member.name.split("/")[0] + "/"
                         name = member.name
@@ -761,7 +1490,6 @@ class RecoveryTab(ScrollableTab):
                         if member.isdir():
                             long_path_mkdir(restore_dir / name)
                             continue
-                        # Extract file with long path support
                         target = restore_dir / name
                         long_path_mkdir(target.parent)
                         fileobj = tar.extractfile(member)
@@ -769,27 +1497,48 @@ class RecoveryTab(ScrollableTab):
                             with open(long_path_str(target), "wb") as out:
                                 shutil.copyfileobj(fileobj, out)
                             count += 1
-
-            msg = f"Restore complete — {count} files decrypted"
-            self.after(0, lambda: self._restore_done(True, msg))
-
         except Exception as e:
+            if InvalidTag is not None and isinstance(e, InvalidTag):
+                raise RuntimeError("The password you provided is incorrect") from e
             err_msg = str(e)
             if "tag" in err_msg.lower() or "authentication" in err_msg.lower():
-                err_msg = "Decryption failed — wrong password?"
-            logger.exception("Encrypted restore failed")
-            self.after(0, lambda _e=err_msg: self._restore_done(False, _e))
+                raise RuntimeError("The password you provided is incorrect") from e
+            raise
 
-    def _restore_done(self, ok: bool, msg: str) -> None:
-        """Display restore result.
+        return count
+
+    # ------------------------------------------------------------------
+    # Completion handler
+    # ------------------------------------------------------------------
+
+    def _on_done(self, ok: bool, msg: str) -> None:
+        """Display result.
 
         Args:
-            ok: True if restore succeeded.
+            ok: True if operation succeeded.
             msg: Status message.
         """
-        self.restore_btn.state(["!disabled"])
+        self._set_executing(False)
         color = Colors.SUCCESS if ok else Colors.DANGER
         self.status_label.config(text=msg, foreground=color)
+
+    # ------------------------------------------------------------------
+    # Backend factory
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_backend(config: StorageConfig) -> StorageBackend:
+        """Create a storage backend from config.
+
+        Args:
+            config: Storage configuration.
+
+        Returns:
+            Configured StorageBackend instance.
+        """
+        from src.core.backup_engine import create_backend
+
+        return create_backend(config)
 
     # ------------------------------------------------------------------
     # Profile loading
@@ -801,6 +1550,19 @@ class RecoveryTab(ScrollableTab):
         Args:
             profile: The active backup profile.
         """
+        # Skip full reset if reloading the same profile (e.g. after silent save).
+        # This preserves user edits in the source section.
+        same_profile = (
+            self._profile is not None
+            and hasattr(profile, "id")
+            and hasattr(self._profile, "id")
+            and profile.id == self._profile.id
+        )
+        if same_profile:
+            self._profile = profile
+            self._stored_password = profile.encryption.stored_password or ""
+            return
+
         self._profile = profile
         self._stored_password = profile.encryption.stored_password or ""
         self._user_modified_pw = False
@@ -808,13 +1570,47 @@ class RecoveryTab(ScrollableTab):
         self.backup_path_var.set("")
         self.dest_path_var.set("")
         self.status_label.config(text="")
-        self.retrieve_label.config(text="")
+        self._scan_label.config(text="")
+        self._listed_backups.clear()
+        self._selected_backups.clear()
+        self._stop_scan_animation()
 
-        # Pre-fill retrieve from profile storage
+        # Show auto-fill combo
+        self._autofill_frame.pack(fill="x", pady=(0, Spacing.MEDIUM))
+
+        # Auto-fill from main storage
+        self._list_frame.pack_forget()
+        self._hide_post_source_sections()
         self.source_var.set("Storage")
         config = self._get_source_storage_config()
         if config:
-            self._fill_retrieve_from_config(config)
+            self._filling = True
+            try:
+                self.source_type_var.set(config.storage_type.value)
+                self._fill_fields(config)
+            finally:
+                self._filling = False
+
+    def load_no_profile(self) -> None:
+        """Reset tab for use without a profile (fresh install)."""
+        self._profile = None
+        self._stored_password = ""
+        self._user_modified_pw = False
+        self.password_var.set("")
+        self.backup_path_var.set("")
+        self.dest_path_var.set("")
+        self.status_label.config(text="")
+        self._scan_label.config(text="")
+        self._listed_backups.clear()
+        self._selected_backups.clear()
+        self._stop_scan_animation()
+
+        # Hide auto-fill combo
+        self._autofill_frame.pack_forget()
+
+        self._list_frame.pack_forget()
+        self._hide_post_source_sections()
+        self.source_type_var.set(StorageType.LOCAL.value)
 
     def collect_config(self) -> dict:
         """Recovery tab has no persistent config.

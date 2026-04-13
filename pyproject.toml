@@ -1,6 +1,6 @@
 [project]
 name = "backup-manager"
-version = "3.3.2"
+version = "3.3.3"
 description = "Backup management system with encryption, scheduling, and multi-destination support"
 authors = [{name = "Loic Ader loicata.com"}]
 license = {text = "GPL-3.0-or-later"}

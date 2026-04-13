@@ -539,8 +539,8 @@ class TestBandwidthSpeedtestBucketRouting:
 
     def test_s3_lock_without_speedtest_raises(self, tmp_config_dir):
         """S3 Object Lock + no speedtest bucket → raises ValueError."""
+
         import pytest
-        from unittest.mock import patch
 
         from src.storage.s3 import S3Storage
 

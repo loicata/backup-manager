@@ -12,12 +12,13 @@ class RetentionTab(ttk.Frame):
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
+        self._schedule_freq: ScheduleFrequency = ScheduleFrequency.DAILY
         self._build_ui()
 
     def _build_ui(self):
         frame = ttk.LabelFrame(
             self,
-            text="GFS Retention (Grandfather-Father-Son)",
+            text="GFS Retention",
             padding=Spacing.PAD,
         )
         frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
@@ -54,13 +55,21 @@ class RetentionTab(ttk.Frame):
         self._update_summary()
 
     def _update_summary(self) -> None:
-        """Update the retention summary text based on current values."""
+        """Update the retention summary text based on current values.
+
+        Only shows lines for visible retention levels (depends on
+        schedule frequency: monthly hides daily+weekly, weekly hides daily).
+        """
         try:
             user_daily = self._gfs_vars["gfs_daily"].get()
             user_weekly = self._gfs_vars["gfs_weekly"].get()
             user_monthly = self._gfs_vars["gfs_monthly"].get()
         except (tk.TclError, ValueError):
             return
+
+        freq = self._schedule_freq
+        show_daily = freq not in (ScheduleFrequency.WEEKLY, ScheduleFrequency.MONTHLY)
+        show_weekly = freq != ScheduleFrequency.MONTHLY
 
         # Internal values = user values + 1 (today is always kept)
         real_daily = user_daily + 1
@@ -70,31 +79,41 @@ class RetentionTab(ttk.Frame):
         lines = ["Retention summary:"]
 
         # Daily line
-        if user_daily == 0:
-            lines.append("  • Today only (no history)")
-        elif user_daily == 1:
-            lines.append("  • Today + yesterday")
-        else:
-            lines.append(f"  • Today + {user_daily} days of history")
+        if show_daily:
+            if user_daily == 0:
+                lines.append("  \u2022 Today only (no history)")
+            elif user_daily == 1:
+                lines.append("  \u2022 Today + yesterday")
+            else:
+                lines.append(f"  \u2022 Today + {user_daily} days of history")
 
         # Weekly line
-        if user_weekly == 0:
-            lines.append("  • No weekly history")
-        elif user_weekly == 1:
-            lines.append("  • 1 week of history (1 weekly backup)")
-        else:
-            lines.append(f"  • {user_weekly} weeks of history ({user_weekly} weekly backups)")
+        if show_weekly:
+            if user_weekly == 0:
+                lines.append("  \u2022 No weekly history")
+            elif user_weekly == 1:
+                lines.append("  \u2022 1 week of history (1 weekly backup)")
+            else:
+                lines.append(
+                    f"  \u2022 {user_weekly} weeks of history ({user_weekly} weekly backups)"
+                )
 
         # Monthly line
         if user_monthly == 0:
-            lines.append("  • No monthly history")
+            lines.append("  \u2022 No monthly history")
         elif user_monthly == 1:
-            lines.append("  • 1 month of history (1 monthly backup)")
+            lines.append("  \u2022 1 month of history (1 monthly backup)")
         else:
-            lines.append(f"  • {user_monthly} months of history ({user_monthly} monthly backups)")
+            lines.append(
+                f"  \u2022 {user_monthly} months of history ({user_monthly} monthly backups)"
+            )
 
-        # Total calculation
-        total = real_daily + max(real_weekly - 1, 0) + max(real_monthly - 1, 0)
+        # Total calculation (only count visible levels)
+        total = real_monthly
+        if show_weekly:
+            total += max(real_weekly - 1, 0)
+        if show_daily:
+            total += max(real_daily - 1, 0)
         lines.append(f"Backups kept: {total}")
 
         self._summary_label.config(text="\n".join(lines))
@@ -113,14 +132,30 @@ class RetentionTab(ttk.Frame):
             internal_val = getattr(r, key, var.get() + 1)
             var.set(max(internal_val - 1, 0))
 
-        # Hide daily row when schedule is weekly or monthly
+        # Store frequency for summary updates
         freq = profile.schedule.frequency
+        self._schedule_freq = freq
+
+        # Hide rows irrelevant to the schedule frequency
         daily_row = self._gfs_rows.get("gfs_daily")
+        weekly_row = self._gfs_rows.get("gfs_weekly")
+        monthly_row = self._gfs_rows.get("gfs_monthly")
+
+        # Daily: hidden when schedule is weekly or monthly
         if daily_row:
             if freq in (ScheduleFrequency.WEEKLY, ScheduleFrequency.MONTHLY):
                 daily_row.pack_forget()
             else:
-                daily_row.pack(fill="x", pady=2)
+                daily_row.pack(fill="x", pady=2, before=weekly_row)
+
+        # Weekly: hidden when schedule is monthly
+        if weekly_row:
+            if freq == ScheduleFrequency.MONTHLY:
+                weekly_row.pack_forget()
+            else:
+                weekly_row.pack(fill="x", pady=2, before=monthly_row)
+
+        self._update_summary()
 
     def collect_config(self) -> dict:
         """Collect retention configuration.

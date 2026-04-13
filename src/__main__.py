@@ -190,7 +190,7 @@ def main():
     try:
         import tkinter as tk
 
-        from src.core.config import BackupProfile, ConfigManager
+        from src.core.config import ConfigManager
         from src.security.integrity_check import verify_integrity
         from src.ui.app import BackupManagerApp
         from src.ui.wizard import SetupWizard

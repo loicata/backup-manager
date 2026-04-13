@@ -383,6 +383,12 @@ class BackupManagerApp:
             if profile:
                 self.config_manager.save_profile(profile)
                 self._load_profiles()
+
+                # Switch to Run tab and prevent auto-backup
+                self.notebook.select(self.tab_run)
+                from datetime import datetime
+
+                self.scheduler._state.set_last_trigger(profile.id, datetime.now())
             else:
                 # Wizard cancelled — revert to previous mode
                 self._current_mode = old_mode

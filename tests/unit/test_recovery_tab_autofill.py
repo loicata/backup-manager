@@ -551,7 +551,7 @@ class TestTreeviewSelection:
         enc_values = recovery_tab._tree.item("enc_FULL", "values")
         plain_values = recovery_tab._tree.item("plain_FULL", "values")
         assert enc_values[1] == "Yes"
-        assert plain_values[1] == ""
+        assert plain_values[1] == "No"
 
 
 # ------------------------------------------------------------------

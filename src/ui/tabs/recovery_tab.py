@@ -3,8 +3,8 @@
 Single linear flow:
   1. Source  (External drive / Network / SFTP / S3 with scan)
   2. Select backups  (treeview — remote only, grouped by bucket for S3)
-  3. Destination
-  4. Encryption password  (only when encrypted backups are selected)
+  3. Encryption password  (only when encrypted backups are selected)
+  4. Destination
 """
 
 import logging
@@ -221,13 +221,15 @@ class RecoveryTab(ScrollableTab):
         frame = ttk.Frame(self._config_container)
         self._config_frames["local"] = frame
 
-        ttk.Label(frame, text="Destination path:").pack(anchor="w", pady=(Spacing.SMALL, 0))
         row = ttk.Frame(frame)
-        row.pack(fill="x")
+        row.pack(fill="x", pady=(Spacing.SMALL, 0))
         self.backup_path_var = tk.StringVar()
         self.backup_path_var.trace_add("write", self._on_backup_path_changed)
         ttk.Entry(row, textvariable=self.backup_path_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="Browse...", command=self._browse_backup).pack(
+        ttk.Button(row, text="Browse encrypted backup", command=self._browse_encrypted).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
+        ttk.Button(row, text="Browse backup", command=self._browse_folder).pack(
             side="right", padx=(Spacing.SMALL, 0)
         )
 
@@ -336,7 +338,7 @@ class RecoveryTab(ScrollableTab):
         # Region (label changes depending on provider)
         self._s3_region_label = ttk.Label(frame, text="Region (optional):")
         self._s3_region_label.pack(anchor="w", pady=(Spacing.SMALL, 0))
-        self._ret_s3_vars["s3_region"] = tk.StringVar(value="eu-west-1")
+        self._ret_s3_vars["s3_region"] = tk.StringVar(value="")
         ttk.Entry(frame, textvariable=self._ret_s3_vars["s3_region"]).pack(fill="x")
 
         # Bucket (optional)
@@ -425,11 +427,11 @@ class RecoveryTab(ScrollableTab):
         self._tree.heading("size", text="Size", anchor="e")
         self._tree.heading("date", text="Date", anchor="w")
 
-        self._tree.column("#0", width=280, minwidth=180)
-        self._tree.column("type", width=55, minwidth=45)
-        self._tree.column("encrypted", width=75, minwidth=60)
-        self._tree.column("size", width=80, minwidth=60, anchor="e")
-        self._tree.column("date", width=90, minwidth=70)
+        self._tree.column("#0", width=350, minwidth=200)
+        self._tree.column("type", width=50, minwidth=40)
+        self._tree.column("encrypted", width=70, minwidth=55)
+        self._tree.column("size", width=90, minwidth=70, anchor="e")
+        self._tree.column("date", width=100, minwidth=80)
 
         tree_scroll = ttk.Scrollbar(tree_container, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=tree_scroll.set)
@@ -453,11 +455,11 @@ class RecoveryTab(ScrollableTab):
             side="right", padx=(Spacing.SMALL, 0)
         )
 
-    # --- Step 3: Destination ---
+    # --- Step 3: Encryption password ---
 
     def _build_destination_section(self) -> None:
         """Build the destination selection."""
-        self._dest_frame = ttk.LabelFrame(self.inner, text="3. Destination", padding=Spacing.PAD)
+        self._dest_frame = ttk.LabelFrame(self.inner, text="4. Destination", padding=Spacing.PAD)
         row = ttk.Frame(self._dest_frame)
         row.pack(fill="x")
         self.dest_path_var = tk.StringVar()
@@ -471,7 +473,7 @@ class RecoveryTab(ScrollableTab):
     def _build_encryption_section(self) -> None:
         """Build the encryption password input."""
         self._pw_frame = ttk.LabelFrame(
-            self.inner, text="4. Encryption password", padding=Spacing.PAD
+            self.inner, text="3. Encryption password", padding=Spacing.PAD
         )
         self.password_var = tk.StringVar()
         self.password_var.trace_add("write", self._on_password_changed)
@@ -559,12 +561,15 @@ class RecoveryTab(ScrollableTab):
             )
 
         if has_source:
-            self._dest_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, 0))
+            # Always unpack all, then re-pack in correct order: pw → dest → exec
+            self._pw_frame.pack_forget()
+            self._dest_frame.pack_forget()
+            self._exec_frame.pack_forget()
+
             if has_encrypted:
                 self._pw_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, 0))
                 self._update_password_hint()
-            else:
-                self._pw_frame.pack_forget()
+            self._dest_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, 0))
             self._exec_frame.pack(
                 fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, Spacing.LARGE)
             )
@@ -917,6 +922,38 @@ class RecoveryTab(ScrollableTab):
             self._scan_animation_id = None
 
     # ------------------------------------------------------------------
+    # Download animation (SFTP / unknown size)
+    # ------------------------------------------------------------------
+
+    def _start_download_animation(self, base_text: str) -> None:
+        """Start animated download message with cycling dots.
+
+        Args:
+            base_text: Base text, e.g. 'Downloading 1/2... MyBackup'.
+        """
+        self._dl_base_text = base_text
+        self._dl_dot_count = 0
+        self._dl_animation_id: str | None = None
+        self._animate_download()
+
+    def _animate_download(self) -> None:
+        """Cycle dots on the status label."""
+        self._dl_dot_count = (self._dl_dot_count % 3) + 1
+        dots = "." * self._dl_dot_count
+        self.status_label.config(
+            text=f"{self._dl_base_text}{dots}",
+            foreground=Colors.WARNING,
+        )
+        self._dl_animation_id = self.after(500, self._animate_download)
+
+    def _stop_download_animation(self) -> None:
+        """Stop the download animation."""
+        anim_id = getattr(self, "_dl_animation_id", None)
+        if anim_id:
+            self.after_cancel(anim_id)
+            self._dl_animation_id = None
+
+    # ------------------------------------------------------------------
     # Listing results
     # ------------------------------------------------------------------
 
@@ -1006,7 +1043,7 @@ class RecoveryTab(ScrollableTab):
                 for backup in bucket_backups:
                     name = backup.get("name", "")
                     btype = _parse_backup_type(name)
-                    enc = "Yes" if backup.get("encrypted") else ""
+                    enc = "Yes" if backup.get("encrypted") else "No"
                     size = _human_size(backup.get("size", 0))
                     date = _format_date(backup.get("modified", 0))
                     self._tree.insert(
@@ -1020,7 +1057,7 @@ class RecoveryTab(ScrollableTab):
             for backup in sorted_backups:
                 name = backup.get("name", "")
                 btype = _parse_backup_type(name)
-                enc = "Yes" if backup.get("encrypted") else ""
+                enc = "Yes" if backup.get("encrypted") else "No"
                 size = _human_size(backup.get("size", 0))
                 date = _format_date(backup.get("modified", 0))
                 self._tree.insert(
@@ -1115,17 +1152,21 @@ class RecoveryTab(ScrollableTab):
     # Browse helpers
     # ------------------------------------------------------------------
 
-    def _browse_backup(self) -> None:
-        """Browse for a backup folder or encrypted .tar.wbenc file."""
+    def _browse_folder(self) -> None:
+        """Browse for a backup folder (unencrypted backup)."""
+        path = filedialog.askdirectory(title="Select backup folder")
+        if path:
+            self.backup_path_var.set(path)
+
+    def _browse_encrypted(self) -> None:
+        """Browse for an encrypted .tar.wbenc backup file."""
         path = filedialog.askopenfilename(
-            title="Select backup (.tar.wbenc) or cancel for folder",
+            title="Select encrypted backup",
             filetypes=[
                 ("Encrypted backups", "*.wbenc"),
                 ("All files", "*.*"),
             ],
         )
-        if not path:
-            path = filedialog.askdirectory(title="Select backup folder")
         if path:
             self.backup_path_var.set(path)
 
@@ -1364,6 +1405,9 @@ class RecoveryTab(ScrollableTab):
     ) -> None:
         """Download and restore selected backups from remote.
 
+        For S3 backups, shows real-time MB progress.
+        For SFTP backups, shows animated dots.
+
         Args:
             selected_with_config: List of (name, config, modified) tuples.
             dest: Local destination directory.
@@ -1373,15 +1417,45 @@ class RecoveryTab(ScrollableTab):
             total = len(selected_with_config)
 
             for idx, (name, config, _modified) in enumerate(selected_with_config, 1):
-                self.after(
-                    0,
-                    lambda n=name, i=idx: self.status_label.config(
-                        text=f"Downloading {i}/{total}... {n}",
-                        foreground=Colors.WARNING,
-                    ),
-                )
+                backup_info = next((b for b in self._listed_backups if b.get("name") == name), {})
+                backup_size = backup_info.get("size", 0)
+                is_s3 = config.storage_type == StorageType.S3
+
                 backend = self._create_backend(config)
+
+                if is_s3 and backup_size > 0:
+                    # S3: real-time MB progress via callback
+                    def _s3_progress(bytes_sent, total_bytes, n=name, i=idx):
+                        sent_mb = bytes_sent / (1024 * 1024)
+                        total_mb = total_bytes / (1024 * 1024)
+                        self.after(
+                            0,
+                            lambda s=sent_mb, t=total_mb, nn=n, ii=i: (
+                                self.status_label.config(
+                                    text=(
+                                        f"Downloading {ii}/{total}... {nn}"
+                                        f"  ({s:.1f} / {t:.1f} MB)"
+                                    ),
+                                    foreground=Colors.WARNING,
+                                )
+                            ),
+                        )
+
+                    backend.set_progress_callback(_s3_progress)
+                    total_mb = backup_size / (1024 * 1024)
+                    self.after(
+                        0,
+                        lambda n=name, i=idx, t=total_mb: self.status_label.config(
+                            text=f"Downloading {i}/{total}... {n}  (0 / {t:.1f} MB)",
+                            foreground=Colors.WARNING,
+                        ),
+                    )
+                else:
+                    # SFTP or unknown size: animated dots
+                    self._start_download_animation(f"Downloading {idx}/{total}... {name}")
+
                 local_path = backend.download_backup(name, dest)
+                self._stop_download_animation()
                 logger.info("Downloaded %s to %s", name, local_path)
 
                 # Detect encrypted content in the downloaded backup
@@ -1407,6 +1481,7 @@ class RecoveryTab(ScrollableTab):
             self.after(0, lambda: self._on_done(True, msg))
 
         except Exception as e:
+            self._stop_download_animation()
             logger.error("Remote restore failed: %s", e)
             self.after(0, lambda _e=e: self._on_done(False, str(_e)))
 
@@ -1428,17 +1503,36 @@ class RecoveryTab(ScrollableTab):
         Returns:
             Path to .tar.wbenc file, or None.
         """
+        logger.debug(
+            "_find_wbenc_file: local_path=%s is_file=%s is_dir=%s name=%s",
+            local_path,
+            local_path.is_file() if local_path.exists() else "N/A",
+            local_path.is_dir() if local_path.exists() else "N/A",
+            name,
+        )
         if local_path.is_file() and str(local_path).endswith(".tar.wbenc"):
             return local_path
         if local_path.is_dir():
             # Check inside the directory
             internal = list(local_path.rglob("*.wbenc"))
+            logger.debug(
+                "_find_wbenc_file: internal rglob found %d files: %s", len(internal), internal[:5]
+            )
             if internal:
                 return internal[0]
             # Check sibling files (e.g. name.tar.wbenc next to name/)
             siblings = list(local_path.parent.glob(f"{name}*.tar.wbenc"))
+            logger.debug(
+                "_find_wbenc_file: sibling glob found %d files: %s", len(siblings), siblings[:5]
+            )
             if siblings:
                 return siblings[0]
+        # Also check if the path doesn't exist yet but a .tar.wbenc sibling does
+        if not local_path.exists() and local_path.parent.exists():
+            siblings = list(local_path.parent.glob(f"{name}*.tar.wbenc"))
+            if siblings:
+                return siblings[0]
+        logger.warning("_find_wbenc_file: no .wbenc file found for %s", name)
         return None
 
     @staticmethod
@@ -1590,6 +1684,8 @@ class RecoveryTab(ScrollableTab):
                 self._fill_fields(config)
             finally:
                 self._filling = False
+
+        self.scroll_to_top()
 
     def load_no_profile(self) -> None:
         """Reset tab for use without a profile (fresh install)."""

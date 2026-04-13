@@ -424,32 +424,100 @@ class S3Storage(StorageBackend):
     def download_backup(self, remote_name: str, local_dir: Path) -> Path:
         """Download a backup from S3 to a local directory.
 
+        Supports two backup formats:
+        - Directory backups: prefix containing multiple objects (flat copy)
+        - Single file backups: one object (e.g. .tar.wbenc encrypted archive)
+
         If the destination already exists it is removed first so that
         a re-download always starts from a clean state.
+
+        Args:
+            remote_name: Backup name on the remote.
+            local_dir: Local directory to download into.
+
+        Returns:
+            Path to the downloaded backup (file or directory).
         """
         import shutil
 
         long_path_mkdir(local_dir)
-        dst = local_dir / remote_name
-        if dst.exists():
-            shutil.rmtree(dst, ignore_errors=True)
-        long_path_mkdir(dst)
-
         client = self._get_client()
-        prefix = self._s3_key(remote_name)
-        if not prefix.endswith("/"):
-            prefix += "/"
 
-        paginator = client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-                rel = key[len(prefix) :]
-                if not rel:
-                    continue
+        # Try directory download first (prefix with /)
+        prefix = self._s3_key(remote_name)
+        dir_prefix = prefix if prefix.endswith("/") else prefix + "/"
+
+        downloaded_count = 0
+        dst = local_dir / remote_name
+
+        # Check if this is a directory (prefix with children)
+        resp = client.list_objects_v2(Bucket=self._bucket, Prefix=dir_prefix, MaxKeys=1)
+        is_directory = len(resp.get("Contents", [])) > 0
+
+        # Build download progress callback if set
+        dl_progress_cb = self._make_progress_cb(0)  # placeholder, updated per-call
+
+        if is_directory:
+            # Directory backup — download all objects under prefix
+            if dst.exists():
+                shutil.rmtree(dst, ignore_errors=True)
+            long_path_mkdir(dst)
+
+            # First pass: compute total size for progress
+            total_size = 0
+            objects_to_download: list[tuple[str, str, int]] = []
+            paginator = client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self._bucket, Prefix=dir_prefix):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    rel = key[len(dir_prefix) :]
+                    if not rel:
+                        continue
+                    obj_size = obj.get("Size", 0)
+                    total_size += obj_size
+                    objects_to_download.append((key, rel, obj_size))
+
+            # Second pass: download with progress
+            dl_progress_cb = self._make_progress_cb(total_size)
+            for key, rel, _obj_size in objects_to_download:
                 local_file = dst / rel
                 long_path_mkdir(local_file.parent)
-                client.download_file(self._bucket, key, long_path_str(local_file))
+                dl_kwargs: dict = {
+                    "Bucket": self._bucket,
+                    "Key": key,
+                    "Filename": long_path_str(local_file),
+                }
+                if dl_progress_cb:
+                    dl_kwargs["Callback"] = dl_progress_cb
+                client.download_file(**dl_kwargs)
+                downloaded_count += 1
+
+            logger.info("Downloaded directory backup %s: %d files", remote_name, downloaded_count)
+        else:
+            # Single file backup (e.g. encrypted .tar.wbenc)
+            key = self._s3_key(remote_name)
+            local_file = local_dir / remote_name
+            if local_file.exists():
+                local_file.unlink()
+
+            # Get file size for progress
+            try:
+                head = client.head_object(Bucket=self._bucket, Key=key)
+                file_size = head.get("ContentLength", 0)
+            except Exception:
+                file_size = 0
+            dl_progress_cb = self._make_progress_cb(file_size)
+
+            dl_kwargs = {
+                "Bucket": self._bucket,
+                "Key": key,
+                "Filename": long_path_str(local_file),
+            }
+            if dl_progress_cb:
+                dl_kwargs["Callback"] = dl_progress_cb
+            client.download_file(**dl_kwargs)
+            dst = local_file
+            logger.info("Downloaded single file backup %s", remote_name)
 
         # Download .wbverify manifest if present
         manifest_key = self._s3_key(f"{remote_name}.wbverify")

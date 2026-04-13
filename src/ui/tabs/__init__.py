@@ -65,6 +65,10 @@ class ScrollableTab(ttk.Frame):
     def _on_mousewheel(self, event: tk.Event) -> None:
         self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
+    def scroll_to_top(self) -> None:
+        """Scroll the canvas back to the top."""
+        self._canvas.yview_moveto(0)
+
     def _disable_combobox_wheel(self, widget: tk.Widget) -> None:
         """Prevent all Combobox descendants from capturing mousewheel.
 

@@ -71,6 +71,7 @@ class BackupResult:
     backups_available: int = 0
     phase_errors: list[PhaseError] = field(default_factory=list)
     log_lines: list[str] = field(default_factory=list)
+    actual_backup_type: str = ""  # "FULL" or "DIFFERENTIAL" (reflects auto-promotion)
 
     @property
     def errors(self) -> int:

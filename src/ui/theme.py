@@ -104,7 +104,7 @@ class Spacing:
 # --- App constants ---
 
 APP_TITLE = "Backup Manager"
-APP_VERSION = "3.3.1"
+APP_VERSION = "3.3.2"
 WINDOW_SIZE = "1520x950"
 MIN_SIZE = (1440, 880)
 
@@ -195,6 +195,17 @@ def setup_theme(root: tk.Tk) -> ttk.Style:
     )
 
     # --- Font overrides (MUST be last — after sv_ttk theme is fully applied) ---
+
+    # Set Tk scaling from the Windows system DPI so font sizes
+    # match the OS and remain consistent across builds.
+    # Uses the Win32 API directly for a reliable value.
+    try:
+        import ctypes
+
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+        root.tk.call("tk", "scaling", dpi / 72.0)
+    except Exception:
+        pass  # Keep Tk default if detection fails
 
     # Override Tk named fonts so all widgets use Segoe UI 10pt,
     # including Entry/Combobox/Spinbox text content (which use TkTextFont).

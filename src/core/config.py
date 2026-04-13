@@ -84,6 +84,7 @@ class StorageConfig:
     s3_object_lock_mode: str = "COMPLIANCE"
     s3_object_lock_days: int = 30  # Lock duration for differential backups
     s3_object_lock_full_extra_days: int = 30  # Extra lock days for full backups
+    s3_speedtest_bucket: str = ""  # Separate bucket for bandwidth tests (no lock)
 
     # Mirror-specific
     mirror_encrypt: bool = False

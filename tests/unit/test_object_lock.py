@@ -38,6 +38,7 @@ class TestConfigObjectLockFields:
         assert config.s3_object_lock_mode == "COMPLIANCE"
         assert config.s3_object_lock_days == 30
         assert config.s3_object_lock_full_extra_days == 30
+        assert config.s3_speedtest_bucket == ""
 
     def test_retention_config_gfs_enabled_default(self):
         r = RetentionConfig()
@@ -162,6 +163,42 @@ class TestS3ObjectLockSetup:
         rules = call_args["LifecycleConfiguration"]["Rules"]
         assert rules[0]["Expiration"]["Days"] == 426
 
+    def test_create_speedtest_bucket_no_object_lock(self):
+        """Speedtest bucket must be created WITHOUT Object Lock."""
+        client = MagicMock()
+        setup = self._make_setup(client)
+        ok, msg = setup.create_speedtest_bucket("bucket-speedtest")
+        assert ok is True
+        call_kwargs = client.create_bucket.call_args[1]
+        assert "ObjectLockEnabledForBucket" not in call_kwargs
+        assert call_kwargs["Bucket"] == "bucket-speedtest"
+
+    def test_create_speedtest_bucket_lifecycle_1_day(self):
+        """Speedtest bucket must have a 1-day lifecycle rule."""
+        client = MagicMock()
+        setup = self._make_setup(client)
+        setup.create_speedtest_bucket("bucket-speedtest")
+        call_args = client.put_bucket_lifecycle_configuration.call_args[1]
+        rules = call_args["LifecycleConfiguration"]["Rules"]
+        assert rules[0]["ID"] == "speedtest-auto-cleanup"
+        assert rules[0]["Expiration"]["Days"] == 1
+
+    def test_create_speedtest_bucket_us_east_1(self):
+        """us-east-1 must NOT include LocationConstraint."""
+        client = MagicMock()
+        setup = self._make_setup(client, region="us-east-1")
+        setup.create_speedtest_bucket("bucket-speedtest")
+        call_kwargs = client.create_bucket.call_args[1]
+        assert "CreateBucketConfiguration" not in call_kwargs
+
+    def test_create_speedtest_bucket_failure(self):
+        client = MagicMock()
+        client.create_bucket.side_effect = Exception("access denied")
+        setup = self._make_setup(client)
+        ok, msg = setup.create_speedtest_bucket("bucket-speedtest")
+        assert ok is False
+        assert "access denied" in msg
+
     def test_full_setup_all_steps(self):
         client = MagicMock()
         client.get_object_lock_configuration.return_value = {
@@ -173,6 +210,50 @@ class TestS3ObjectLockSetup:
         results = setup.full_setup("bucket", 395, full_extra_days=30)
         assert len(results) == 4
         assert all(ok for _, ok, _ in results)
+
+    def test_full_setup_with_speedtest_bucket(self):
+        """full_setup with speedtest_bucket_name creates 5 steps."""
+        client = MagicMock()
+        client.get_object_lock_configuration.return_value = {
+            "ObjectLockConfiguration": {
+                "Rule": {"DefaultRetention": {"Mode": "COMPLIANCE", "Days": 30}},
+            }
+        }
+        setup = self._make_setup(client)
+        results = setup.full_setup(
+            "bucket",
+            30,
+            full_extra_days=30,
+            speedtest_bucket_name="bucket-speedtest",
+        )
+        assert len(results) == 5
+        assert results[4][0] == "Create speedtest bucket"
+        assert results[4][1] is True
+
+    def test_full_setup_continues_on_speedtest_failure(self):
+        """Main bucket steps succeed even if speedtest bucket fails."""
+        client = MagicMock()
+        client.get_object_lock_configuration.return_value = {
+            "ObjectLockConfiguration": {
+                "Rule": {"DefaultRetention": {"Mode": "COMPLIANCE", "Days": 30}},
+            }
+        }
+        setup = self._make_setup(client)
+
+        # Mock create_speedtest_bucket to fail directly
+        setup.create_speedtest_bucket = MagicMock(return_value=(False, "speedtest bucket failed"))
+
+        results = setup.full_setup(
+            "bucket",
+            30,
+            speedtest_bucket_name="bucket-speedtest",
+        )
+        # All 5 steps present, main steps OK, speedtest failed
+        assert len(results) == 5
+        main_steps = results[:4]
+        assert all(ok for _, ok, _ in main_steps)
+        assert results[4][0] == "Create speedtest bucket"
+        assert results[4][1] is False
 
     def test_full_setup_stops_on_failure(self):
         client = MagicMock()
@@ -410,6 +491,112 @@ class TestS3BackendObjectLock:
 # ---------------------------------------------------------------
 
 
+class TestBandwidthSpeedtestBucketRouting:
+    """Test that bandwidth measurement uses the speedtest bucket for Object Lock."""
+
+    def _make_engine(self, tmp_config_dir):
+        from src.core.backup_engine import BackupEngine
+
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        return BackupEngine(mgr, events=EventBus())
+
+    def test_s3_lock_with_speedtest_uses_test_bucket(self, tmp_config_dir):
+        """S3 Object Lock + speedtest bucket → measure on speedtest bucket."""
+        from unittest.mock import patch
+
+        from src.storage.s3 import S3Storage
+
+        profile = BackupProfile(
+            name="Pro",
+            bandwidth_percent=75,
+            object_lock_enabled=True,
+            storage=StorageConfig(
+                storage_type=StorageType.S3,
+                s3_bucket="main-bucket",
+                s3_region="eu-west-1",
+                s3_access_key="AKIA",
+                s3_secret_key="secret",
+                s3_object_lock=True,
+                s3_speedtest_bucket="main-bucket-speedtest",
+            ),
+        )
+        engine = self._make_engine(tmp_config_dir)
+        main_backend = MagicMock(spec=S3Storage)
+
+        with patch(
+            "src.core.backup_engine.measure_bandwidth", return_value=5_000_000
+        ) as mock_measure:
+            engine._apply_bandwidth_throttle(main_backend, profile)
+
+            # measure_bandwidth was called with a DIFFERENT backend (not main)
+            mock_measure.assert_called_once()
+            test_backend = mock_measure.call_args[0][0]
+            assert test_backend is not main_backend
+            assert isinstance(test_backend, S3Storage)
+            assert test_backend._bucket == "main-bucket-speedtest"
+            # Throttle applied to the MAIN backend
+            main_backend.set_bandwidth_limit.assert_called_once()
+
+    def test_s3_lock_without_speedtest_raises(self, tmp_config_dir):
+        """S3 Object Lock + no speedtest bucket → raises ValueError."""
+        import pytest
+        from unittest.mock import patch
+
+        from src.storage.s3 import S3Storage
+
+        profile = BackupProfile(
+            name="Pro",
+            bandwidth_percent=75,
+            object_lock_enabled=True,
+            storage=StorageConfig(
+                storage_type=StorageType.S3,
+                s3_bucket="main-bucket",
+                s3_region="eu-west-1",
+                s3_access_key="AKIA",
+                s3_secret_key="secret",
+                s3_object_lock=True,
+                s3_speedtest_bucket="",
+            ),
+        )
+        engine = self._make_engine(tmp_config_dir)
+        main_backend = MagicMock(spec=S3Storage)
+
+        with pytest.raises(ValueError, match="missing s3_speedtest_bucket"):
+            engine._apply_bandwidth_throttle(main_backend, profile)
+
+    def test_s3_no_lock_uses_main(self, tmp_config_dir):
+        """S3 without Object Lock → measure on main bucket."""
+        from unittest.mock import patch
+
+        from src.storage.s3 import S3Storage
+
+        profile = BackupProfile(
+            name="Standard",
+            bandwidth_percent=75,
+            storage=StorageConfig(
+                storage_type=StorageType.S3,
+                s3_bucket="main-bucket",
+                s3_region="eu-west-1",
+                s3_access_key="AKIA",
+                s3_secret_key="secret",
+                s3_object_lock=False,
+            ),
+        )
+        engine = self._make_engine(tmp_config_dir)
+        main_backend = MagicMock(spec=S3Storage)
+
+        with patch(
+            "src.core.backup_engine.measure_bandwidth", return_value=5_000_000
+        ) as mock_measure:
+            engine._apply_bandwidth_throttle(main_backend, profile)
+            mock_measure.assert_called_once_with(main_backend)
+
+
+# ---------------------------------------------------------------
+# Wizard professional profile creation test
+# ---------------------------------------------------------------
+
+
 class TestWizardProProfile:
     """Test that the wizard creates correct professional profiles."""
 
@@ -448,6 +635,7 @@ class TestWizardProProfile:
         assert p.retention.gfs_enabled is False
         assert p.full_backup_every == 30
         assert p.backup_type == BackupType.DIFFERENTIAL
+        assert p.storage.s3_speedtest_bucket == "test-bucket-speedtest"
 
     def test_pro_profile_with_encryption(self):
         from src.ui.wizard import SetupWizard
@@ -506,3 +694,50 @@ class TestWizardProProfile:
         assert len(p.mirror_destinations) == 1
         assert p.mirror_destinations[0].storage_type == StorageType.LOCAL
         assert p.mirror_destinations[0].destination_path == "D:/Backups"
+
+    def test_pro_profile_speedtest_failed_sets_empty(self):
+        """When speedtest bucket creation failed, field is empty."""
+        from src.ui.wizard import SetupWizard
+
+        wizard = SetupWizard.__new__(SetupWizard)
+        wizard._data = {
+            "name": "Failed Speedtest",
+            "sources": ["/data"],
+            "pro_aws_key": "AKIA",
+            "pro_aws_secret": "SECRET",
+            "pro_region": "eu-west-1",
+            "pro_bucket": "fail-bucket",
+            "pro_retention_idx": 0,
+            "pro_encrypt": False,
+            "pro_encrypt_password": "",
+            "pro_mirror_local": False,
+            "pro_mirror_path": "",
+            "pro_speedtest_failed": True,
+        }
+        wizard.result_profile = None
+        wizard._canvas = MagicMock()
+        wizard._win = MagicMock()
+
+        wizard._create_pro_profile()
+
+        p = wizard.result_profile
+        assert p.storage.s3_speedtest_bucket == ""
+
+    def test_roundtrip_speedtest_bucket_field(self, tmp_config_dir):
+        """Speedtest bucket field persists through JSON save/load."""
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(
+            name="SpeedtestRoundtrip",
+            storage=StorageConfig(
+                storage_type=StorageType.S3,
+                s3_bucket="main-bucket",
+                s3_region="eu-west-1",
+                s3_access_key="AKIA",
+                s3_secret_key="secret",
+                s3_speedtest_bucket="main-bucket-speedtest",
+            ),
+        )
+        mgr.save_profile(profile)
+
+        loaded = mgr.get_all_profiles()[0]
+        assert loaded.storage.s3_speedtest_bucket == "main-bucket-speedtest"

@@ -1,4 +1,17 @@
 {
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/guard_destructive.sh"
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(ls -1 tests/test_*.py)",
@@ -183,7 +196,27 @@
       "Bash(python -m black src/__main__.py --quiet)",
       "Bash(python -m ruff check src/ui/app.py --fix --quiet)",
       "Bash(python -m black src/core/backup_engine.py src/core/phases/mirror.py --quiet)",
-      "Bash(python -m ruff check src/core/backup_engine.py src/core/phases/mirror.py --fix --quiet)"
+      "Bash(python -m ruff check src/core/backup_engine.py src/core/phases/mirror.py --fix --quiet)",
+      "Bash(ls -lt \"/c/Users/loica/Downloads/\"*.png)",
+      "Bash(cp \"/c/Users/loica/Downloads/Screenshot 2026-04-12 194554.png\" \"F:/Documents/loicata/BackupManager/Backup Manager v3/assets/screenshots/wizard_mode_choice.png\")",
+      "Bash(cp \"/c/Users/loica/Downloads/Screenshot 2026-04-12 195102.png\" \"F:/Documents/loicata/BackupManager/Backup Manager v3/assets/screenshots/anti_ransomware_backup.png\")",
+      "Bash(find \"F:/Documents/loicata/BackupManager/Backup Manager v3\" -type f -name \"*.py\" -exec wc -l {} +)",
+      "Bash(ls -lah *.py)",
+      "Bash(pytest --collect-only)",
+      "Bash(sort -t':' -k2 -rn)",
+      "Bash(pytest --collect-only -q)",
+      "Bash(find \"F:/Documents/loicata/BackupManager/Backup Manager v3\" -type f -name \"*.py\" -not -path \"*/tests/*\" -exec wc -l {} +)",
+      "Bash(find \"F:/Documents/loicata/BackupManager/Backup Manager v3\" -type f -name \"*.py\" -path \"*/tests/*\" -exec wc -l {} +)",
+      "Bash(ls -lh *.spec)",
+      "Bash(python3)",
+      "Bash(grep -n \"^[[:space:]]\\\\{32,\\\\}\" \"F:/Documents/loicata/BackupManager/Backup Manager v3/src/ui/wizard.py\")",
+      "Bash(grep -rE 'password\\\\s*=\\\\s*[\"\\\\'][^\"\\\\']*[\"\\\\'])",
+      "Bash(api_key\\\\s*=\\\\s*[\"\\\\'][^\"\\\\']*[\"\\\\']|secret\\\\s*=\\\\s*[\"\\\\'][^\"\\\\']*[\"\\\\']' \"F:/Documents/loicata/BackupManager/Backup Manager v3/src/\" --include=\"*.py\" | head -10 || echo \"No obvious hardcoded secrets found\")",
+      "WebSearch",
+      "Bash(python -m scripts.s3_bandwidth_bench)",
+      "Bash(python -m scripts.s3_bandwidth_bench --yes)",
+      "Bash(python -m black src/ui/wizard.py)",
+      "Bash(chmod +x \"F:/Documents/loicata/BackupManager/Backup Manager v3/.claude/guard_destructive.sh\")"
     ]
   }
 }

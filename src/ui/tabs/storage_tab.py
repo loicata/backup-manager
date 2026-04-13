@@ -18,6 +18,13 @@ class StorageTab(ScrollableTab):
         self._features = get_available_features()
         self._config_frames: dict[str, ttk.Frame] = {}
         self._saved_device_serial: str = ""
+        self._saved_object_lock_fields: dict = {
+            "s3_object_lock": False,
+            "s3_object_lock_mode": "COMPLIANCE",
+            "s3_object_lock_days": 30,
+            "s3_object_lock_full_extra_days": 30,
+            "s3_speedtest_bucket": "",
+        }
         self._build_ui()
 
     def _build_ui(self):
@@ -299,7 +306,12 @@ class StorageTab(ScrollableTab):
         self.test_label.config(text=msg, foreground=color)
 
     def _build_storage_config(self) -> StorageConfig:
-        """Build StorageConfig from current UI state."""
+        """Build StorageConfig from current UI state.
+
+        Preserves Object Lock fields (s3_object_lock, s3_object_lock_days,
+        s3_speedtest_bucket, etc.) from the saved profile since these are
+        not editable in the storage tab.
+        """
         stype = StorageType(self.type_var.get())
         config = StorageConfig()  # Default first, set type after populating
 
@@ -322,6 +334,15 @@ class StorageTab(ScrollableTab):
             config.s3_provider = self.s3_provider_var.get()
             for key, var in self._s3_vars.items():
                 setattr(config, key, var.get())
+
+            # Preserve Object Lock fields (not editable in storage tab)
+            saved = self._saved_object_lock_fields
+            config.s3_object_lock = saved["s3_object_lock"]
+            config.s3_object_lock_mode = saved["s3_object_lock_mode"]
+            config.s3_object_lock_days = saved["s3_object_lock_days"]
+            config.s3_object_lock_full_extra_days = saved["s3_object_lock_full_extra_days"]
+            config.s3_speedtest_bucket = saved["s3_speedtest_bucket"]
+
         config.storage_type = stype
         return config
 
@@ -329,6 +350,15 @@ class StorageTab(ScrollableTab):
         s = profile.storage
         self.type_var.set(s.storage_type.value)
         self._saved_device_serial = getattr(s, "device_serial", "")
+
+        # Preserve Object Lock fields (set by wizard, not editable here)
+        self._saved_object_lock_fields = {
+            "s3_object_lock": s.s3_object_lock,
+            "s3_object_lock_mode": s.s3_object_lock_mode,
+            "s3_object_lock_days": s.s3_object_lock_days,
+            "s3_object_lock_full_extra_days": s.s3_object_lock_full_extra_days,
+            "s3_speedtest_bucket": s.s3_speedtest_bucket,
+        }
 
         # Reset all fields before loading to avoid stale values
         self.local_path_var.set("")

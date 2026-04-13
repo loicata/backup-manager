@@ -1384,7 +1384,11 @@ class BackupManagerApp:
                 details=details,
                 cancelled=cancelled,
                 result=result,
-                backup_type=profile.backup_type.value.upper(),
+                backup_type=(
+                    result.actual_backup_type
+                    if result and result.actual_backup_type
+                    else profile.backup_type.value.upper()
+                ),
                 free_space=free_space,
             )
         except Exception as e:

@@ -1,8 +1,8 @@
 """Bandwidth tester: measures real write throughput to a storage backend.
 
 Uses an adaptive approach:
-1. Small probe (2 MB) to detect link speed
-2. If fast link (>10 MB/s): full 128 MB sample for accurate measurement
+1. Small probe (128 MB) to detect link speed
+2. If fast link (>20 MB/s): full 512 MB sample for accurate measurement
 3. If slow link: use the probe result directly (avoids saturating
    slow connections for extended periods which can freeze the OS)
 
@@ -20,17 +20,17 @@ from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-# Probe size: 16 MB — detects link speed and serves as measurement
-# for slow links. At 1 MB/s = 16 seconds, at 9 MB/s = ~2 seconds.
-PROBE_SIZE = 16 * 1024 * 1024
+# Probe size: 128 MB — detects link speed and serves as measurement
+# for slow links. At 1 MB/s = 128 seconds, at 5 MB/s = ~26 seconds.
+PROBE_SIZE = 128 * 1024 * 1024
 
-# Full sample: 128 MB — used only on fast links (>10 MB/s)
-# At 100 MB/s this takes ~1.3 seconds. Accurate measurement.
-FULL_SAMPLE_SIZE = 128 * 1024 * 1024
+# Full sample: 512 MB — used only on fast links (>20 MB/s)
+# At 100 MB/s this takes ~5 seconds. Accurate measurement.
+FULL_SAMPLE_SIZE = 512 * 1024 * 1024
 
 # Speed threshold: links faster than this get the full sample
-# 10 MB/s = fast enough that 128 MB completes in ~13 seconds
-FAST_LINK_THRESHOLD = 10 * 1024 * 1024  # 10 MB/s
+# 20 MB/s = fast enough that 512 MB completes in ~26 seconds
+FAST_LINK_THRESHOLD = 20 * 1024 * 1024  # 20 MB/s
 
 # Warmup size: 1 MB (establish connection, fill OS buffers)
 WARMUP_SIZE = 1 * 1024 * 1024
@@ -43,10 +43,9 @@ def measure_bandwidth(backend: StorageBackend) -> float:
     """Measure real write speed to a storage backend.
 
     Adaptive approach:
-    - Starts with a 2 MB probe to detect if the link is fast or slow.
-    - Fast links (>10 MB/s): runs a full 128 MB test for precision.
-    - Slow links: uses the 2 MB probe result to avoid saturating
-      the connection and freezing the OS.
+    - Starts with a 128 MB probe to detect if the link is fast or slow.
+    - Fast links (>20 MB/s): runs a full 512 MB test for precision.
+    - Slow links: uses the 128 MB probe result directly.
 
     Args:
         backend: Connected storage backend to test.
@@ -69,19 +68,19 @@ def measure_bandwidth(backend: StorageBackend) -> float:
             return 0.0
 
         probe_mbps = probe_speed / (1024 * 1024)
-        logger.info("Bandwidth probe: %.2f MB/s (16 MB probe)", probe_mbps)
+        logger.info("Bandwidth probe: %.2f MB/s (128 MB probe)", probe_mbps)
 
         # Fast link: run full measurement for accuracy
         if probe_speed >= FAST_LINK_THRESHOLD:
             logger.info(
-                "Fast link detected (%.1f MB/s) — running full 128 MB test",
+                "Fast link detected (%.1f MB/s) — running full 512 MB test",
                 probe_mbps,
             )
             try:
                 full_speed = _write_sample(backend, FULL_SAMPLE_SIZE)
                 if full_speed > 0:
                     logger.info(
-                        "Bandwidth test: %.2f MB/s (128 MB sample, end-to-end)",
+                        "Bandwidth test: %.2f MB/s (512 MB sample, end-to-end)",
                         full_speed / (1024 * 1024),
                     )
                     return full_speed
@@ -91,7 +90,7 @@ def measure_bandwidth(backend: StorageBackend) -> float:
 
         # Slow link or full test failed: use probe result
         logger.info(
-            "Using probe result: %.2f MB/s (slow link, 16 MB probe)",
+            "Using probe result: %.2f MB/s (slow link, 128 MB probe)",
             probe_mbps,
         )
         return probe_speed

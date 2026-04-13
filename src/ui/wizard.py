@@ -467,7 +467,8 @@ class SetupWizard:
         ).pack()
         ttk.Label(
             pro,
-            text="Backup to Amazon AWS S3\nserver with Object Lock.\n\n" "Your data is IMMUTABLE\nand impossible to delete.",
+            text="Backup to Amazon AWS S3\nserver with Object Lock.\n\n"
+            "Your data is IMMUTABLE\nand impossible to delete.",
             justify="center",
         ).pack(pady=Spacing.MEDIUM)
 
@@ -1307,17 +1308,30 @@ class SetupWizard:
             text=(
                 "Since the standard recommended data retention period is "
                 "3 months, sophisticated ransomware waits 3 months and one "
-                "day before activating. For this reason, it is often "
-                "appropriate to keep your data for at least 4 months in "
-                "order to be able to restore a clean version that predates "
-                "the infection if the ransomware waited 3 months and one "
-                "day. Of course, a retention period of 13 months protects "
-                "you even better, and so on."
+                "day before activating. Keeping your data for at least "
+                "4 months can be useful to restore a version that predates "
+                "the infection. A retention period of 13 months protects "
+                "even better."
             ),
             wraplength=880,
             foreground=Colors.TEXT_SECONDARY,
             justify="left",
         ).pack(anchor="w")
+
+        # Warning — always visible, in red, before choices
+        ttk.Label(
+            self._content,
+            text=(
+                "\u26a0 Because data is impossible to delete during the "
+                "retention period, you will be billed by Amazon AWS for "
+                "the entire duration. Neither you, nor Backup Manager, "
+                "nor Amazon can cancel this commitment. "
+                "This decision will be irreversible after you configure "
+                "your Amazon AWS account."
+            ),
+            wraplength=900,
+            foreground=Colors.DANGER,
+        ).pack(fill="x", pady=(0, Spacing.MEDIUM))
 
         ret_var = tk.IntVar(value=self._data.get("pro_retention_idx", 2))
         custom_idx = len(RETENTION_OPTIONS)  # Index for "Custom" option
@@ -1361,21 +1375,6 @@ class SetupWizard:
 
         ret_var.trace_add("write", _on_retention_change)
         custom_years_var.trace_add("write", _on_retention_change)
-
-        # Single warning — always visible, in red
-        ttk.Label(
-            self._content,
-            text=(
-                "\u26a0 Because data is impossible to delete during the "
-                "retention period, you will be billed by Amazon AWS for "
-                "the entire duration. Neither you, nor Backup Manager, "
-                "nor Amazon can cancel this commitment. "
-                "This decision will be irreversible after you configure "
-                "your Amazon AWS account."
-            ),
-            wraplength=900,
-            foreground=Colors.DANGER,
-        ).pack(fill="x", pady=(Spacing.MEDIUM, 0))
 
     def _step_pro_s3_config(self) -> None:
         """Step 9 (pro): S3 region and bucket name."""
@@ -1771,6 +1770,7 @@ class SetupWizard:
 
         summary_items = [
             ("Bucket", bucket),
+            ("Speedtest bucket", f"{bucket}-speedtest"),
             ("Region", region),
             ("Retention", f"{label} ({days} days)"),
             ("Mode", "Compliance (immutable)"),
@@ -1814,10 +1814,17 @@ class SetupWizard:
 
         result: list = [None]
 
+        speedtest_bucket = f"{bucket}-speedtest"
+
         def _do() -> None:
             try:
                 setup = S3ObjectLockSetup(ak, sk, region)
-                result[0] = setup.full_setup(bucket, days, full_extra_days=30)
+                result[0] = setup.full_setup(
+                    bucket,
+                    days,
+                    full_extra_days=30,
+                    speedtest_bucket_name=speedtest_bucket,
+                )
             except Exception as e:
                 result[0] = [("Setup", False, str(e))]
 
@@ -1833,14 +1840,16 @@ class SetupWizard:
                 return
 
             steps = result[0]
-            all_ok = True
+            critical_fail = False
             for step_name, ok, msg in steps:
                 icon = "\u2713" if ok else "\u2717"
                 _append_log(f"  {icon} {step_name}: {msg}")
-                if not ok:
-                    all_ok = False
+                if not ok and step_name != "Create speedtest bucket":
+                    critical_fail = True
+                if not ok and step_name == "Create speedtest bucket":
+                    self._data["pro_speedtest_failed"] = True
 
-            if all_ok:
+            if not critical_fail:
                 _append_log("\n  Configuration complete!")
                 self._data["pro_setup_done"] = True
                 self._next_btn.state(["!disabled"])
@@ -1897,6 +1906,8 @@ class SetupWizard:
         d = self._data
         _label, _months, days = _resolve_retention(d)
 
+        speedtest_bucket = "" if d.get("pro_speedtest_failed") else f"{d['pro_bucket']}-speedtest"
+
         storage = StorageConfig(
             storage_type=StorageType.S3,
             s3_bucket=d["pro_bucket"],
@@ -1908,6 +1919,7 @@ class SetupWizard:
             s3_object_lock_mode="COMPLIANCE",
             s3_object_lock_days=days,
             s3_object_lock_full_extra_days=30,
+            s3_speedtest_bucket=speedtest_bucket,
         )
 
         mirrors: list[StorageConfig] = []

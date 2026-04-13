@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.core.bandwidth_tester import (
+    FAST_LINK_THRESHOLD,
     FULL_SAMPLE_SIZE,
     PROBE_SIZE,
     TEMP_PREFIX,
@@ -99,7 +100,7 @@ class TestMeasureBandwidth:
         """Should call upload_file 3 times: warmup + probe + full sample.
 
         The mock returns instantly (simulating a fast link), so the
-        adaptive logic runs the full 128 MB sample after the 2 MB probe.
+        adaptive logic runs the full 512 MB sample after the 128 MB probe.
         """
         backend = MagicMock()
         backend.upload_file = MagicMock()
@@ -107,7 +108,7 @@ class TestMeasureBandwidth:
 
         result = measure_bandwidth(backend)
         assert result > 0
-        # 3 calls: 1 warmup (1 MB) + 1 probe (2 MB) + 1 full (128 MB)
+        # 3 calls: 1 warmup (1 MB) + 1 probe (128 MB) + 1 full (512 MB)
         assert backend.upload_file.call_count == 3
 
     def test_returns_zero_when_all_fail(self):
@@ -136,7 +137,10 @@ class TestMeasureBandwidth:
         assert result > 0
 
     def test_sample_sizes_are_correct(self):
-        """Warmup is 1 MB, probe is 16 MB, full sample is 128 MB."""
+        """Warmup is 1 MB, probe is 128 MB, full sample is 512 MB."""
         assert WARMUP_SIZE == 1 * 1024 * 1024
-        assert PROBE_SIZE == 16 * 1024 * 1024
-        assert FULL_SAMPLE_SIZE == 128 * 1024 * 1024
+        assert PROBE_SIZE == 128 * 1024 * 1024
+        assert FULL_SAMPLE_SIZE == 512 * 1024 * 1024
+
+    def test_threshold_is_20mbps(self):
+        assert FAST_LINK_THRESHOLD == 20 * 1024 * 1024

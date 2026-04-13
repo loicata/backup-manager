@@ -282,6 +282,9 @@ class BackupEngine:
         type_tag = "DIFF" if ctx.profile.backup_type == BackupType.DIFFERENTIAL else "FULL"
         ctx.backup_name = generate_backup_name(ctx.profile.name, type_tag)
 
+        # Record actual type for email report (before restore to DIFFERENTIAL)
+        ctx.result.actual_backup_type = ctx.profile.backup_type.value.upper()
+
         # Log backup type and reference for differential
         if ctx.profile.backup_type == BackupType.DIFFERENTIAL:
             manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
@@ -1315,6 +1318,8 @@ class BackupEngine:
 
         Skips measurement for LOCAL destinations (always 100%).
         Skips when the user has selected 100%.
+        For S3 Object Lock backends with a speedtest bucket configured,
+        measures on the speedtest bucket to avoid locked test files.
 
         Args:
             backend: Storage backend to throttle.
@@ -1322,6 +1327,7 @@ class BackupEngine:
             label: Human-readable destination name for logging.
         """
         from src.storage.local import LocalStorage
+        from src.storage.s3 import S3Storage
 
         if isinstance(backend, LocalStorage):
             self._log(f"{label}: local destination — bandwidth unlimited")
@@ -1335,7 +1341,23 @@ class BackupEngine:
         self._phase(f"Measuring bandwidth ({label})...")
         self._check_cancel()
 
-        measured_bps = measure_bandwidth(backend)
+        # Use speedtest bucket for S3 Object Lock to avoid locked test files
+        test_backend = backend
+        if isinstance(backend, S3Storage) and profile.storage.s3_object_lock:
+            if not profile.storage.s3_speedtest_bucket:
+                raise ValueError("Object Lock profile is missing s3_speedtest_bucket")
+            test_backend = S3Storage(
+                bucket=profile.storage.s3_speedtest_bucket,
+                prefix="",
+                region=profile.storage.s3_region,
+                access_key=profile.storage.s3_access_key,
+                secret_key=profile.storage.s3_secret_key,
+                endpoint_url=profile.storage.s3_endpoint_url,
+                provider=profile.storage.s3_provider,
+            )
+            self._log(f"{label}: using speedtest bucket for bandwidth measurement")
+
+        measured_bps = measure_bandwidth(test_backend)
         if measured_bps <= 0:
             self._log(f"{label}: bandwidth test failed — no throttle applied")
             return

@@ -628,11 +628,61 @@ class S3ObjectLockSetup:
             logger.error("Failed to configure lifecycle on %s: %s", bucket_name, e)
             return False, f"Lifecycle configuration failed: {e}"
 
+    def create_speedtest_bucket(self, bucket_name: str) -> tuple[bool, str]:
+        """Create a plain S3 bucket for bandwidth testing (no Object Lock).
+
+        The bucket gets a 1-day lifecycle rule so test files are
+        automatically cleaned up within 24 hours.
+
+        Args:
+            bucket_name: Globally unique S3 bucket name.
+
+        Returns:
+            (True, success_message) or (False, error_message).
+        """
+        if not bucket_name or not bucket_name.strip():
+            return False, "Speedtest bucket name is required"
+
+        try:
+            client = self._get_client()
+            create_kwargs: dict = {"Bucket": bucket_name}
+            if self._region != "us-east-1":
+                create_kwargs["CreateBucketConfiguration"] = {
+                    "LocationConstraint": self._region,
+                }
+            client.create_bucket(**create_kwargs)
+
+            # Auto-cleanup: delete test files after 1 day
+            client.put_bucket_lifecycle_configuration(
+                Bucket=bucket_name,
+                LifecycleConfiguration={
+                    "Rules": [
+                        {
+                            "ID": "speedtest-auto-cleanup",
+                            "Status": "Enabled",
+                            "Filter": {"Prefix": ""},
+                            "Expiration": {"Days": 1},
+                        },
+                    ],
+                },
+            )
+
+            logger.info(
+                "Created speedtest bucket %s in %s (lifecycle: 1 day)",
+                bucket_name,
+                self._region,
+            )
+            return True, f"Speedtest bucket '{bucket_name}' created (auto-cleanup: 1 day)"
+        except Exception as e:
+            logger.error("Failed to create speedtest bucket %s: %s", bucket_name, e)
+            return False, f"Speedtest bucket creation failed: {e}"
+
     def full_setup(
         self,
         bucket_name: str,
         retention_days: int,
         full_extra_days: int = 30,
+        speedtest_bucket_name: str = "",
     ) -> list[tuple[str, bool, str]]:
         """Run all provisioning steps in sequence.
 
@@ -640,6 +690,8 @@ class S3ObjectLockSetup:
             bucket_name: Globally unique S3 bucket name.
             retention_days: Object Lock retention for diffs.
             full_extra_days: Extra retention for full backups.
+            speedtest_bucket_name: Optional bucket for bandwidth tests
+                (no Object Lock). Non-fatal if creation fails.
 
         Returns:
             List of (step_name, success, message) for each step.
@@ -684,5 +736,12 @@ class S3ObjectLockSetup:
             )
         except Exception as e:
             results.append(("Verify configuration", False, f"Verification failed: {e}"))
+
+        # Step 5: Create speedtest bucket (non-fatal)
+        if speedtest_bucket_name:
+            ok, msg = self.create_speedtest_bucket(speedtest_bucket_name)
+            results.append(("Create speedtest bucket", ok, msg))
+            if not ok:
+                logger.warning("Speedtest bucket creation failed (non-fatal): %s", msg)
 
         return results

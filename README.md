@@ -3,7 +3,7 @@
 [![CI](https://github.com/loicata/backup-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/loicata/backup-manager/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-971%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-983%20passed-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/coverage-83%25-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
@@ -287,7 +287,7 @@ pytest --cov=src --cov-report=term-missing
 pytest tests/unit/test_hashing.py -v
 ```
 
-**Current status:** 971 tests | 83% coverage | 0 failures
+**Current status:** 983 tests | 83% coverage | 0 failures
 
 CI pipeline: GitHub Actions on every push - Black formatting, Ruff linting (Ubuntu), full test suite with coverage enforcement (Windows, Python 3.12 + 3.13).
 
@@ -353,7 +353,7 @@ backup-manager/
 │       └── tabs/                       # Tab implementations
 │           ├── protection_tab.py          # Object Lock status (Anti-Ransomware)
 │           └── ...                        # General, Storage, Mirror, etc.
-├── tests/                           # 971 tests (unit + integration)
+├── tests/                           # 983 tests (unit + integration)
 ├── CHANGELOG.md                     # Release history
 ├── requirements.txt                 # Runtime dependencies
 └── pyproject.toml                   # Project metadata & tool config

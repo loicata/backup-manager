@@ -115,6 +115,13 @@ def build():
     if launch_vbs.exists():
         cmd += ["--add-data", f"{launch_vbs};."]
 
+    # Bug report signing key (Ed25519 private key, gitignored)
+    signing_key = ASSETS / "report_signing_key.pem"
+    if signing_key.exists():
+        cmd += ["--add-data", f"{signing_key};assets"]
+    else:
+        print("WARNING: report_signing_key.pem not found — reports won't be signed")
+
     # Entry point
     cmd.append(str(SRC / "__main__.py"))
 

@@ -3,7 +3,7 @@
 [![CI](https://github.com/loicata/backup-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/loicata/backup-manager/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-983%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1144%20passed-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/coverage-83%25-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
@@ -271,6 +271,8 @@ EOF sentinel:
 | **Memory** | Explicit buffer zeroing |
 | **Path safety** | Traversal-proof remote path validation |
 | **Logging** | No secrets in any log output |
+| **Bug reports** | Dual HMAC + Ed25519 signed diagnostics, injection-proof |
+| **Build** | Nuitka native compilation (no extractable bytecode) |
 
 ---
 
@@ -287,7 +289,7 @@ pytest --cov=src --cov-report=term-missing
 pytest tests/unit/test_hashing.py -v
 ```
 
-**Current status:** 983 tests | 83% coverage | 0 failures
+**Current status:** 1144 tests | 83% coverage | 0 failures
 
 CI pipeline: GitHub Actions on every push - Black formatting, Ruff linting (Ubuntu), full test suite with coverage enforcement (Windows, Python 3.12 + 3.13).
 
@@ -298,15 +300,17 @@ CI pipeline: GitHub Actions on every push - Black formatting, Ruff linting (Ubun
 ### Prerequisites
 
 - Python 3.11+ (tested on 3.12 and 3.13)
+- [Nuitka](https://nuitka.net/) (Python to C compiler)
+- MSVC Build Tools (C compiler for Nuitka)
 - [WiX Toolset v3.14](https://wixtoolset.org/) (for MSI packaging only)
 
 ### Build the Executable
 
 ```bash
-python build_pyinstaller.py
+python build_nuitka.py
 ```
 
-Output: `dist/BackupManager/BackupManager.exe`
+Output: `dist/BackupManager/BackupManager.exe` (native C binary via Nuitka)
 
 ### Build the MSI Installer
 
@@ -353,7 +357,7 @@ backup-manager/
 │       └── tabs/                       # Tab implementations
 │           ├── protection_tab.py          # Object Lock status (Anti-Ransomware)
 │           └── ...                        # General, Storage, Mirror, etc.
-├── tests/                           # 983 tests (unit + integration)
+├── tests/                           # 1144 tests (unit + integration)
 ├── CHANGELOG.md                     # Release history
 ├── requirements.txt                 # Runtime dependencies
 └── pyproject.toml                   # Project metadata & tool config

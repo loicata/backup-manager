@@ -45,7 +45,9 @@ APP_FILES = [
 def _get_app_dir() -> Path:
     """Get the application source directory."""
     if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS) / "src"
+        if hasattr(sys, "_MEIPASS"):
+            return Path(sys._MEIPASS) / "src"
+        return Path(__file__).resolve().parent.parent
     return Path(__file__).resolve().parent.parent
 
 

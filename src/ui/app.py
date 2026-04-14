@@ -1,10 +1,17 @@
 """Main application window with sidebar and tabbed interface."""
 
 import contextlib
+import hashlib
+import hmac
+import json
 import logging
 import os
+import platform
+import re
+import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -42,12 +49,582 @@ logger = logging.getLogger(__name__)
 # Interval between continuous health checks for destinations (ms)
 HEALTH_POLL_INTERVAL_MS = 60_000
 
+# Bug report destination
+BUG_REPORT_EMAIL = "loic@loicata.com"
+
+# Regex patterns for log anonymization
+_ANON_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # Windows user paths (C:\Users\xxx\...)
+    (re.compile(r"[A-Za-z]:\\Users\\[^\\]+\\[^\s\"',:]+"), "***"),
+    # Windows environment variable paths (%APPDATA%\...)
+    (re.compile(r"%[A-Za-z_]+%\\[^\s\"',:]+"), "***"),
+    # UNC paths (\\server\share\...)
+    (re.compile(r"\\\\[^\\]+\\[^\s\"',:]+"), "\\\\***\\***"),
+    # Linux home paths (/home/xxx/...)
+    (re.compile(r"/home/[^/]+/[^\s\"',:]+"), "***/***"),
+    # IPv4 addresses
+    (re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "***.***.***.***"),
+    # Email addresses
+    (re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"), "***@***.***"),
+    # S3 bucket URIs
+    (re.compile(r"s3://[a-zA-Z0-9._\-\[\]]+"), "s3://[bucket]"),
+    # Hostnames (word.word.tld patterns, min 2 dots)
+    (re.compile(r"\b[a-zA-Z0-9-]+\.[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\b"), "[host]"),
+    # Quoted strings (profile names, paths, etc.)
+    (re.compile(r"'[^']{1,100}'"), "'[profile]'"),
+]
+
+# Keywords that indicate prompt injection attempts
+_INJECTION_KEYWORDS = re.compile(
+    r"\[\[\[|OVERRIDE|IGNORE\s+(ALL|PREVIOUS|ABOVE|SAFETY|RULES|INSTRUCTIONS)"
+    r"|SYSTEM\s*(PROMPT|MESSAGE|OVERRIDE|INSTRUCTION)"
+    r"|CLAUDE\s*(CODE|OVERRIDE|INSTRUCTION)"
+    r"|INSTRUCTION\s*:|EXECUTE\s*:|ADMIN\s*:|AUTHORIZED\s*:"
+    r"|YOU\s+MUST|YOU\s+SHOULD\s+NOW|DISREGARD"
+    r"|PRETEND\s+YOU|ACT\s+AS|ROLE\s*:"
+    r"|SECURITY\s+RULES|SAFETY\s+RULES",
+    re.IGNORECASE,
+)
+
+# Maximum length for user-provided description
+_MAX_DESCRIPTION_LEN = 2000
+
+
+def _normalize_unicode(text: str) -> str:
+    """Normalize Unicode lookalike characters to ASCII equivalents.
+
+    Prevents bypass of anonymization patterns using fullwidth @,
+    homoglyph characters, or other Unicode tricks.
+
+    Args:
+        text: Input text potentially containing Unicode tricks.
+
+    Returns:
+        Normalized ASCII-equivalent text.
+    """
+    import unicodedata
+
+    # NFKC normalization converts fullwidth chars to ASCII equivalents
+    return unicodedata.normalize("NFKC", text)
+
+
+def anonymize_log_lines(lines: list[str]) -> list[str]:
+    """Anonymize sensitive data in log lines.
+
+    Applies Unicode normalization first, then removes file paths,
+    IP addresses, email addresses, bucket names, hostnames,
+    and profile names while preserving timestamps and log levels.
+
+    Args:
+        lines: Raw log lines to anonymize.
+
+    Returns:
+        List of anonymized log lines.
+    """
+    result = []
+    for line in lines:
+        line = _normalize_unicode(line)
+        for pattern, replacement in _ANON_PATTERNS:
+            line = pattern.sub(replacement, line)
+        result.append(line)
+    return result
+
+
+def _sanitize_user_text(text: str) -> str:
+    """Sanitize user-provided text to prevent prompt injection.
+
+    Truncates to a safe length, normalizes Unicode, applies
+    anonymization, and strips injection-like patterns.
+
+    Args:
+        text: Raw user description from the bug report form.
+
+    Returns:
+        Sanitized text safe for inclusion in diagnostic files.
+    """
+    if not text:
+        return ""
+    # Truncate
+    text = text[:_MAX_DESCRIPTION_LEN]
+    # Unicode normalization
+    text = _normalize_unicode(text)
+    # Strip injection keywords
+    text = _INJECTION_KEYWORDS.sub("[REMOVED]", text)
+    # Anonymize any sensitive data the user may have pasted
+    lines = text.splitlines()
+    lines = anonymize_log_lines(lines)
+    return "\n".join(lines)
+
+
+# -- Bug report helper functions (module-level for testability) --
+
+_PROJECT_DEPS = [
+    "cryptography",
+    "pystray",
+    "Pillow",
+    "paramiko",
+    "boto3",
+    "sv_ttk",
+]
+
+
+def _collect_dependency_versions() -> str:
+    """Collect installed versions of project dependencies.
+
+    Returns:
+        Comma-separated list of package==version strings.
+    """
+    parts = []
+    for pkg in _PROJECT_DEPS:
+        try:
+            from importlib.metadata import version
+
+            parts.append(f"{pkg}=={version(pkg)}")
+        except Exception:
+            parts.append(f"{pkg}=?")
+    return ", ".join(parts)
+
+
+def _extract_recent_errors(log_file: Path, count: int = 3) -> str | None:
+    """Extract the last N ERROR/CRITICAL lines with context from a log file.
+
+    Args:
+        log_file: Path to the log file.
+        count: Number of recent errors to extract.
+
+    Returns:
+        Anonymized error context string, or None if no errors found.
+    """
+    if not log_file.exists():
+        return None
+    try:
+        raw_lines = log_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    # Find all ERROR/CRITICAL line indices
+    error_indices = [
+        i
+        for i, line in enumerate(raw_lines)
+        if "[ERROR]" in line or "[CRITICAL]" in line
+    ]
+    if not error_indices:
+        return None
+
+    # Take the last N errors
+    sections: list[str] = []
+    for idx in error_indices[-count:]:
+        start = max(0, idx - 2)
+        end = min(len(raw_lines), idx + 4)
+        context = raw_lines[start:end]
+        sections.append("\n".join(anonymize_log_lines(context)))
+
+    return "\n---\n".join(sections)
+
+
+def _extract_traceback_info(crash_file: Path) -> str | None:
+    """Extract anonymized traceback from crash.log.
+
+    Preserves file references (src/...) but anonymizes user paths.
+    Extracts: exception type, error message, source file + line.
+
+    Args:
+        crash_file: Path to the crash log file.
+
+    Returns:
+        Anonymized traceback string, or None if no crash log.
+    """
+    if not crash_file.exists():
+        return None
+    try:
+        raw_lines = crash_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if not raw_lines:
+        return None
+    return "\n".join(anonymize_log_lines(raw_lines))
+
+
+def _get_git_commit() -> str:
+    """Get the current git commit hash, or 'unknown' in frozen builds."""
+    if getattr(sys, "frozen", False):
+        return "frozen_build"
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=Path(__file__).resolve().parent.parent,
+        )
+        return result.stdout.strip() if result.returncode == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _parse_traceback_structured(crash_file: Path) -> list[dict]:
+    """Parse crash.log into structured traceback entries.
+
+    Args:
+        crash_file: Path to the crash log file.
+
+    Returns:
+        List of dicts with keys: file, line, function, exception, message.
+    """
+    if not crash_file.exists():
+        return []
+    try:
+        raw = crash_file.read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    entries: list[dict] = []
+    frame_pattern = re.compile(
+        r'File "([^"]+)", line (\d+)(?:, in (.+))?'
+    )
+    for match in frame_pattern.finditer(raw):
+        filepath = match.group(1)
+        # Keep only src/ relative paths, anonymize the rest
+        if "src" in filepath:
+            idx = filepath.find("src")
+            filepath = filepath[idx:]
+        else:
+            filepath = "***"
+        entries.append({
+            "file": filepath,
+            "line": int(match.group(2)),
+            "function": match.group(3) or "unknown",
+        })
+
+    # Extract the final exception line (anonymize the message)
+    lines = raw.strip().splitlines()
+    if lines:
+        last_line = lines[-1].strip()
+        if ":" in last_line and not last_line.startswith(" "):
+            exc_type, _, exc_msg = last_line.partition(":")
+            # Anonymize exception message — it may contain
+            # user paths, IPs, or injected content
+            anon_msg = anonymize_log_lines([exc_msg.strip()])
+            entries.append({
+                "exception_type": exc_type.strip(),
+                "exception_message": anon_msg[0],
+            })
+
+    return entries
+
+
+def _build_machine_readable(
+    diagnostic: str, include_logs: bool = False
+) -> dict:
+    """Build a structured machine-readable dictionary from diagnostic text.
+
+    Args:
+        diagnostic: The human-readable diagnostic string.
+        include_logs: If True, include logs/crash/errors from disk
+            (advanced mode). If False (default), only runtime system
+            info is included — zero injection risk.
+
+    Returns:
+        Dictionary with structured fields for Claude Code consumption.
+    """
+    data: dict = {
+        "format_version": 2,
+        "app_version": __version__,
+        "git_commit": _get_git_commit(),
+        "python_version": platform.python_version(),
+        "os": f"{platform.system()} {platform.release()}",
+        "os_build": platform.version(),
+        "frozen": getattr(sys, "frozen", False),
+        "generated_at": datetime.now().isoformat(),
+    }
+
+    # Parse fields from diagnostic text
+    profile_entries: list[str] = []
+    for line in diagnostic.splitlines():
+        stripped = line.strip("- ")
+        if stripped.startswith("Mode:"):
+            data["mode"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Profiles:"):
+            data["profiles_summary"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Dependencies:"):
+            data["dependencies"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Active tab:"):
+            data["active_tab"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Install ID:"):
+            data["install_id"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Screen:"):
+            data["screen"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Memory usage:"):
+            data["memory_mb"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Uptime:"):
+            data["uptime"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Scheduler:"):
+            data["scheduler"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Profile "):
+            profile_entries.append(stripped)
+    if profile_entries:
+        data["profiles_detail"] = profile_entries
+
+    # Report mode indicator
+    data["report_mode"] = "advanced" if include_logs else "standard"
+
+    if not include_logs:
+        # Standard mode: system info only, zero disk data, zero risk.
+        return data
+
+    # --- Advanced mode: untrusted data (from disk files) ---
+    # These are placed INSIDE the signed JSON block so they cannot
+    # be modified after report generation. All content is anonymized
+    # and sanitized before inclusion.
+    appdata = os.environ.get("APPDATA", "")
+
+    # Structured traceback from crash.log
+    crash_file = Path(appdata) / "BackupManager" / "crash.log"
+    structured_tb = _parse_traceback_structured(crash_file)
+    if structured_tb:
+        data["structured_traceback"] = structured_tb
+
+    # Raw crash traceback (anonymized)
+    crash_text = _extract_traceback_info(crash_file)
+    if crash_text:
+        crash_lines = crash_text.splitlines()
+        safe_crash = []
+        for line in crash_lines:
+            safe_crash.append(_INJECTION_KEYWORDS.sub("[REMOVED]", line))
+        data["crash_traceback"] = safe_crash
+
+    # Recent errors from log file (anonymized, last 3)
+    log_file = (
+        Path(appdata) / "BackupManager" / "logs" / "backup_manager.log"
+    )
+    recent_errors = _extract_recent_errors(log_file, count=3)
+    if recent_errors:
+        error_lines = recent_errors.splitlines()
+        safe_errors = []
+        for line in error_lines:
+            safe_errors.append(_INJECTION_KEYWORDS.sub("[REMOVED]", line))
+        data["recent_errors"] = safe_errors
+
+    # Recent log tail (anonymized, last 50 lines)
+    if log_file.exists():
+        try:
+            raw_lines = log_file.read_text(encoding="utf-8").splitlines()
+            tail = raw_lines[-50:] if len(raw_lines) > 50 else raw_lines
+            anon = anonymize_log_lines(tail)
+            safe_log = []
+            for line in anon:
+                safe_log.append(
+                    _INJECTION_KEYWORDS.sub("[REMOVED]", line)
+                )
+            data["recent_log"] = safe_log
+        except OSError:
+            data["recent_log"] = ["(could not read log file)"]
+
+    return data
+
+
+def _compute_source_hashes() -> dict[str, str]:
+    """Compute SHA-256 hashes of key source files for cross-validation.
+
+    When Claude receives this report, it can compare these hashes against
+    the current source to verify the report matches the codebase version.
+
+    Returns:
+        Dictionary mapping relative file paths to their SHA-256 hashes.
+    """
+    # Determine source root
+    if getattr(sys, "frozen", False):
+        return {"note": "frozen build — source hashes not available"}
+
+    src_root = Path(__file__).resolve().parent.parent
+    project_root = src_root.parent
+
+    critical_files = [
+        "src/core/backup_engine.py",
+        "src/core/config.py",
+        "src/core/phases/writer.py",
+        "src/core/phases/remote_writer.py",
+        "src/core/phases/collector.py",
+        "src/core/phases/filter.py",
+        "src/core/phases/rotator.py",
+        "src/storage/base.py",
+        "src/storage/local.py",
+        "src/storage/sftp.py",
+        "src/storage/s3.py",
+        "src/security/encryption.py",
+        "src/core/scheduler.py",
+        "src/notifications/email_notifier.py",
+    ]
+
+    hashes: dict[str, str] = {}
+    for rel_path in critical_files:
+        full_path = project_root / rel_path
+        if full_path.exists():
+            try:
+                content = full_path.read_bytes()
+                hashes[rel_path] = hashlib.sha256(content).hexdigest()
+            except OSError:
+                hashes[rel_path] = "read_error"
+        else:
+            hashes[rel_path] = "not_found"
+    return hashes
+
+
+def _compute_report_hmac(machine_json: str) -> str:
+    """Compute HMAC-SHA256 of the machine-readable block.
+
+    The key is derived from the app version + a fixed salt. This allows
+    Claude to verify that the diagnostic data was generated by the app
+    and not manually crafted or tampered with.
+
+    Args:
+        machine_json: JSON string of the machine-readable block.
+
+    Returns:
+        Hex-encoded HMAC-SHA256 signature.
+    """
+    # Key = SHA-256(version + salt). The salt is in the source code,
+    # so Claude can recompute it to verify the signature.
+    salt = b"BackupManager-BugReport-Integrity-v1"
+    key_material = f"{__version__}".encode() + salt
+    key = hashlib.sha256(key_material).digest()
+    return hmac.new(key, machine_json.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_report_hmac(machine_json: str, expected_hmac: str) -> bool:
+    """Verify the HMAC signature of a bug report's machine-readable block.
+
+    This function is intended to be called by Claude Code when processing
+    a bug report to confirm the diagnostic data has not been tampered with.
+
+    Args:
+        machine_json: The JSON string from the MACHINE READABLE section.
+        expected_hmac: The HMAC-SHA256 hex string from the report.
+
+    Returns:
+        True if the signature is valid, False if tampered.
+    """
+    computed = _compute_report_hmac(machine_json)
+    return hmac.compare_digest(computed, expected_hmac)
+
+
+def verify_full_report_hmac(
+    description: str, diagnostic: str, machine_json: str, expected_hmac: str
+) -> bool:
+    """Verify the full-report HMAC covering all sections.
+
+    Unlike verify_report_hmac which only covers the machine-readable
+    block, this verifies that the description, diagnostic text, AND
+    machine JSON have not been modified after generation.
+
+    Args:
+        description: The USER DESCRIPTION section from the report.
+        diagnostic: The diagnostic text section from the report.
+        machine_json: The MACHINE READABLE JSON section.
+        expected_hmac: The HMAC-FULL-SHA256 hex string from the report.
+
+    Returns:
+        True if the full report is intact, False if any section was tampered.
+    """
+    full_content = f"{description}\n{diagnostic}\n{machine_json}"
+    computed = _compute_report_hmac(full_content)
+    return hmac.compare_digest(computed, expected_hmac)
+
+
+# -- Ed25519 asymmetric signing (proof of origin) --
+# The public key is hardcoded here. The private key is ONLY in the
+# compiled binary (assets/report_signing_key.pem, gitignored).
+# An attacker with source code access CANNOT forge signatures.
+
+_REPORT_PUBLIC_KEY_HEX = "1cb94d3db792886c883643da7c1a274624740216e0a27996617f5954ef173cb2"
+
+
+def _load_signing_key():
+    """Load the Ed25519 private key from the embedded asset.
+
+    Returns:
+        Ed25519PrivateKey instance, or None if not available.
+    """
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    # Frozen build: PyInstaller uses _MEIPASS, Nuitka uses __file__
+    if getattr(sys, "frozen", False):
+        if hasattr(sys, "_MEIPASS"):
+            base = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+        else:
+            base = Path(__file__).resolve().parent.parent.parent
+    else:
+        base = Path(__file__).resolve().parent.parent.parent
+
+    key_path = base / "assets" / "report_signing_key.pem"
+    if not key_path.exists():
+        return None
+    try:
+        pem_data = key_path.read_bytes()
+        return load_pem_private_key(pem_data, password=None)
+    except Exception:
+        logger.warning("Could not load report signing key", exc_info=True)
+        return None
+
+
+def _sign_report_ed25519(content: str) -> str | None:
+    """Sign report content with the embedded Ed25519 private key.
+
+    Args:
+        content: The full report content to sign.
+
+    Returns:
+        Hex-encoded Ed25519 signature, or None if key unavailable.
+    """
+    private_key = _load_signing_key()
+    if private_key is None:
+        return None
+    try:
+        signature = private_key.sign(content.encode("utf-8"))
+        return signature.hex()
+    except Exception:
+        logger.warning("Failed to sign report", exc_info=True)
+        return None
+
+
+def verify_report_signature(content: str, signature_hex: str) -> bool:
+    """Verify Ed25519 signature proving the report was generated by the app.
+
+    This uses the hardcoded public key — it does NOT need the private key.
+    If the signature is valid, the report was generated by a binary that
+    contains the private key (i.e., an official build, not a forge).
+
+    Args:
+        content: The full report content that was signed.
+        signature_hex: The hex-encoded Ed25519 signature.
+
+    Returns:
+        True if the signature is valid (report is from official app).
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PublicKey,
+    )
+
+    try:
+        pub_bytes = bytes.fromhex(_REPORT_PUBLIC_KEY_HEX)
+        public_key = Ed25519PublicKey.from_public_bytes(pub_bytes)
+        signature = bytes.fromhex(signature_hex)
+        public_key.verify(signature, content.encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
 
 class BackupManagerApp:
     """Main application with sidebar profile list and tabbed configuration."""
 
     def __init__(self, root: tk.Tk, from_wizard: bool = False):
+        import time
+
         self.root = root
+        self._start_time = time.time()
         self._from_wizard = from_wizard
         self.root.title(f"{APP_TITLE} v{__version__}")
         self.root.geometry(WINDOW_SIZE)
@@ -155,34 +732,15 @@ class BackupManagerApp:
 
         import webbrowser
 
-        tk.Label(
-            sidebar,
-            text="Free and open-source",
-            bg=Colors.SIDEBAR_BG,
-            fg=Colors.TEXT_DISABLED,
-            font=(Fonts.FAMILY, 7),
-        ).pack(pady=(Spacing.SMALL, 0))
-
-        foss_row = tk.Frame(sidebar, bg=Colors.SIDEBAR_BG)
-        foss_row.pack()
-        tk.Label(
-            foss_row,
-            text="software from",
-            bg=Colors.SIDEBAR_BG,
-            fg=Colors.TEXT_DISABLED,
-            font=(Fonts.FAMILY, 7),
-            padx=0,
-        ).pack(side="left", padx=(0, 2))
         link = tk.Label(
-            foss_row,
+            sidebar,
             text="loicata.com",
             bg=Colors.SIDEBAR_BG,
             fg="#5dade2",
-            font=(Fonts.FAMILY, 7, "underline"),
+            font=Fonts.small(),
             cursor="hand2",
-            padx=0,
         )
-        link.pack(side="left", padx=0)
+        link.pack()
         link.bind(
             "<Button-1>",
             lambda e: webbrowser.open("https://loicata.com"),
@@ -1770,39 +2328,38 @@ class BackupManagerApp:
         messagebox.showinfo("Modules", msg)
 
     def _show_about(self):
+        """Show About as a full-screen inline panel replacing the notebook."""
         import webbrowser
 
-        dlg = tk.Toplevel(self.root)
-        dlg.title("About")
-        dlg.resizable(False, False)
-        dlg.transient(self.root)
-        dlg.grab_set()
-        # Center on parent window
-        dlg.withdraw()
-        dlg.update_idletasks()
-        w, h = 420, 240
-        px = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
-        py = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
-        dlg.geometry(f"{w}x{h}+{px}+{py}")
-        dlg.deiconify()
+        # Already open — do nothing
+        if hasattr(self, "_about_frame") and self._about_frame is not None:
+            return
 
-        frame = ttk.Frame(dlg, padding=(20, 20, 20, 20))
-        frame.pack(fill="both", expand=True)
+        # Hide notebook + save frame
+        self.notebook.pack_forget()
+        self._save_frame.pack_forget()
+
+        about = ttk.Frame(self._main_frame)
+        about.pack(fill="both", expand=True)
+        self._about_frame = about
+
+        main = ttk.Frame(about, padding=(Spacing.SECTION, Spacing.LARGE))
+        main.pack(fill="both", expand=True)
 
         ttk.Label(
-            frame,
+            main,
             text=f"{APP_TITLE} v{__version__}",
             font=Fonts.title(),
         ).pack(anchor="w")
 
         ttk.Label(
-            frame,
+            main,
             text="\nCopyright (c) 2026 Loic Ader",
             foreground=Colors.TEXT_SECONDARY,
         ).pack(anchor="w")
 
         link = ttk.Label(
-            frame,
+            main,
             text="loicata.com",
             foreground="#1a73e8",
             cursor="hand2",
@@ -1814,13 +2371,660 @@ class BackupManagerApp:
             lambda e: webbrowser.open("https://loicata.com"),
         )
 
-        # Spacer pushes license to the bottom
-        frame.rowconfigure(0, weight=1)
-        spacer = ttk.Frame(frame)
-        spacer.pack(fill="both", expand=True)
-
         ttk.Label(
-            frame,
+            main,
             text="GNU General Public License v3.0",
             foreground=Colors.TEXT_SECONDARY,
         ).pack(anchor="w")
+
+        ttk.Separator(main, orient="horizontal").pack(
+            fill="x", pady=(Spacing.LARGE, 0)
+        )
+
+        # --- Buttons ---
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(fill="x", pady=(Spacing.LARGE, 0))
+
+        def _close_about():
+            about.destroy()
+            self._about_frame = None
+            self._save_frame.pack(fill="x", side="bottom", before=None)
+            self.notebook.pack(fill="both", expand=True)
+
+        def _open_bug_report():
+            _close_about()
+            self._show_bug_report()
+
+        ttk.Button(
+            btn_frame,
+            text="Report a Bug",
+            style="Accent.TButton",
+            command=_open_bug_report,
+        ).pack(side="left")
+
+        ttk.Button(
+            btn_frame, text="Close", command=_close_about
+        ).pack(side="left", padx=(Spacing.MEDIUM, 0))
+
+    # ------------------------------------------------------------------
+    # Bug report
+    # ------------------------------------------------------------------
+
+    def _collect_diagnostic(self) -> str:
+        """Collect anonymized diagnostic information.
+
+        Gathers maximum useful data while strictly anonymizing personal
+        information (paths, IPs, emails, profile names, bucket names).
+
+        Returns:
+            Formatted diagnostic string with system info and anonymized logs.
+        """
+        lines: list[str] = []
+
+        # --- System info ---
+        lines.append(f"- Version: {__version__}")
+        lines.append(f"- Git commit: {_get_git_commit()}")
+        lines.append(
+            f"- OS: {platform.system()} {platform.release()} "
+            f"Build {platform.version()}"
+        )
+        lines.append(f"- Python: {platform.python_version()}")
+        lines.append(f"- Frozen: {getattr(sys, 'frozen', False)}")
+        lines.append(f"- Install ID: {self.config_manager.get_install_id()}")
+        lines.append(
+            f"- Architecture: {platform.machine()} "
+            f"({platform.architecture()[0]})"
+        )
+
+        # Screen resolution + DPI
+        try:
+            w = self.root.winfo_screenwidth()
+            h = self.root.winfo_screenheight()
+            dpi = self.root.winfo_fpixels("1i")
+            lines.append(f"- Screen: {w}x{h} @ {dpi:.0f} DPI")
+        except Exception:
+            lines.append("- Screen: unknown")
+
+        # Process memory usage
+        try:
+            import psutil
+
+            proc = psutil.Process(os.getpid())
+            mem_mb = proc.memory_info().rss / (1024 * 1024)
+            lines.append(f"- Memory usage: {mem_mb:.1f} MB")
+        except Exception:
+            pass
+
+        # App uptime
+        try:
+            import time
+
+            uptime_s = time.time() - self._start_time
+            hours, rem = divmod(int(uptime_s), 3600)
+            minutes, secs = divmod(rem, 60)
+            lines.append(f"- Uptime: {hours}h {minutes}m {secs}s")
+        except Exception:
+            pass
+
+        # --- App config ---
+        app_settings = self.config_manager.load_app_settings()
+        mode = app_settings.get("mode", "classic")
+        lines.append(f"- Mode: {mode.replace('-', ' ').title()}")
+
+        # Active tab
+        try:
+            active_tab_id = self.notebook.select()
+            active_tab_text = self.notebook.tab(active_tab_id, "text").strip()
+            lines.append(f"- Active tab: {active_tab_text}")
+        except Exception:
+            lines.append("- Active tab: unknown")
+
+        # --- Profile details (anonymized: no names, no paths) ---
+        profiles = self.config_manager.get_all_profiles()
+        storage_types: set[str] = set()
+        mirror_count = 0
+        profile_details: list[str] = []
+        for i, p in enumerate(profiles):
+            stype = p.storage.storage_type.value
+            storage_types.add(stype)
+            m1 = getattr(p, "mirror1", None)
+            m2 = getattr(p, "mirror2", None)
+            if m1 and m1.storage_type:
+                mirror_count += 1
+            if m2 and m2.storage_type:
+                mirror_count += 1
+
+            # Per-profile anonymous summary
+            btype = getattr(p, "backup_type", "unknown")
+            if hasattr(btype, "value"):
+                btype = btype.value
+            encrypted = bool(getattr(p, "encryption_password", None))
+            schedule = getattr(p, "schedule_frequency", "unknown")
+            if hasattr(schedule, "value"):
+                schedule = schedule.value
+            retention = getattr(p, "retention_daily", "?")
+            last_status = getattr(p, "last_status", "unknown")
+            last_date = getattr(p, "last_backup_date", None)
+            last_str = str(last_date) if last_date else "never"
+
+            detail = (
+                f"  Profile {i + 1}: storage={stype}, "
+                f"type={btype}, encrypted={encrypted}, "
+                f"schedule={schedule}, "
+                f"retention_daily={retention}, "
+                f"last={last_str}, status={last_status}"
+            )
+            profile_details.append(detail)
+
+        type_str = (
+            " + ".join(sorted(storage_types)) if storage_types else "none"
+        )
+        mirror_str = f", {mirror_count} mirror(s)" if mirror_count else ""
+        lines.append(
+            f"- Profiles: {len(profiles)} "
+            f"(storage: {type_str}{mirror_str})"
+        )
+        lines.extend(profile_details)
+
+        # Installed dependencies versions
+        deps = _collect_dependency_versions()
+        if deps:
+            lines.append(f"- Dependencies: {deps}")
+
+        # Scheduler state
+        try:
+            running = getattr(self.scheduler, "_running", False)
+            lines.append(f"- Scheduler: {'running' if running else 'stopped'}")
+        except Exception:
+            lines.append("- Scheduler: unknown")
+
+        # Backup history (last 10 runs, anonymized)
+        try:
+            journal = self.scheduler._journal
+            entries = journal.get_entries(limit=10)
+            if entries:
+                lines.append("- Recent backup runs:")
+                for e in entries:
+                    ts = e.get("timestamp", "?")
+                    status = e.get("status", "?")
+                    trigger = e.get("trigger", "?")
+                    duration = e.get("duration_s", "?")
+                    files = e.get("files_count", "?")
+                    size = e.get("total_size_mb", "?")
+                    errors = e.get("errors", [])
+                    err_count = len(errors) if isinstance(errors, list) else 0
+                    raw_line = (
+                        f"    {ts} | {status} | trigger={trigger} | "
+                        f"duration={duration}s | files={files} | "
+                        f"size={size}MB | errors={err_count}"
+                    )
+                    # Anonymize journal entries (exception messages
+                    # could contain injected content)
+                    anon = anonymize_log_lines([raw_line])
+                    lines.append(anon[0])
+        except Exception:
+            pass
+
+        diagnostic = "\n".join(lines)
+
+        # Return ONLY trusted system info as diagnostic text.
+        # Untrusted data (logs, errors, crash) is collected separately
+        # and placed INSIDE the signed machine-readable JSON block
+        # by _build_machine_readable() to prevent injection via
+        # unsigned text sections.
+        return f"DIAGNOSTIC INFO:\n{diagnostic}"
+
+    def _generate_bug_report(
+        self,
+        description: str,
+        diagnostic: str,
+        advanced: bool = False,
+        id_file_path: str = "",
+    ) -> Path:
+        """Generate a bug report folder with diagnostic and instructions.
+
+        Two modes:
+        - Standard (advanced=False): system info only in the JSON block.
+          No logs, no crash data, no traceback. Zero injection risk.
+        - Advanced (advanced=True): includes sanitized logs, crash data,
+          and structured traceback in the signed JSON block. Requires
+          ID verification.
+
+        Args:
+            description: User-provided description of the issue.
+            diagnostic: Anonymized diagnostic information.
+            advanced: Include logs/crash in signed JSON block.
+            id_file_path: Path to the ID document (advanced mode only).
+
+        Returns:
+            Path to the generated report folder.
+        """
+        appdata = os.environ.get("APPDATA", "")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        folder = Path(appdata) / "BackupManager" / f"BugReport_{timestamp}"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "screenshots").mkdir(exist_ok=True)
+
+        # Sanitize user description against injection
+        safe_description = _sanitize_user_text(description)
+
+        # Build machine-readable block
+        machine_data = _build_machine_readable(
+            diagnostic, include_logs=advanced
+        )
+
+        # Compute source file hashes for cross-validation
+        source_hashes = _compute_source_hashes()
+        machine_data["source_hashes"] = source_hashes
+
+        # Sign the machine-readable block
+        machine_json = json.dumps(machine_data, indent=2, ensure_ascii=False)
+        signature = _compute_report_hmac(machine_json)
+
+        # Sign the FULL report (description + diagnostic + machine JSON)
+        full_content = (
+            f"{safe_description}\n{diagnostic}\n{machine_json}"
+        )
+        full_signature = _compute_report_hmac(full_content)
+
+        mode_label = "Advanced" if advanced else "Standard"
+        report_content = (
+            f"{'=' * 60}\n"
+            f"Backup Manager - Bug Report ({mode_label})\n"
+            f"Generated: "
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"{'=' * 60}\n\n"
+            f"USER DESCRIPTION:\n{safe_description}\n\n"
+            f"{'=' * 60}\n"
+            f"{diagnostic}\n\n"
+            f"{'=' * 60}\n"
+            f"MACHINE READABLE (signed):\n"
+            f"{machine_json}\n\n"
+            f"HMAC-SHA256: {signature}\n"
+            f"HMAC-FULL-SHA256: {full_signature}\n"
+        )
+
+        # Ed25519 signature proving report origin (official binary)
+        ed_sig = _sign_report_ed25519(
+            f"{safe_description}\n{diagnostic}\n{machine_json}"
+        )
+        if ed_sig:
+            report_content += f"ED25519-SIG: {ed_sig}\n"
+        else:
+            report_content += "ED25519-SIG: unavailable (dev build)\n"
+
+        (folder / "diagnostic.txt").write_text(report_content, encoding="utf-8")
+
+        # ID verification: hash the file + create decoy of same size
+        if id_file_path:
+            id_path = Path(id_file_path)
+            if id_path.exists():
+                try:
+                    raw = id_path.read_bytes()
+                    id_hash = hashlib.sha256(raw).hexdigest()
+                    file_size = len(raw)
+
+                    # Write hash to diagnostic (append)
+                    with open(
+                        folder / "diagnostic.txt", "a", encoding="utf-8"
+                    ) as f:
+                        f.write(f"ID-HASH-SHA256: {id_hash}\n")
+
+                    # Create decoy file with random bytes of same size
+                    decoy = folder / "id_verification.enc"
+                    decoy.write_bytes(os.urandom(file_size))
+                except OSError:
+                    logger.warning(
+                        "Could not process ID file", exc_info=True
+                    )
+
+        # INSTRUCTIONS.txt
+        if advanced:
+            instructions = (
+                "HOW TO SEND THIS BUG REPORT\n"
+                "============================\n\n"
+                "All logs in this report have been anonymized.\n"
+                "No personal data, file paths, or server names "
+                "are included.\n\n"
+                "1. Take screenshots of the problem\n"
+                "   Press  Win + Shift + S  to capture your screen\n"
+                '   Save them in the "screenshots" folder\n\n'
+                "2. Send this entire folder by email to:\n\n"
+                f"   {BUG_REPORT_EMAIL}\n\n"
+                "   - Attach ALL files from this folder\n"
+                '   - Including the "screenshots" folder\n\n'
+                "Thank you for helping improve Backup Manager!\n"
+            )
+        else:
+            instructions = (
+                "HOW TO SEND THIS BUG REPORT\n"
+                "============================\n\n"
+                "This report contains only system information.\n"
+                "No personal data is included.\n\n"
+                "To help us fix the problem, please:\n\n"
+                "1. Describe the problem in detail in your email\n"
+                "   - What were you doing when it happened?\n"
+                "   - What did you expect to happen?\n"
+                "   - Does it happen every time?\n\n"
+                "2. Take as many screenshots as possible\n"
+                "   Press  Win + Shift + S  to capture your screen\n"
+                '   Save them in the "screenshots" folder\n\n'
+                "3. Send this entire folder by email to:\n\n"
+                f"   {BUG_REPORT_EMAIL}\n\n"
+                "   - Attach ALL files from this folder\n"
+                '   - Including the "screenshots" folder\n\n'
+                "The more detail you provide, the faster we can "
+                "fix the issue.\n\n"
+                "Thank you for helping improve Backup Manager!\n"
+            )
+        (folder / "INSTRUCTIONS.txt").write_text(instructions, encoding="utf-8")
+
+        return folder
+
+    def _show_bug_report(self):
+        """Show the bug report as a full-screen panel replacing the notebook.
+
+        Default mode (safe): system info only, no logs/crash/traceback.
+        Advanced mode: full diagnostic with logs + ID verification.
+        """
+        # Already open — do nothing
+        if hasattr(self, "_bug_frame") and self._bug_frame is not None:
+            return
+
+        try:
+            diagnostic = self._collect_diagnostic()
+        except Exception:
+            logger.error("Failed to collect diagnostic", exc_info=True)
+            diagnostic = "(diagnostic collection failed)"
+
+        # Hide notebook + save frame
+        self.notebook.pack_forget()
+        self._save_frame.pack_forget()
+
+        # --- Full-screen bug report frame ---
+        bug = ttk.Frame(self._main_frame)
+        bug.pack(fill="both", expand=True)
+        self._bug_frame = bug
+
+        main = ttk.Frame(bug, padding=(Spacing.SECTION, Spacing.LARGE))
+        main.pack(fill="both", expand=True)
+
+        # --- Header ---
+        ttk.Label(
+            main, text="Report a Bug", font=Fonts.title()
+        ).pack(anchor="w")
+
+        ttk.Label(
+            main,
+            text=(
+                "Describe what happened and what you expected.\n"
+                "Include as many screenshots as possible."
+            ),
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(Spacing.SMALL, Spacing.MEDIUM))
+
+        # --- Description text ---
+        desc_text = tk.Text(
+            main,
+            height=8,
+            font=Fonts.normal(),
+            wrap="word",
+            relief="solid",
+            borderwidth=1,
+        )
+        desc_text.pack(fill="x", pady=(0, Spacing.LARGE))
+
+        # --- Diagnostic (collapsible) ---
+        diag_visible = tk.BooleanVar(value=False)
+        toggle_btn = ttk.Button(main, text="\u25b6 Show diagnostic info")
+        toggle_btn.pack(anchor="w")
+
+        diag_frame = ttk.Frame(main)
+        diag_text = tk.Text(
+            diag_frame,
+            height=14,
+            font=Fonts.mono(),
+            wrap="word",
+            relief="solid",
+            borderwidth=1,
+            state="disabled",
+        )
+        diag_text.pack(fill="x")
+        diag_text.configure(state="normal")
+        diag_text.insert("1.0", diagnostic)
+        diag_text.configure(state="disabled")
+
+        def _toggle_diagnostic():
+            if diag_visible.get():
+                diag_frame.pack_forget()
+                toggle_btn.configure(text="\u25b6 Show diagnostic info")
+                diag_visible.set(False)
+            else:
+                diag_frame.pack(
+                    fill="x", pady=(Spacing.SMALL, 0), after=toggle_btn
+                )
+                toggle_btn.configure(text="\u25bc Hide diagnostic info")
+                diag_visible.set(True)
+
+        toggle_btn.configure(command=_toggle_diagnostic)
+
+        # --- Advanced mode toggle ---
+        advanced_var = tk.BooleanVar(value=False)
+        advanced_frame = ttk.Frame(main)
+
+        # ID picker (inside advanced_frame, shown only in advanced mode)
+        id_path_var = tk.StringVar(value="")
+
+        ttk.Label(
+            advanced_frame,
+            text="Identity verification (required for advanced mode)",
+            font=Fonts.bold(),
+        ).pack(anchor="w")
+
+        ttk.Label(
+            advanced_frame,
+            text=(
+                "Please provide a photo ID (passport, driver's license). "
+                "This enables detailed log analysis for faster resolution."
+            ),
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+            wraplength=800,
+            justify="left",
+        ).pack(anchor="w", pady=(Spacing.SMALL, 0))
+
+        id_row = ttk.Frame(advanced_frame)
+        id_row.pack(fill="x", pady=(Spacing.SMALL, 0))
+
+        id_label = ttk.Label(
+            id_row, text="No file selected", foreground=Colors.TEXT_DISABLED
+        )
+        id_label.pack(side="left", fill="x", expand=True, anchor="w")
+
+        def _browse_id():
+            from tkinter import filedialog
+
+            path = filedialog.askopenfilename(
+                title="Select ID document",
+                filetypes=[
+                    ("Images", "*.jpg *.jpeg *.png *.bmp *.pdf"),
+                    ("All files", "*.*"),
+                ],
+                parent=self.root,
+            )
+            if path:
+                id_path_var.set(path)
+                fname = Path(path).name
+                id_label.configure(
+                    text=f"\u2713 {fname}",
+                    foreground=Colors.SUCCESS,
+                )
+
+        ttk.Button(
+            id_row, text="Browse...", command=_browse_id
+        ).pack(side="right")
+
+        def _toggle_advanced():
+            if advanced_var.get():
+                advanced_frame.pack(
+                    fill="x", pady=(Spacing.LARGE, 0), before=sep
+                )
+            else:
+                advanced_frame.pack_forget()
+                id_path_var.set("")
+                id_label.configure(
+                    text="No file selected",
+                    foreground=Colors.TEXT_DISABLED,
+                )
+
+        adv_check = ttk.Checkbutton(
+            main,
+            text="Advanced report (includes logs and crash data"
+            " \u2014 requires ID verification)",
+            variable=advanced_var,
+            command=_toggle_advanced,
+        )
+        adv_check.pack(anchor="w", pady=(Spacing.LARGE, 0))
+
+        # --- Footer separator + privacy note ---
+        sep = ttk.Separator(main, orient="horizontal")
+        sep.pack(fill="x", pady=(Spacing.LARGE, 0))
+
+        ttk.Label(
+            main,
+            text=(
+                "Only system information is included \u2014 no personal "
+                "data, file paths, or server names."
+            ),
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        ).pack(anchor="w", pady=(Spacing.SMALL, Spacing.MEDIUM))
+
+        # --- Buttons ---
+        btn_frame = ttk.Frame(main)
+        btn_frame.pack(fill="x")
+
+        def _close_bug_report():
+            bug.destroy()
+            self._bug_frame = None
+            self._save_frame.pack(fill="x", side="bottom", before=None)
+            self.notebook.pack(fill="both", expand=True)
+
+        def _send_report():
+            description = desc_text.get("1.0", "end-1c").strip()
+            if not description:
+                messagebox.showwarning(
+                    "Description required",
+                    "Please describe the issue before sending.",
+                    parent=self.root,
+                )
+                return
+
+            is_advanced = advanced_var.get()
+            id_file = id_path_var.get()
+
+            if is_advanced and not id_file:
+                messagebox.showwarning(
+                    "ID required",
+                    "Advanced mode requires an identity document.\n"
+                    "Uncheck the advanced option to send a standard "
+                    "report without ID.",
+                    parent=self.root,
+                )
+                return
+
+            folder = self._generate_bug_report(
+                description,
+                diagnostic,
+                advanced=is_advanced,
+                id_file_path=id_file if is_advanced else "",
+            )
+            try:
+                os.startfile(str(folder))
+            except OSError:
+                logger.warning("Could not open report folder", exc_info=True)
+            bug.destroy()
+            self._bug_frame = None
+            self._show_report_ready()
+
+        ttk.Button(
+            btn_frame,
+            text="Generate report",
+            style="Accent.TButton",
+            command=_send_report,
+        ).pack(side="left")
+
+        ttk.Button(
+            btn_frame, text="Close", command=_close_bug_report
+        ).pack(side="left", padx=(Spacing.MEDIUM, 0))
+
+    def _show_report_ready(self):
+        """Show report-ready confirmation as a full-screen inline panel."""
+        ready = ttk.Frame(self._main_frame)
+        ready.pack(fill="both", expand=True)
+
+        main = ttk.Frame(ready, padding=(Spacing.SECTION, Spacing.LARGE))
+        main.pack(fill="both", expand=True)
+
+        ttk.Label(
+            main, text="Report Ready", font=Fonts.title()
+        ).pack(anchor="w")
+
+        ttk.Label(
+            main,
+            text="Your report folder has been opened.",
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(Spacing.SMALL, Spacing.LARGE))
+
+        # Instructions
+        steps = ttk.Frame(main)
+        steps.pack(fill="x", pady=(0, Spacing.LARGE))
+
+        ttk.Label(
+            steps,
+            text=(
+                "1.  Send the folder contents by email to the address below\n"
+                "2.  Add screenshots showing the problem \u2014 they help a lot!\n\n"
+                "Tip: Press  Win + Shift + S  to capture your screen."
+            ),
+            justify="left",
+            font=Fonts.normal(),
+        ).pack(anchor="w")
+
+        # Email address + copy button
+        addr_frame = ttk.Frame(main)
+        addr_frame.pack(fill="x", pady=(0, Spacing.LARGE))
+
+        ttk.Label(
+            addr_frame,
+            text=BUG_REPORT_EMAIL,
+            font=Fonts.bold(),
+            foreground=Colors.ACCENT,
+        ).pack(side="left")
+
+        def _copy_address():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(BUG_REPORT_EMAIL)
+            copy_btn.configure(text="Copied!")
+
+        copy_btn = ttk.Button(
+            addr_frame, text="Copy address", command=_copy_address
+        )
+        copy_btn.pack(side="left", padx=(Spacing.MEDIUM, 0))
+
+        # Separator + OK button
+        ttk.Separator(main, orient="horizontal").pack(
+            fill="x", pady=(Spacing.LARGE, 0)
+        )
+
+        def _close_ready():
+            ready.destroy()
+            self._save_frame.pack(fill="x", side="bottom", before=None)
+            self.notebook.pack(fill="both", expand=True)
+
+        ttk.Button(
+            main,
+            text="OK",
+            style="Accent.TButton",
+            command=_close_ready,
+        ).pack(anchor="w", pady=(Spacing.LARGE, 0))

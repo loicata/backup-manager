@@ -348,6 +348,35 @@ class ConfigManager:
         for d in (self.config_dir, self.profiles_dir, self.log_dir, self.manifest_dir):
             d.mkdir(parents=True, exist_ok=True)
 
+        # Anonymous installation ID (generated once, never changes)
+        self._install_id_path = self.config_dir / "install_id"
+
+    def get_install_id(self) -> str:
+        """Return the anonymous installation UUID.
+
+        Generated at first call, persisted to disk. Does not contain
+        any personally identifiable information — just a random UUID4.
+
+        Returns:
+            32-char hex UUID string (no dashes).
+        """
+        if self._install_id_path.exists():
+            try:
+                stored = self._install_id_path.read_text(encoding="utf-8").strip()
+                if len(stored) == 32 and all(c in "0123456789abcdef" for c in stored):
+                    return stored
+            except OSError:
+                pass
+
+        import uuid
+
+        new_id = uuid.uuid4().hex
+        try:
+            self._install_id_path.write_text(new_id, encoding="utf-8")
+        except OSError:
+            pass
+        return new_id
+
     def get_all_profiles(self) -> list[BackupProfile]:
         """Load all profiles from disk.
 

@@ -31,3 +31,7 @@ Thumbs.db
 # Environment
 .env
 *.log
+
+# Bug report signing key (NEVER commit — private key for Ed25519 signatures)
+assets/report_signing_key.pem
+

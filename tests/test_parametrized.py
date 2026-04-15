@@ -7,17 +7,14 @@ tests miss.
 
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 from src.core.config import (
-    BackupProfile,
     BackupType,
     StorageConfig,
     StorageType,
 )
-from src.core.events import EventBus
 from src.core.hashing import compute_sha256
 from src.core.phases.collector import collect_files
 from src.core.phases.local_writer import generate_backup_name, sanitize_profile_name

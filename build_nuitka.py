@@ -80,9 +80,9 @@ def build():
 
     # Company/product info for the .exe properties
     cmd += [
-        f"--windows-product-name=Backup Manager",
+        "--windows-product-name=Backup Manager",
         f"--windows-product-version={version}",
-        f"--windows-company-name=loicata.com",
+        "--windows-company-name=loicata.com",
         f"--windows-file-description=Backup Manager v{version}",
     ]
 
@@ -121,7 +121,7 @@ def build():
         print("WARNING: report_signing_key.pem not found " "— reports won't be signed")
 
     # Python path for imports
-    cmd.append(f"--include-package-data=sv_ttk")
+    cmd.append("--include-package-data=sv_ttk")
 
     # Enable anti-bloat to reduce size
     cmd.append("--nofollow-import-to=pytest")
@@ -135,7 +135,7 @@ def build():
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
 
-    print(f"Running Nuitka (this may take several minutes)...")
+    print("Running Nuitka (this may take several minutes)...")
     print(f"Command: {' '.join(cmd[:6])}...")
     result = subprocess.run(cmd, cwd=str(ROOT), env=env)
 
@@ -176,11 +176,11 @@ def build():
     exe = BUILD_DIR / "BackupManager.exe"
     if exe.exists():
         size_mb = exe.stat().st_size / (1024 * 1024)
-        print(f"\nBuild successful!")
+        print("\nBuild successful!")
         print(f"  Executable: {exe}")
         print(f"  Size: {size_mb:.1f} MB")
         print(f"  Version: {version}")
-        print(f"  Compiler: Nuitka (native C binary)")
+        print("  Compiler: Nuitka (native C binary)")
     else:
         print("Build completed but exe not found")
         sys.exit(1)

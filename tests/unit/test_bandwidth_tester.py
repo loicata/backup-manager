@@ -1,6 +1,5 @@
 """Tests for src.core.bandwidth_tester — bandwidth measurement and throttle."""
 
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest

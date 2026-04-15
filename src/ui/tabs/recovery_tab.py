@@ -972,7 +972,10 @@ class RecoveryTab(ScrollableTab):
         if grouped:
             bucket_count = len({b.get("_bucket", "") for b in backups})
             self._scan_label.config(
-                text=f"\u2713 Scan complete \u2014 {len(backups)} backups in {bucket_count} bucket(s)",
+                text=(
+                    f"\u2713 Scan complete \u2014 "
+                    f"{len(backups)} backups in {bucket_count} bucket(s)"
+                ),
                 foreground=Colors.SUCCESS,
             )
         else:

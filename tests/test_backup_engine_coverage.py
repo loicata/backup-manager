@@ -6,9 +6,6 @@ object lock retention, bandwidth throttle skip, _check_path_space OSError,
 manifest upload failure, and verify error formatting.
 """
 
-import tempfile
-from datetime import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -256,7 +253,7 @@ class TestVerifyEncryptedBackup:
         profile.encrypt_primary = True
         profile.encryption = EncryptionConfig(enabled=True, stored_password="test_password_1234")
         engine = _engine(env)
-        result = engine.run_backup(profile)
+        engine.run_backup(profile)
 
         # Hash should be stored for verification
         hashes = env["config_manager"].load_verify_hashes()
@@ -368,7 +365,7 @@ class TestEmitPhaseCount:
         engine = _engine(env)
         events_received = []
         engine._events.subscribe("phase_count", lambda **kw: events_received.append(kw))
-        result = engine.run_backup(profile)
+        engine.run_backup(profile)
         assert len(events_received) >= 1
         weights = events_received[0]["weights"]
         assert "encryption" in weights
@@ -447,7 +444,7 @@ class TestPhaseCleanup:
     def test_cleanup_removes_temp_dirs(self, env, profile):
         """Phase cleanup removes .tmp.drivedownload directories."""
         engine = _engine(env)
-        result = engine.run_backup(profile)
+        engine.run_backup(profile)
 
         # Find the created backup directory
         backup_dirs = [d for d in env["dest"].iterdir() if d.is_dir()]

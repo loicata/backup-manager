@@ -6,8 +6,6 @@ connection errors, _verify_remote flat backup, and _build_backend.
 """
 
 import hashlib
-import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,14 +13,11 @@ import pytest
 from src.core.config import (
     BackupProfile,
     ConfigManager,
-    EncryptionConfig,
     StorageConfig,
     StorageType,
 )
 from src.core.integrity_verifier import (
-    BackupVerifyResult,
     IntegrityVerifier,
-    VerifyAllResult,
     _build_backend,
 )
 

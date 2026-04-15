@@ -1938,7 +1938,7 @@ class BackupManagerApp:
                     backend = _build_backend(profile.storage)
                     free_space = backend.get_free_space()
                 except Exception:
-                    pass
+                    logger.debug("Could not get free space for email report", exc_info=True)
 
             send_backup_report(
                 profile.email,
@@ -2275,7 +2275,7 @@ class BackupManagerApp:
                     signal_file.unlink()
                     self._show_window()
             except Exception:
-                pass
+                logger.debug("Signal file check failed", exc_info=True)
             self.root.after(500, _check_signal)
 
         self.root.after(500, _check_signal)

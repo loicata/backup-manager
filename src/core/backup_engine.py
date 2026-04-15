@@ -532,7 +532,7 @@ class BackupEngine:
                 needed_gb = required / (1024**3)
                 errors.append(f"{label}: {free_gb:.1f} GB free, need {needed_gb:.1f} GB")
         except Exception:
-            pass  # Connection not available yet, skip check
+            logger.debug("Remote space check skipped for %s", label, exc_info=True)
 
     @staticmethod
     def _check_path_space(

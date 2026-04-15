@@ -168,7 +168,8 @@ def _send_email(
     except smtplib.SMTPConnectError:
         return False, f"Could not connect to {config.smtp_host}:{config.smtp_port}"
     except Exception as e:
-        logger.exception("Email send failed")
+        # Log without traceback to avoid leaking credentials from login() frames
+        logger.error("Email send failed: %s: %s", type(e).__name__, e)
         return False, f"Email error: {type(e).__name__}: {e}"
 
 

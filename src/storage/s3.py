@@ -526,7 +526,7 @@ class S3Storage(StorageBackend):
             client.download_file(self._bucket, manifest_key, long_path_str(manifest_local))
             logger.info("Downloaded manifest: %s.wbverify", remote_name)
         except Exception:
-            pass  # Older backups may not have manifests
+            logger.debug("No manifest found for %s (older backup)", remote_name)
 
         return dst
 

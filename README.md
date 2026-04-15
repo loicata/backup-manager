@@ -15,9 +15,11 @@ A production-grade, security-focused Windows backup application with **anti-rans
 
 Backup Manager offers two distinct operating modes to match your security needs:
 
-| Setup Wizard | Anti-Ransomware Backup Complete |
-|:------------:|:-------------------------------:|
-| ![Wizard](assets/screenshots/wizard_mode_choice.png) | ![Anti-Ransomware](assets/screenshots/anti_ransomware_backup.png) |
+| Setup Wizard | Run Backup |
+|:------------:|:----------:|
+| ![Wizard](assets/screenshots/wizard_mode_choice.png) | ![Run](assets/screenshots/run_backup.png) |
+| **General Settings** | **Mirror Configuration** |
+| ![General](assets/screenshots/general_tab.png) | ![Mirror](assets/screenshots/mirror_tab.png) |
 
 ### Classic Mode
 

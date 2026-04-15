@@ -33,20 +33,33 @@ def _set_app_user_model_id():
         )
 
 
-def _get_icon_path() -> "Path | None":
-    """Resolve the path to backup_manager.ico."""
+def _is_nuitka() -> bool:
+    """Detect if running as a Nuitka-compiled standalone binary."""
+    return "__compiled__" in globals() or hasattr(sys.modules.get("__main__"), "__compiled__")
+
+
+def _get_base_dir() -> "Path":
+    """Resolve the application base directory.
+
+    PyInstaller: sys._MEIPASS (temp extraction folder).
+    Nuitka standalone: directory containing the .exe.
+    Development: project root (parent of src/).
+
+    Returns:
+        Path to the base directory containing assets/.
+    """
     from pathlib import Path
 
-    if getattr(sys, "frozen", False):
-        # PyInstaller uses _MEIPASS, Nuitka uses the exe directory
-        if hasattr(sys, "_MEIPASS"):
-            base = Path(sys._MEIPASS)  # noqa: SLF001
-        else:
-            base = Path(sys.executable).resolve().parent
-    else:
-        base = Path(__file__).resolve().parent.parent
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)  # noqa: SLF001
+    if _is_nuitka():
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
 
-    ico_path = base / "assets" / "backup_manager.ico"
+
+def _get_icon_path() -> "Path | None":
+    """Resolve the path to backup_manager.ico."""
+    ico_path = _get_base_dir() / "assets" / "backup_manager.ico"
     return ico_path if ico_path.exists() else None
 
 

@@ -44,9 +44,11 @@ APP_FILES = [
 
 def _get_app_dir() -> Path:
     """Get the application source directory."""
-    if getattr(sys, "frozen", False):
-        if hasattr(sys, "_MEIPASS"):
-            return Path(sys._MEIPASS) / "src"
+    from src.__main__ import _is_nuitka
+
+    if hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "src"
+    if _is_nuitka():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
 

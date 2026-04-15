@@ -543,16 +543,9 @@ def _load_signing_key():
     """
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-    # Frozen build: PyInstaller uses _MEIPASS, Nuitka uses exe directory
-    if getattr(sys, "frozen", False):
-        if hasattr(sys, "_MEIPASS"):
-            base = Path(sys._MEIPASS)  # type: ignore[attr-defined]
-        else:
-            base = Path(sys.executable).resolve().parent
-    else:
-        base = Path(__file__).resolve().parent.parent.parent
+    from src.__main__ import _get_base_dir
 
-    key_path = base / "assets" / "report_signing_key.pem"
+    key_path = _get_base_dir() / "assets" / "report_signing_key.pem"
     if not key_path.exists():
         return None
     try:

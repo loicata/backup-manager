@@ -10,12 +10,10 @@ Two paths:
 """
 
 import logging
-import sys
 import threading
 import tkinter as tk
 import uuid
 import webbrowser
-from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from src.core.config import (
@@ -117,15 +115,10 @@ class SetupWizard:
         self._win.resizable(False, False)
 
         # Set window icon
-        if getattr(sys, "frozen", False):
-            if hasattr(sys, "_MEIPASS"):
-                base = Path(sys._MEIPASS)  # noqa: SLF001
-            else:
-                base = Path(sys.executable).resolve().parent
-        else:
-            base = Path(__file__).resolve().parent.parent.parent
-        ico_path = base / "assets" / "backup_manager.ico"
-        if ico_path.exists():
+        from src.__main__ import _get_icon_path
+
+        ico_path = _get_icon_path()
+        if ico_path is not None:
             try:
                 self._win.iconbitmap(default=str(ico_path))
                 self._win.iconbitmap(str(ico_path))

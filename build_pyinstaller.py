@@ -40,9 +40,26 @@ def get_version() -> str:
     return "0.0.0"
 
 
+def _patch_license_version(version: str) -> None:
+    """Update the version number in License.rtf to match __version__."""
+    import re
+
+    license_rtf = ASSETS / "License.rtf"
+    if not license_rtf.exists():
+        return
+
+    content = license_rtf.read_text(encoding="utf-8")
+    updated = re.sub(r"Version \d+\.\d+\.\d+", f"Version {version}", content, count=1)
+    if updated != content:
+        license_rtf.write_text(updated, encoding="utf-8")
+        print(f"  License.rtf version updated to {version}")
+
+
 def build():
     version = get_version()
     print(f"Building Backup Manager v{version}...")
+
+    _patch_license_version(version)
 
     # Hidden imports for optional dependencies
     hidden_imports = [

@@ -45,6 +45,25 @@ def get_version() -> str:
     return "0.0.0"
 
 
+def _patch_license_version(version: str) -> None:
+    """Update the version number in License.rtf to match __version__.
+
+    Single source of truth: src/__init__.py defines the version,
+    this function patches License.rtf so they never diverge.
+    """
+    import re
+
+    license_rtf = ASSETS / "License.rtf"
+    if not license_rtf.exists():
+        return
+
+    content = license_rtf.read_text(encoding="utf-8")
+    updated = re.sub(r"Version \d+\.\d+\.\d+", f"Version {version}", content, count=1)
+    if updated != content:
+        license_rtf.write_text(updated, encoding="utf-8")
+        print(f"  License.rtf version updated to {version}")
+
+
 def run(cmd: list[str], label: str):
     """Run a command and exit on failure."""
     print(f"  {label}...")
@@ -173,6 +192,8 @@ def build():
     """Build the MSI installer."""
     version = get_version()
     print(f"Building MSI for Backup Manager v{version}...")
+
+    _patch_license_version(version)
 
     if not BUILD_DIR.exists():
         print(f"Error: {BUILD_DIR} not found. Run build_pyinstaller.py first.")

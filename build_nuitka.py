@@ -116,14 +116,9 @@ def build():
     # Bug report signing key (Ed25519 private key, gitignored)
     signing_key = ASSETS / "report_signing_key.pem"
     if signing_key.exists():
-        cmd.append(
-            f"--include-data-files={signing_key}=assets/report_signing_key.pem"
-        )
+        cmd.append(f"--include-data-files={signing_key}=assets/report_signing_key.pem")
     else:
-        print(
-            "WARNING: report_signing_key.pem not found "
-            "— reports won't be signed"
-        )
+        print("WARNING: report_signing_key.pem not found " "— reports won't be signed")
 
     # Python path for imports
     cmd.append(f"--include-package-data=sv_ttk")

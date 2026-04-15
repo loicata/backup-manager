@@ -202,7 +202,9 @@ class TestVerifyRemote:
     def test_remote_encrypted_missing(self, tmp_path):
         """Missing remote encrypted archive reports 'missing'."""
         profile = BackupProfile(
-            storage=StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+            storage=StorageConfig(
+                storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
 
@@ -223,7 +225,9 @@ class TestVerifyRemote:
     def test_remote_encrypted_sha256_ok(self, tmp_path):
         """Remote SFTP archive with matching SHA-256 passes."""
         profile = BackupProfile(
-            storage=StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+            storage=StorageConfig(
+                storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
 
@@ -249,7 +253,9 @@ class TestVerifyRemote:
     def test_remote_encrypted_sha256_mismatch(self, tmp_path):
         """Remote SFTP archive with mismatched SHA-256 reports corrupted."""
         profile = BackupProfile(
-            storage=StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+            storage=StorageConfig(
+                storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
 
@@ -319,7 +325,9 @@ class TestVerifyRemote:
     def test_remote_flat_with_verify_files(self, tmp_path):
         """Remote flat backup uses verify_backup_files when available."""
         profile = BackupProfile(
-            storage=StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+            storage=StorageConfig(
+                storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
 
@@ -533,7 +541,9 @@ class TestRemoteSha256Fallthrough:
     def test_sha256_fails_fallthrough_to_size(self, tmp_path):
         """When compute_remote_sha256 returns None, falls through to size."""
         profile = BackupProfile(
-            storage=StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+            storage=StorageConfig(
+                storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
 

@@ -1,6 +1,7 @@
 """Tests for src.core.bandwidth_tester — bandwidth measurement and throttle."""
 
-from unittest.mock import MagicMock
+import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -49,13 +50,30 @@ class TestComputeThrottleKbps:
         assert result >= 1
 
 
+def _fake_monotonic_factory(step: float = 0.01):
+    """Return a fake monotonic clock that advances by *step* each call.
+
+    Guarantees elapsed > 0 even when the mock runs instantly.
+    """
+    t = [0.0]
+
+    def _fake():
+        t[0] += step
+        return t[0]
+
+    return _fake
+
+
 class TestWriteSample:
     def test_returns_positive_speed(self):
         backend = MagicMock()
         backend.upload_file = MagicMock()
         backend.delete_backup = MagicMock()
 
-        speed = _write_sample(backend, 1024)
+        with patch(
+            "src.core.bandwidth_tester.time.monotonic", side_effect=_fake_monotonic_factory()
+        ):
+            speed = _write_sample(backend, 1024)
         assert speed > 0
         backend.upload_file.assert_called_once()
         backend.delete_backup.assert_called_once()
@@ -106,7 +124,10 @@ class TestMeasureBandwidth:
         backend.upload_file = MagicMock()
         backend.delete_backup = MagicMock()
 
-        result = measure_bandwidth(backend)
+        with patch(
+            "src.core.bandwidth_tester.time.monotonic", side_effect=_fake_monotonic_factory()
+        ):
+            result = measure_bandwidth(backend)
         assert result > 0
         # 3 calls: 1 warmup (1 MB) + 1 probe (128 MB) + 1 full (512 MB)
         assert backend.upload_file.call_count == 3
@@ -133,7 +154,10 @@ class TestMeasureBandwidth:
         backend.upload_file = MagicMock(side_effect=side_effect)
         backend.delete_backup = MagicMock()
 
-        result = measure_bandwidth(backend)
+        with patch(
+            "src.core.bandwidth_tester.time.monotonic", side_effect=_fake_monotonic_factory()
+        ):
+            result = measure_bandwidth(backend)
         assert result > 0
 
     def test_sample_sizes_are_correct(self):

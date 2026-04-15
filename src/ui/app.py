@@ -204,9 +204,7 @@ def _extract_recent_errors(log_file: Path, count: int = 3) -> str | None:
 
     # Find all ERROR/CRITICAL line indices
     error_indices = [
-        i
-        for i, line in enumerate(raw_lines)
-        if "[ERROR]" in line or "[CRITICAL]" in line
+        i for i, line in enumerate(raw_lines) if "[ERROR]" in line or "[CRITICAL]" in line
     ]
     if not error_indices:
         return None
@@ -281,9 +279,7 @@ def _parse_traceback_structured(crash_file: Path) -> list[dict]:
         return []
 
     entries: list[dict] = []
-    frame_pattern = re.compile(
-        r'File "([^"]+)", line (\d+)(?:, in (.+))?'
-    )
+    frame_pattern = re.compile(r'File "([^"]+)", line (\d+)(?:, in (.+))?')
     for match in frame_pattern.finditer(raw):
         filepath = match.group(1)
         # Keep only src/ relative paths, anonymize the rest
@@ -292,11 +288,13 @@ def _parse_traceback_structured(crash_file: Path) -> list[dict]:
             filepath = filepath[idx:]
         else:
             filepath = "***"
-        entries.append({
-            "file": filepath,
-            "line": int(match.group(2)),
-            "function": match.group(3) or "unknown",
-        })
+        entries.append(
+            {
+                "file": filepath,
+                "line": int(match.group(2)),
+                "function": match.group(3) or "unknown",
+            }
+        )
 
     # Extract the final exception line (anonymize the message)
     lines = raw.strip().splitlines()
@@ -307,17 +305,17 @@ def _parse_traceback_structured(crash_file: Path) -> list[dict]:
             # Anonymize exception message — it may contain
             # user paths, IPs, or injected content
             anon_msg = anonymize_log_lines([exc_msg.strip()])
-            entries.append({
-                "exception_type": exc_type.strip(),
-                "exception_message": anon_msg[0],
-            })
+            entries.append(
+                {
+                    "exception_type": exc_type.strip(),
+                    "exception_message": anon_msg[0],
+                }
+            )
 
     return entries
 
 
-def _build_machine_readable(
-    diagnostic: str, include_logs: bool = False
-) -> dict:
+def _build_machine_readable(diagnostic: str, include_logs: bool = False) -> dict:
     """Build a structured machine-readable dictionary from diagnostic text.
 
     Args:
@@ -396,9 +394,7 @@ def _build_machine_readable(
         data["crash_traceback"] = safe_crash
 
     # Recent errors from log file (anonymized, last 3)
-    log_file = (
-        Path(appdata) / "BackupManager" / "logs" / "backup_manager.log"
-    )
+    log_file = Path(appdata) / "BackupManager" / "logs" / "backup_manager.log"
     recent_errors = _extract_recent_errors(log_file, count=3)
     if recent_errors:
         error_lines = recent_errors.splitlines()
@@ -415,9 +411,7 @@ def _build_machine_readable(
             anon = anonymize_log_lines(tail)
             safe_log = []
             for line in anon:
-                safe_log.append(
-                    _INJECTION_KEYWORDS.sub("[REMOVED]", line)
-                )
+                safe_log.append(_INJECTION_KEYWORDS.sub("[REMOVED]", line))
             data["recent_log"] = safe_log
         except OSError:
             data["recent_log"] = ["(could not read log file)"]
@@ -2377,9 +2371,7 @@ class BackupManagerApp:
             foreground=Colors.TEXT_SECONDARY,
         ).pack(anchor="w")
 
-        ttk.Separator(main, orient="horizontal").pack(
-            fill="x", pady=(Spacing.LARGE, 0)
-        )
+        ttk.Separator(main, orient="horizontal").pack(fill="x", pady=(Spacing.LARGE, 0))
 
         # --- Buttons ---
         btn_frame = ttk.Frame(main)
@@ -2402,9 +2394,9 @@ class BackupManagerApp:
             command=_open_bug_report,
         ).pack(side="left")
 
-        ttk.Button(
-            btn_frame, text="Close", command=_close_about
-        ).pack(side="left", padx=(Spacing.MEDIUM, 0))
+        ttk.Button(btn_frame, text="Close", command=_close_about).pack(
+            side="left", padx=(Spacing.MEDIUM, 0)
+        )
 
     # ------------------------------------------------------------------
     # Bug report
@@ -2425,16 +2417,12 @@ class BackupManagerApp:
         lines.append(f"- Version: {__version__}")
         lines.append(f"- Git commit: {_get_git_commit()}")
         lines.append(
-            f"- OS: {platform.system()} {platform.release()} "
-            f"Build {platform.version()}"
+            f"- OS: {platform.system()} {platform.release()} " f"Build {platform.version()}"
         )
         lines.append(f"- Python: {platform.python_version()}")
         lines.append(f"- Frozen: {getattr(sys, 'frozen', False)}")
         lines.append(f"- Install ID: {self.config_manager.get_install_id()}")
-        lines.append(
-            f"- Architecture: {platform.machine()} "
-            f"({platform.architecture()[0]})"
-        )
+        lines.append(f"- Architecture: {platform.machine()} " f"({platform.architecture()[0]})")
 
         # Screen resolution + DPI
         try:
@@ -2516,14 +2504,9 @@ class BackupManagerApp:
             )
             profile_details.append(detail)
 
-        type_str = (
-            " + ".join(sorted(storage_types)) if storage_types else "none"
-        )
+        type_str = " + ".join(sorted(storage_types)) if storage_types else "none"
         mirror_str = f", {mirror_count} mirror(s)" if mirror_count else ""
-        lines.append(
-            f"- Profiles: {len(profiles)} "
-            f"(storage: {type_str}{mirror_str})"
-        )
+        lines.append(f"- Profiles: {len(profiles)} " f"(storage: {type_str}{mirror_str})")
         lines.extend(profile_details)
 
         # Installed dependencies versions
@@ -2609,9 +2592,7 @@ class BackupManagerApp:
         safe_description = _sanitize_user_text(description)
 
         # Build machine-readable block
-        machine_data = _build_machine_readable(
-            diagnostic, include_logs=advanced
-        )
+        machine_data = _build_machine_readable(diagnostic, include_logs=advanced)
 
         # Compute source file hashes for cross-validation
         source_hashes = _compute_source_hashes()
@@ -2622,9 +2603,7 @@ class BackupManagerApp:
         signature = _compute_report_hmac(machine_json)
 
         # Sign the FULL report (description + diagnostic + machine JSON)
-        full_content = (
-            f"{safe_description}\n{diagnostic}\n{machine_json}"
-        )
+        full_content = f"{safe_description}\n{diagnostic}\n{machine_json}"
         full_signature = _compute_report_hmac(full_content)
 
         mode_label = "Advanced" if advanced else "Standard"
@@ -2645,9 +2624,7 @@ class BackupManagerApp:
         )
 
         # Ed25519 signature proving report origin (official binary)
-        ed_sig = _sign_report_ed25519(
-            f"{safe_description}\n{diagnostic}\n{machine_json}"
-        )
+        ed_sig = _sign_report_ed25519(f"{safe_description}\n{diagnostic}\n{machine_json}")
         if ed_sig:
             report_content += f"ED25519-SIG: {ed_sig}\n"
         else:
@@ -2665,18 +2642,14 @@ class BackupManagerApp:
                     file_size = len(raw)
 
                     # Write hash to diagnostic (append)
-                    with open(
-                        folder / "diagnostic.txt", "a", encoding="utf-8"
-                    ) as f:
+                    with open(folder / "diagnostic.txt", "a", encoding="utf-8") as f:
                         f.write(f"ID-HASH-SHA256: {id_hash}\n")
 
                     # Create decoy file with random bytes of same size
                     decoy = folder / "id_verification.enc"
                     decoy.write_bytes(os.urandom(file_size))
                 except OSError:
-                    logger.warning(
-                        "Could not process ID file", exc_info=True
-                    )
+                    logger.warning("Could not process ID file", exc_info=True)
 
         # INSTRUCTIONS.txt
         if advanced:
@@ -2750,9 +2723,7 @@ class BackupManagerApp:
         main.pack(fill="both", expand=True)
 
         # --- Header ---
-        ttk.Label(
-            main, text="Report a Bug", font=Fonts.title()
-        ).pack(anchor="w")
+        ttk.Label(main, text="Report a Bug", font=Fonts.title()).pack(anchor="w")
 
         ttk.Label(
             main,
@@ -2800,9 +2771,7 @@ class BackupManagerApp:
                 toggle_btn.configure(text="\u25b6 Show diagnostic info")
                 diag_visible.set(False)
             else:
-                diag_frame.pack(
-                    fill="x", pady=(Spacing.SMALL, 0), after=toggle_btn
-                )
+                diag_frame.pack(fill="x", pady=(Spacing.SMALL, 0), after=toggle_btn)
                 toggle_btn.configure(text="\u25bc Hide diagnostic info")
                 diag_visible.set(True)
 
@@ -2836,9 +2805,7 @@ class BackupManagerApp:
         id_row = ttk.Frame(advanced_frame)
         id_row.pack(fill="x", pady=(Spacing.SMALL, 0))
 
-        id_label = ttk.Label(
-            id_row, text="No file selected", foreground=Colors.TEXT_DISABLED
-        )
+        id_label = ttk.Label(id_row, text="No file selected", foreground=Colors.TEXT_DISABLED)
         id_label.pack(side="left", fill="x", expand=True, anchor="w")
 
         def _browse_id():
@@ -2860,15 +2827,11 @@ class BackupManagerApp:
                     foreground=Colors.SUCCESS,
                 )
 
-        ttk.Button(
-            id_row, text="Browse...", command=_browse_id
-        ).pack(side="right")
+        ttk.Button(id_row, text="Browse...", command=_browse_id).pack(side="right")
 
         def _toggle_advanced():
             if advanced_var.get():
-                advanced_frame.pack(
-                    fill="x", pady=(Spacing.LARGE, 0), before=sep
-                )
+                advanced_frame.pack(fill="x", pady=(Spacing.LARGE, 0), before=sep)
             else:
                 advanced_frame.pack_forget()
                 id_path_var.set("")
@@ -2954,9 +2917,9 @@ class BackupManagerApp:
             command=_send_report,
         ).pack(side="left")
 
-        ttk.Button(
-            btn_frame, text="Close", command=_close_bug_report
-        ).pack(side="left", padx=(Spacing.MEDIUM, 0))
+        ttk.Button(btn_frame, text="Close", command=_close_bug_report).pack(
+            side="left", padx=(Spacing.MEDIUM, 0)
+        )
 
     def _show_report_ready(self):
         """Show report-ready confirmation as a full-screen inline panel."""
@@ -2966,9 +2929,7 @@ class BackupManagerApp:
         main = ttk.Frame(ready, padding=(Spacing.SECTION, Spacing.LARGE))
         main.pack(fill="both", expand=True)
 
-        ttk.Label(
-            main, text="Report Ready", font=Fonts.title()
-        ).pack(anchor="w")
+        ttk.Label(main, text="Report Ready", font=Fonts.title()).pack(anchor="w")
 
         ttk.Label(
             main,
@@ -3007,15 +2968,11 @@ class BackupManagerApp:
             self.root.clipboard_append(BUG_REPORT_EMAIL)
             copy_btn.configure(text="Copied!")
 
-        copy_btn = ttk.Button(
-            addr_frame, text="Copy address", command=_copy_address
-        )
+        copy_btn = ttk.Button(addr_frame, text="Copy address", command=_copy_address)
         copy_btn.pack(side="left", padx=(Spacing.MEDIUM, 0))
 
         # Separator + OK button
-        ttk.Separator(main, orient="horizontal").pack(
-            fill="x", pady=(Spacing.LARGE, 0)
-        )
+        ttk.Separator(main, orient="horizontal").pack(fill="x", pady=(Spacing.LARGE, 0))
 
         def _close_ready():
             ready.destroy()

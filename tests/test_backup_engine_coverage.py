@@ -27,7 +27,6 @@ from src.core.config import (
 )
 from src.core.events import EventBus
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -133,7 +132,9 @@ class TestDiskSpaceChecks:
             side_effect=ConnectionError("no route"),
         ):
             engine._check_remote_space(
-                StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+                StorageConfig(
+                    storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+                ),
                 1024,
                 "SFTP test",
                 errors,
@@ -149,7 +150,9 @@ class TestDiskSpaceChecks:
         mock_backend.get_free_space.return_value = 10 * 1024**3  # 10 GB
         with patch.object(engine, "_get_backend", return_value=mock_backend):
             engine._check_remote_space(
-                StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+                StorageConfig(
+                    storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+                ),
                 1024,
                 "SFTP test",
                 errors,
@@ -164,7 +167,9 @@ class TestDiskSpaceChecks:
         mock_backend.get_free_space.return_value = 100  # 100 bytes
         with patch.object(engine, "_get_backend", return_value=mock_backend):
             engine._check_remote_space(
-                StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+                StorageConfig(
+                    storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+                ),
                 10 * 1024**3,
                 "SFTP test",
                 errors,
@@ -180,7 +185,9 @@ class TestDiskSpaceChecks:
         mock_backend.get_free_space.return_value = None
         with patch.object(engine, "_get_backend", return_value=mock_backend):
             engine._check_remote_space(
-                StorageConfig(storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"),
+                StorageConfig(
+                    storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
+                ),
                 1024,
                 "SFTP test",
                 errors,
@@ -247,9 +254,7 @@ class TestVerifyEncryptedBackup:
     def test_encrypted_backup_stored_hash(self, env, profile):
         """Encrypted backup stores hash for future periodic verification."""
         profile.encrypt_primary = True
-        profile.encryption = EncryptionConfig(
-            enabled=True, stored_password="test_password_1234"
-        )
+        profile.encryption = EncryptionConfig(enabled=True, stored_password="test_password_1234")
         engine = _engine(env)
         result = engine.run_backup(profile)
 
@@ -359,9 +364,7 @@ class TestEmitPhaseCount:
     def test_phase_count_with_encryption(self, env, profile):
         """Encrypted backup includes encryption weight."""
         profile.encrypt_primary = True
-        profile.encryption = EncryptionConfig(
-            enabled=True, stored_password="test_password_1234"
-        )
+        profile.encryption = EncryptionConfig(enabled=True, stored_password="test_password_1234")
         engine = _engine(env)
         events_received = []
         engine._events.subscribe("phase_count", lambda **kw: events_received.append(kw))

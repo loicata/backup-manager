@@ -22,7 +22,6 @@ from src.core.hashing import compute_sha256
 from src.core.phases.collector import collect_files
 from src.core.phases.local_writer import generate_backup_name, sanitize_profile_name
 
-
 # ---------------------------------------------------------------------------
 # Parametrized: sanitize_profile_name
 # ---------------------------------------------------------------------------
@@ -215,7 +214,11 @@ class TestStorageTypeValues:
         "storage_type, extra_kwargs, expected_remote",
         [
             (StorageType.LOCAL, {"destination_path": "/tmp"}, False),
-            (StorageType.NETWORK, {"destination_path": "\\\\s\\s", "network_username": "u", "network_password": "p"}, False),
+            (
+                StorageType.NETWORK,
+                {"destination_path": "\\\\s\\s", "network_username": "u", "network_password": "p"},
+                False,
+            ),
             (StorageType.SFTP, {"sftp_host": "h", "sftp_username": "u"}, True),
             (StorageType.S3, {"s3_bucket": "b"}, True),
         ],

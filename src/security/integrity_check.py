@@ -47,7 +47,7 @@ def _get_app_dir() -> Path:
     if getattr(sys, "frozen", False):
         if hasattr(sys, "_MEIPASS"):
             return Path(sys._MEIPASS) / "src"
-        return Path(__file__).resolve().parent.parent
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
 
 

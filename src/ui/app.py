@@ -543,12 +543,12 @@ def _load_signing_key():
     """
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-    # Frozen build: PyInstaller uses _MEIPASS, Nuitka uses __file__
+    # Frozen build: PyInstaller uses _MEIPASS, Nuitka uses exe directory
     if getattr(sys, "frozen", False):
         if hasattr(sys, "_MEIPASS"):
             base = Path(sys._MEIPASS)  # type: ignore[attr-defined]
         else:
-            base = Path(__file__).resolve().parent.parent.parent
+            base = Path(sys.executable).resolve().parent
     else:
         base = Path(__file__).resolve().parent.parent.parent
 

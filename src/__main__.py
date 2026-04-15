@@ -38,11 +38,11 @@ def _get_icon_path() -> "Path | None":
     from pathlib import Path
 
     if getattr(sys, "frozen", False):
-        # PyInstaller uses _MEIPASS, Nuitka uses __file__
+        # PyInstaller uses _MEIPASS, Nuitka uses the exe directory
         if hasattr(sys, "_MEIPASS"):
             base = Path(sys._MEIPASS)  # noqa: SLF001
         else:
-            base = Path(__file__).resolve().parent.parent
+            base = Path(sys.executable).resolve().parent
     else:
         base = Path(__file__).resolve().parent.parent
 

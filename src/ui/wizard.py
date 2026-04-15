@@ -121,7 +121,7 @@ class SetupWizard:
             if hasattr(sys, "_MEIPASS"):
                 base = Path(sys._MEIPASS)  # noqa: SLF001
             else:
-                base = Path(__file__).resolve().parent.parent.parent
+                base = Path(sys.executable).resolve().parent
         else:
             base = Path(__file__).resolve().parent.parent.parent
         ico_path = base / "assets" / "backup_manager.ico"

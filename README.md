@@ -17,9 +17,9 @@ Backup Manager offers two distinct operating modes to match your security needs:
 
 | Setup Wizard | Run Backup |
 |:------------:|:----------:|
-| <img src="assets/screenshots/wizard_mode_choice.png" height="330"> | <img src="assets/screenshots/run_backup.png" height="330"> |
+| <img src="assets/screenshots/wizard_mode_choice.png"> | <img src="assets/screenshots/run_backup.png"> |
 | **General Settings** | **Mirror Configuration** |
-| <img src="assets/screenshots/general_tab.png" height="330"> | <img src="assets/screenshots/mirror_tab.png" height="330"> |
+| <img src="assets/screenshots/general_tab.png"> | <img src="assets/screenshots/mirror_tab.png"> |
 
 ### Classic Mode
 

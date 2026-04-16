@@ -1353,6 +1353,10 @@ class BackupManagerApp:
             AutoStart.disable()
 
         self._load_profiles()
+        # Saving a profile invalidates any outstanding target-precheck
+        # alert (e.g. a mirror that the user just deleted).  Drop the
+        # stale alert rather than leaving it visible over the tabs.
+        self._hide_target_alert()
         if not silent:
             messagebox.showinfo("Saved", f"Profile '{profile.name}' saved.")
         return True
@@ -1661,13 +1665,17 @@ class BackupManagerApp:
             else:
                 # Check if primary storage is OK (only mirrors failed)
                 primary_ok = all(r[2] for r in result[0] if r[0] == "Storage")
+                # The lambda wraps the whole ternary so on_continue is
+                # None when primary is down (no safe fallback).  The
+                # previous form wrapped only the true-branch, making
+                # on_continue always truthy and rendering a no-op
+                # "Continue without mirror" button in every case.
+                on_continue = (lambda: self._on_precheck_continue(profile)) if primary_ok else None
                 self._show_target_alert(
                     failures,
                     on_retry=lambda: self._on_precheck_retry(profile),
                     on_cancel=lambda: self._on_precheck_cancel(),
-                    on_continue=(
-                        lambda: self._on_precheck_continue(profile) if primary_ok else None
-                    ),
+                    on_continue=on_continue,
                 )
 
         threading.Thread(target=_do_check, daemon=True, name="Precheck").start()
@@ -2702,6 +2710,11 @@ class BackupManagerApp:
         except Exception:
             logger.error("Failed to collect diagnostic", exc_info=True)
             diagnostic = "(diagnostic collection failed)"
+
+        # Hide any previously-shown target alert so the bug report is
+        # not rendered next to "Destinations unavailable" (both frames
+        # live in _main_frame and would stack otherwise).
+        self._hide_target_alert()
 
         # Hide notebook + save frame
         self.notebook.pack_forget()

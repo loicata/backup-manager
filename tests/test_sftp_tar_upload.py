@@ -242,6 +242,63 @@ class TestTarStreamUpload:
         finally:
             _cleanup_paramiko()
 
+    def test_tar_stream_closes_adhoc_transport(self, tmp_path):
+        """Transport created just for a tar upload must be closed afterwards.
+
+        When no connect() has been issued, ``upload_tar_stream`` obtains
+        a fresh transport through ``_get_transport()``.  The previous
+        implementation never closed it on any code path, leaking an SSH
+        session per tar upload.
+        """
+        _setup_mock_paramiko()
+        try:
+            storage = _make_storage()
+            storage._exec_available = True
+            storage._persistent_transport = None  # Ad-hoc path.
+
+            mock_transport = MagicMock()
+            mock_transport.is_active.return_value = True
+
+            mock_channel = MagicMock()
+            mock_channel.recv_exit_status.return_value = 0
+            mock_transport.open_session.return_value = mock_channel
+
+            src = tmp_path / "f.txt"
+            src.write_text("x", encoding="utf-8")
+            files = [(src, "f.txt", 1)]
+
+            with patch.object(storage, "_create_transport", return_value=mock_transport):
+                storage.upload_tar_stream(files, "backup_adhoc")
+
+            mock_transport.close.assert_called_once()
+        finally:
+            _cleanup_paramiko()
+
+    def test_tar_stream_preserves_persistent_transport(self, tmp_path):
+        """When using a persistent transport, upload_tar_stream must NOT close it."""
+        _setup_mock_paramiko()
+        try:
+            storage = _make_storage()
+            storage._exec_available = True
+
+            mock_transport = MagicMock()
+            mock_transport.is_active.return_value = True
+            storage._persistent_transport = mock_transport
+
+            mock_channel = MagicMock()
+            mock_channel.recv_exit_status.return_value = 0
+            mock_transport.open_session.return_value = mock_channel
+
+            src = tmp_path / "f.txt"
+            src.write_text("x", encoding="utf-8")
+            files = [(src, "f.txt", 1)]
+
+            storage.upload_tar_stream(files, "backup_persistent")
+
+            mock_transport.close.assert_not_called()
+        finally:
+            _cleanup_paramiko()
+
     def test_tar_stream_multiple_files(self, tmp_path):
         """Multiple files should all appear in the tar archive."""
         _setup_mock_paramiko()
@@ -543,6 +600,52 @@ class TestRemoteWriterTarIntegration:
         backend.upload_file.assert_called_once()
         remote_path = backend.upload_file.call_args[0][1]
         assert remote_path == "backup_2026.tar.wbenc"
+
+    def test_write_remote_encrypted_upload_failure_joins_producer(self, tmp_path):
+        """Producer thread must terminate cleanly when upload raises.
+
+        Before the unconditional ``thread.join()`` was adopted, a
+        failing upload returned from ``write_remote`` while leaving
+        the producer alive as a daemon thread still trying to push
+        bytes into a freshly closed pipe.  We now block until the
+        producer has observed ``BrokenPipeError`` and exited, so no
+        orphan threads linger.
+        """
+        import threading
+
+        from src.core.phases.remote_writer import write_remote
+
+        files = _make_file_infos(tmp_path, count=6, size=4096)
+
+        backend = MagicMock(
+            spec=[
+                "connect",
+                "disconnect",
+                "upload_file",
+                "upload_tar_stream",
+                "supports_tar_stream",
+            ]
+        )
+        backend.supports_tar_stream = True
+
+        def _drain_then_fail(fileobj, remote_path, size=0):
+            # Read just enough to unblock the producer once, then fail.
+            fileobj.read(1024)
+            raise OSError("network dropped")
+
+        backend.upload_file.side_effect = _drain_then_fail
+
+        threads_before = {t.ident for t in threading.enumerate()}
+
+        with pytest.raises(WriteError):
+            write_remote(files, backend, "backup_2026", encrypt_password="password12345678")
+
+        # No producer thread should remain alive after write_remote
+        # returns — the finally unconditionally joins it.
+        leaked = [
+            t for t in threading.enumerate() if t.ident not in threads_before and t.is_alive()
+        ]
+        assert leaked == [], f"Producer thread leaked: {leaked!r}"
 
     def test_write_remote_disconnect_on_error(self, tmp_path):
         """Backend is disconnected even if upload fails."""

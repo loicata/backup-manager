@@ -247,12 +247,17 @@ class S3Storage(StorageBackend):
                     }
                 )
 
-            # Objects (files) — skip manifests (.wbverify) as they
-            # are metadata, not backups.
+            # Objects (files) — skip manifests (.wbverify) and
+            # partial uploads (.partial) as they are not usable backups.
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 name = key.rsplit("/", 1)[-1]
-                if name and key != prefix and not name.endswith(".wbverify"):
+                if (
+                    name
+                    and key != prefix
+                    and not name.endswith(".wbverify")
+                    and not name.endswith(".partial")
+                ):
                     last_mod = obj.get("LastModified", 0)
                     if hasattr(last_mod, "timestamp"):
                         last_mod = last_mod.timestamp()
@@ -460,7 +465,18 @@ class S3Storage(StorageBackend):
         if is_directory:
             # Directory backup — download all objects under prefix
             if dst.exists():
-                shutil.rmtree(dst, ignore_errors=True)
+                # Fail loudly instead of silently merging old + new
+                # files (ignore_errors=True used to mask permission
+                # denials and locked files, producing a restore with
+                # stale residue that was almost impossible to debug).
+                try:
+                    shutil.rmtree(dst)
+                except OSError as e:
+                    raise OSError(
+                        f"Cannot clear existing download destination {dst}: "
+                        f"{e}. Close any application using files inside it "
+                        f"and retry."
+                    ) from e
             long_path_mkdir(dst)
 
             # First pass: compute total size for progress

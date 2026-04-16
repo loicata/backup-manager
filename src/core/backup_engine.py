@@ -52,6 +52,7 @@ from src.core.phases.mirror import mirror_backup
 from src.core.phases.rotator import rotate_backups
 from src.core.phases.verifier import verify_backup
 from src.core.phases.writer import write_backup
+from src.core.profile_lock import ProfileLockError, acquire, release
 from src.security.secure_memory import SecurePassword
 from src.storage.base import StorageBackend
 
@@ -238,6 +239,18 @@ class BackupEngine:
         self._current_result = ctx.result
         start_time = time.monotonic()
 
+        # Acquire the per-profile run lock BEFORE any state mutation so
+        # a concurrent run (scheduler + manual) cannot delete the
+        # in-flight backup via the incomplete-cleanup path.
+        lock_path = self._profile_lock_path(profile.id)
+        try:
+            acquire(lock_path)
+        except ProfileLockError as e:
+            self._log(f"Backup rejected: {e}")
+            self._emit_status("error")
+            self._events.emit(ERROR, exception=e, context="backup")
+            raise
+
         try:
             # Validate storage configuration before starting the pipeline
             profile.storage.validate()
@@ -272,6 +285,8 @@ class BackupEngine:
             self._emit_status("error")
             self._events.emit(ERROR, exception=e, context="backup")
             raise
+        finally:
+            release(lock_path)
 
     def _run_pipeline(self, ctx: PipelineContext) -> None:
         """Execute all pipeline phases sequentially."""
@@ -605,8 +620,24 @@ class BackupEngine:
             try:
                 upload_manifest_to_remote(ctx.integrity_manifest, ctx.backend, ctx.backup_name)
             except Exception as e:
-                self._log(f"Warning: manifest upload failed: {e}")
+                # Manifest upload failure means post-restore verification
+                # is no longer possible for this backup: the user believes
+                # they have an integrity guarantee they do not.  Record it
+                # on the result so the report surfaces the warning rather
+                # than silently dropping it into the log.
+                message = (
+                    f"Integrity manifest could not be uploaded to remote "
+                    f"({type(e).__name__}: {e}); post-restore verification "
+                    f"for this backup will not be available."
+                )
+                self._log(f"Warning: {message}")
                 logger.warning("Failed to upload manifest to remote: %s", e)
+                ctx.result.add_warning(
+                    phase="manifest",
+                    file_path=f"{ctx.backup_name}.wbverify",
+                    message=message,
+                    exception=e,
+                )
 
     def _phase_verify(self, ctx: PipelineContext) -> None:
         """Phase 6: Post-backup verification.
@@ -1263,6 +1294,16 @@ class BackupEngine:
                     self._log(f"{mirror_name}: rotated {deleted} old backup(s)")
             except Exception as e:
                 self._log(f"{mirror_name}: rotation failed — {e}")
+
+    def _profile_lock_path(self, profile_id: str) -> Path:
+        """Return the filesystem path for a profile's per-run lock.
+
+        Stored next to the profile's manifest so it follows the config
+        directory on disk and is visible to any other BackupEngine
+        instance working on the same profile.
+        """
+        manifest_path = self._config.get_manifest_path(profile_id)
+        return manifest_path.parent / f"{profile_id}.lock"
 
     def _cleanup_incomplete_backup(self, ctx: PipelineContext) -> None:
         """Delete the incomplete full backup from all destinations.

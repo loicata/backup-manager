@@ -71,6 +71,92 @@ class TestThrottledReader:
         reader = ThrottledReader(io.BytesIO(b""), limit_kbps=100)
         assert reader.read() == b""
 
+    def test_concurrent_reads_do_not_corrupt_stream(self):
+        """Parallel reads on a non-atomic fileobj must stay serialized.
+
+        Simulates boto3's ``upload_fileobj`` multipart behavior, which
+        can dispatch concurrent ``read()`` calls from its worker pool.
+        A fileobj whose ``read`` is not atomic (captures position,
+        yields, advances) would produce duplicated or overlapping data
+        if ``ThrottledReader`` did not serialize access.
+        """
+        import threading
+
+        class _NonAtomicFileobj:
+            """Fileobj whose read is intentionally non-atomic."""
+
+            def __init__(self, data: bytes) -> None:
+                self._data = data
+                self._pos = 0
+
+            def read(self, size: int = -1) -> bytes:
+                if self._pos >= len(self._data):
+                    return b""
+                if size < 0:
+                    size = len(self._data) - self._pos
+                pos = self._pos
+                # Forced context switch: any caller not holding an
+                # external lock can preempt here and read the same
+                # offset, producing duplicate bytes on the wire.
+                time.sleep(0.001)
+                self._pos = pos + size
+                return self._data[pos : pos + size]
+
+        data = bytes((i % 256) for i in range(8192))
+        reader = ThrottledReader(_NonAtomicFileobj(data), limit_kbps=0)
+
+        chunks: list[bytes] = []
+        chunks_lock = threading.Lock()
+
+        def worker() -> None:
+            while True:
+                chunk = reader.read(256)
+                if not chunk:
+                    return
+                with chunks_lock:
+                    chunks.append(chunk)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        total_read = sum(len(c) for c in chunks)
+        assert total_read == len(data), (
+            "ThrottledReader must not produce duplicated or missing bytes " "under concurrent reads"
+        )
+
+    def test_concurrent_reads_track_counter_consistently(self):
+        """Window-byte counter must match the total bytes returned."""
+        import threading
+
+        data = b"x" * 4096
+        # High limit — throttling logic runs (exercises _window_bytes)
+        # but shouldn't meaningfully slow the test.
+        reader = ThrottledReader(io.BytesIO(data), limit_kbps=100_000)
+
+        total_read = [0]
+        counter_lock = threading.Lock()
+
+        def worker() -> None:
+            while True:
+                chunk = reader.read(64)
+                if not chunk:
+                    return
+                with counter_lock:
+                    total_read[0] += len(chunk)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert total_read[0] == len(data)
+        # Internal counter must not exceed the bytes we actually read.
+        assert reader._window_bytes <= len(data)
+
 
 class TestWithRetry:
     """Test retry decorator."""

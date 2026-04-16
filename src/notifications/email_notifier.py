@@ -492,25 +492,47 @@ def _build_backup_html(
         ret_rows += _ROW.format(label="Old backups deleted", value=str(result.rotated_count))
         sections += _SECTION.format(title="Retention", rows=ret_rows)
 
-    # --- Errors section ---
+    # --- Errors / warnings sections — kept visually distinct so a
+    # successful backup with only warnings does not look like a failure.
     if result and result.phase_errors:
-        error_lines = []
-        for err in result.phase_errors[:20]:
-            if err.file_path:
-                error_lines.append(f"[{err.phase}] {err.file_path}: {err.message}")
-            else:
-                error_lines.append(f"[{err.phase}] {err.message}")
-        remaining = len(result.phase_errors) - 20
-        if remaining > 0:
-            error_lines.append(f"... and {remaining} more error(s)")
-        error_text = "\n".join(error_lines)
-        error_count = len(result.phase_errors)
-        sections += f"""<tr>
+        from src.core.backup_result import ErrorSeverity
+
+        errors = [
+            e
+            for e in result.phase_errors
+            if e.severity in (ErrorSeverity.ERROR, ErrorSeverity.FATAL)
+        ]
+        warnings = [e for e in result.phase_errors if e.severity == ErrorSeverity.WARNING]
+
+        def _render_lines(items):
+            lines = []
+            for err in items[:20]:
+                if err.file_path:
+                    lines.append(f"[{err.phase}] {err.file_path}: {err.message}")
+                else:
+                    lines.append(f"[{err.phase}] {err.message}")
+            remaining = len(items) - 20
+            if remaining > 0:
+                lines.append(f"... and {remaining} more")
+            return "\n".join(lines)
+
+        if errors:
+            sections += f"""<tr>
     <td style="padding: 12px 20px; border-top: 1px solid #eee;">
-        <strong style="color: #e74c3c; font-size: 13px;">Errors ({error_count})</strong>
+        <strong style="color: #e74c3c; font-size: 13px;">Errors ({len(errors)})</strong>
         <pre style="background: #fdf2f2; padding: 10px; border-radius: 4px;
                     font-size: 12px; overflow-x: auto; color: #c0392b;
-                    margin-top: 6px;">{error_text}</pre>
+                    margin-top: 6px;">{_render_lines(errors)}</pre>
+    </td>
+</tr>"""
+
+        if warnings:
+            sections += f"""<tr>
+    <td style="padding: 12px 20px; border-top: 1px solid #eee;">
+        <strong style="color: #d68910; font-size: 13px;">Warnings ({len(warnings)})</strong>
+        <pre style="background: #fdf6e3; padding: 10px; border-radius: 4px;
+                    font-size: 12px; overflow-x: auto; color: #9a7d0a;
+                    margin-top: 6px;">{_render_lines(warnings)}</pre>
     </td>
 </tr>"""
 

@@ -9,6 +9,7 @@ import functools
 import logging
 import os
 import random
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -93,6 +94,17 @@ class ThrottledReader:
 
     Also checks for cancellation on every read, enabling responsive
     cancel even during long uploads (S3, slow SFTP).
+
+    Thread-safety
+    -------------
+    boto3's ``upload_fileobj`` may dispatch concurrent reads from the
+    s3transfer worker pool when a multipart upload is triggered.
+    Without a lock, two workers could interleave reads of the wrapped
+    fileobj (producing a corrupted part) and race on the window
+    counters (producing mis-applied throttling).  All read-side state
+    — including the delegated ``_fileobj.read`` call — is therefore
+    serialized through a single lock so concurrent callers see a
+    consistent byte stream and accurate accounting.
     """
 
     def __init__(self, fileobj: BinaryIO, limit_kbps: int = 0, cancel_check=None):
@@ -101,31 +113,33 @@ class ThrottledReader:
         self._cancel_check = cancel_check
         self._window_bytes = 0
         self._window_start = time.monotonic()
+        self._lock = threading.Lock()
 
     def read(self, size: int = -1) -> bytes:
-        if self._cancel_check is not None:
-            self._cancel_check()
+        with self._lock:
+            if self._cancel_check is not None:
+                self._cancel_check()
 
-        data = self._fileobj.read(size)
-        if not data or self._limit_bps <= 0:
+            data = self._fileobj.read(size)
+            if not data or self._limit_bps <= 0:
+                return data
+
+            self._window_bytes += len(data)
+            elapsed = time.monotonic() - self._window_start
+            if elapsed > 0:
+                current_rate = self._window_bytes / elapsed
+                if current_rate > self._limit_bps:
+                    sleep_time = (self._window_bytes / self._limit_bps) - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+            # Reset window every second for smoother throughput
+            now = time.monotonic()
+            if (now - self._window_start) >= 1.0:
+                self._window_bytes = 0
+                self._window_start = now
+
             return data
-
-        self._window_bytes += len(data)
-        elapsed = time.monotonic() - self._window_start
-        if elapsed > 0:
-            current_rate = self._window_bytes / elapsed
-            if current_rate > self._limit_bps:
-                sleep_time = (self._window_bytes / self._limit_bps) - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-
-        # Reset window every second for smoother throughput
-        now = time.monotonic()
-        if (now - self._window_start) >= 1.0:
-            self._window_bytes = 0
-            self._window_start = now
-
-        return data
 
     def seek(self, *args, **kwargs):
         return self._fileobj.seek(*args, **kwargs)

@@ -103,6 +103,72 @@ class TestCollectionFailures:
 
 
 # ---------------------------------------------------------------------------
+# 1b. Concurrent-run protection
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentRunProtection:
+    """Only one backup at a time per profile must be permitted.
+
+    Without the per-profile lock, a scheduled run firing while the user
+    has also clicked "Run now" would read ``last_backup_completed=False``
+    and delete the in-flight backup via the incomplete-cleanup path.
+    """
+
+    def test_second_run_rejected_while_lock_held(self, env, profile):
+        """A stale-but-alive lock blocks the run with ProfileLockError."""
+        from src.core.profile_lock import ProfileLockError
+
+        engine = _engine(env)
+        lock_path = engine._profile_lock_path(profile.id)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # Simulate another live run holding the lock.
+        foreign_pid = 424242
+        lock_path.write_text(str(foreign_pid))
+
+        with (
+            patch("src.core.profile_lock._pid_alive", return_value=True),
+            pytest.raises(ProfileLockError, match="Another backup"),
+        ):
+            engine.run_backup(profile)
+
+        # The foreign lock must remain untouched so the legitimate
+        # holder's release keeps working.
+        assert int(lock_path.read_text()) == foreign_pid
+
+    def test_lock_released_after_successful_run(self, env, profile):
+        """A completed backup removes its own lock file."""
+        engine = _engine(env)
+        lock_path = engine._profile_lock_path(profile.id)
+        engine.run_backup(profile)
+        assert not lock_path.exists()
+
+    def test_lock_released_after_failed_run(self, env, profile):
+        """A failed backup still releases its lock (finally block)."""
+        engine = _engine(env)
+        lock_path = engine._profile_lock_path(profile.id)
+        with (
+            patch("shutil.copy2", side_effect=OSError("disk full")),
+            pytest.raises(Exception, match="disk full"),
+        ):
+            engine.run_backup(profile)
+        assert not lock_path.exists()
+
+    def test_stale_lock_from_dead_pid_is_taken_over(self, env, profile):
+        """A crashed prior run leaves a lock; a new run must proceed."""
+        engine = _engine(env)
+        lock_path = engine._profile_lock_path(profile.id)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("99999999")  # Simulated dead PID.
+
+        with patch("src.core.profile_lock._pid_alive", return_value=False):
+            result = engine.run_backup(profile)
+
+        assert result.files_processed > 0
+        assert not lock_path.exists()
+
+
+# ---------------------------------------------------------------------------
 # 2. Write phase failures
 # ---------------------------------------------------------------------------
 

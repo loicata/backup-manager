@@ -238,6 +238,44 @@ class TestPhaseSaveManifestRemote:
 
         mock_upload.assert_called_once()
 
+    @patch("src.core.backup_engine.upload_manifest_to_remote")
+    def test_remote_upload_failure_records_warning_on_result(self, mock_upload):
+        """Manifest upload failure surfaces a warning via ctx.result.
+
+        Before this fix, the failure was only logged, giving the user a
+        silent loss of post-restore integrity guarantee.  The BackupResult
+        must now carry a warning so the report reflects it.
+        """
+        from src.core.backup_engine import BackupEngine
+        from src.core.backup_result import BackupResult, ErrorSeverity
+
+        mock_upload.side_effect = OSError("network unreachable")
+
+        engine = BackupEngine.__new__(BackupEngine)
+        engine._events = MagicMock()
+        engine._cancelled = False
+
+        ctx = MagicMock()
+        ctx.profile.encrypt_primary = False
+        ctx.backup_path = None
+        ctx.backup_remote_name = "bk_01"
+        ctx.backup_name = "bk_01"
+        ctx.backend = MagicMock()
+        ctx.integrity_manifest = {"version": 1, "files": {}, "total_checksum": "abc"}
+        # Use a real BackupResult so we exercise add_warning semantics.
+        ctx.result = BackupResult()
+
+        engine._phase_save_manifest(ctx)
+
+        assert ctx.result.warnings == 1
+        warning = ctx.result.phase_errors[0]
+        assert warning.severity == ErrorSeverity.WARNING
+        assert warning.phase == "manifest"
+        assert warning.file_path == "bk_01.wbverify"
+        assert "post-restore verification" in warning.message
+        # Backup itself is not marked as failed.
+        assert ctx.result.success is True
+
 
 # ---------------------------------------------------------------------------
 # mirror_backup — manifest persistence
@@ -476,6 +514,42 @@ class TestS3DownloadManifest:
             assert (tmp_path / "bk_01" / "file.txt").exists()
             assert not (tmp_path / "bk_01.wbverify").exists()
 
+    def test_download_raises_when_existing_dst_cannot_be_cleared(self, tmp_path):
+        """Unclearable existing destination must fail loudly, not silently.
+
+        Before the fix, ``ignore_errors=True`` hid permission denials /
+        locked files, letting the download merge old and new files into
+        a corrupted restore.  We now raise a clear OSError instead.
+        """
+        from src.storage.s3 import S3Storage
+
+        storage = S3Storage(
+            bucket="test-bucket",
+            access_key="testing",
+            secret_key="testing",
+            region="us-east-1",
+        )
+
+        # Pre-existing destination that the download must clear first.
+        (tmp_path / "bk_01").mkdir()
+        (tmp_path / "bk_01" / "stale.txt").write_bytes(b"old")
+
+        mock_client = MagicMock()
+        # Make is_directory=True so the clear path is exercised.
+        mock_client.list_objects_v2.return_value = {
+            "Contents": [{"Key": "bk_01/file.txt", "Size": 3}]
+        }
+
+        def _fail(*a, **kw):
+            raise PermissionError("file locked")
+
+        with (
+            patch.object(storage, "_get_client", return_value=mock_client),
+            patch("shutil.rmtree", side_effect=_fail),
+            pytest.raises(OSError, match="Cannot clear existing download"),
+        ):
+            storage.download_backup("bk_01", tmp_path)
+
 
 class TestSFTPDownloadManifest:
     """Tests for SFTP download_backup manifest retrieval."""
@@ -534,4 +608,29 @@ class TestSFTPDownloadManifest:
             patch.object(storage, "_get_sftp", return_value=mock_sftp),
         ):
             # Should not raise
+            storage.download_backup("bk_01", tmp_path)
+
+    def test_download_raises_when_existing_dst_cannot_be_cleared(self, tmp_path):
+        """Unclearable existing destination must fail loudly, not silently."""
+        from src.storage.sftp import SFTPStorage
+
+        storage = SFTPStorage(
+            host="test.example.com",
+            port=22,
+            username="user",
+            password="pass",
+            remote_path="/backups",
+        )
+
+        # Pre-existing destination that the download must clear first.
+        (tmp_path / "bk_01").mkdir()
+        (tmp_path / "bk_01" / "stale.txt").write_bytes(b"old")
+
+        def _fail(*a, **kw):
+            raise PermissionError("file locked")
+
+        with (
+            patch("shutil.rmtree", side_effect=_fail),
+            pytest.raises(OSError, match="Cannot clear existing download"),
+        ):
             storage.download_backup("bk_01", tmp_path)

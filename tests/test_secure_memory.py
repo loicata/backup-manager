@@ -20,12 +20,31 @@ class TestSecureClear:
         secure_clear(None)  # Should not raise
 
     def test_string_does_not_raise(self):
-        # Best-effort for str: should not crash
+        # Immutable: accepted for API compatibility but not zeroed.
         secure_clear("password")
 
     def test_bytes_does_not_raise(self):
-        # Best-effort for bytes: should not crash
+        # Immutable: accepted for API compatibility but not zeroed.
         secure_clear(b"password")
+
+    def test_string_is_not_mutated(self):
+        """Immutable str must NOT be overwritten via ctypes tricks.
+
+        The previous implementation tried to memset into the CPython
+        buffer, which could corrupt neighbouring objects or mutate
+        interned literals.  After the fix, str is a silent no-op.
+        """
+        pw = "password_sentinel"
+        secure_clear(pw)
+        assert pw == "password_sentinel"
+        # Interned literal must remain unchanged across the interpreter.
+        assert "password_sentinel" == "password_sentinel"
+
+    def test_bytes_is_not_mutated(self):
+        """Immutable bytes must not be touched either."""
+        data = b"password_sentinel"
+        secure_clear(data)
+        assert data == b"password_sentinel"
 
     def test_large_bytearray(self):
         data = bytearray(b"x" * 10000)

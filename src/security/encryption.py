@@ -320,11 +320,27 @@ class EncryptingWriter(io.RawIOBase):
         return len(data)
 
     def close(self) -> None:
-        """Flush remaining buffer and write EOF sentinel."""
+        """Flush remaining buffer and write EOF sentinel.
+
+        Idempotent: repeated calls after the first are no-ops.  When
+        the destination has already been closed by the enclosing
+        ``with open(...)`` before the garbage collector reaches this
+        writer (typical after an exception mid-archive), the EOF
+        sentinel cannot be written anyway — skip the writes instead
+        of raising ``ValueError: write to closed file`` at interpreter
+        shutdown.  Genuine I/O errors on an *open* destination (disk
+        full, broken pipe, network drop) still propagate so callers
+        can abort the backup and discard the truncated archive.
+        """
         if self._closed:
             return
         self._closed = True
-        # Flush remaining data as final chunk
+        if getattr(self._dest, "closed", False):
+            # Archive is already known-incomplete at this point.
+            # Nothing meaningful to flush; stay consistent instead
+            # of raising from a GC finaliser.
+            self._buf.clear()
+            return
         if self._buf:
             self._dest.write(self._enc.encrypt_chunk(bytes(self._buf)))
             self._buf.clear()

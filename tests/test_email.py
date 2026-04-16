@@ -548,6 +548,55 @@ class TestBuildBackupHtml:
         html = _build_backup_html("Test", False, "Failed", result=result)
         assert "bad.txt" in html
         assert "Permission denied" in html
+        # Header rendered as Errors, not Warnings.
+        assert "Errors (1)" in html
+        assert "Warnings (" not in html
+
+    def test_warnings_rendered_as_warnings_not_errors(self) -> None:
+        """A successful backup with only warnings must show an orange
+        Warnings panel, not a red Errors panel.
+
+        Regression: before the fix, _build_backup_html treated every
+        phase_errors entry as an error regardless of severity, so the
+        manifest-upload warning from a successful remote backup looked
+        like a failure.
+        """
+        from src.core.backup_result import ErrorSeverity
+
+        result = self._make_result()
+        result.phase_errors = [
+            PhaseError(
+                phase="manifest",
+                file_path="bk_01.wbverify",
+                message="manifest upload failed",
+                severity=ErrorSeverity.WARNING,
+            ),
+        ]
+        html = _build_backup_html("Test", True, "OK", result=result)
+        assert "Warnings (1)" in html
+        assert "Errors (" not in html
+        # Orange accent colour, not red.
+        assert "#d68910" in html
+
+    def test_mixed_errors_and_warnings_are_split(self) -> None:
+        """Both panels appear with their respective counts and colours."""
+        from src.core.backup_result import ErrorSeverity
+
+        result = self._make_result()
+        result.phase_errors = [
+            PhaseError(phase="writer", file_path="a.txt", message="boom"),
+            PhaseError(
+                phase="manifest",
+                file_path="m.wbverify",
+                message="upload warning",
+                severity=ErrorSeverity.WARNING,
+            ),
+        ]
+        html = _build_backup_html("Test", False, "Failed", result=result)
+        assert "Errors (1)" in html
+        assert "Warnings (1)" in html
+        assert "boom" in html
+        assert "upload warning" in html
 
     def test_contains_log_lines(self) -> None:
         result = self._make_result()

@@ -53,6 +53,16 @@ class TestLocalStorage:
         assert backups[0]["name"] == "backup1.txt"
         assert backups[0]["size"] == 4
 
+    def test_list_backups_excludes_partial_files(self, storage):
+        """Archives left as .partial by interrupted writes must be hidden."""
+        dest = Path(storage._dest)
+        (dest / "Prof_FULL_2026-04-16_120000.tar.wbenc").write_bytes(b"ok")
+        (dest / "Prof_FULL_2026-04-16_130000.tar.wbenc.partial").write_bytes(b"junk")
+
+        backups = storage.list_backups()
+        names = {b["name"] for b in backups}
+        assert names == {"Prof_FULL_2026-04-16_120000.tar.wbenc"}
+
     def test_list_backups_sorted_newest_first(self, storage, tmp_path):
         import time
 

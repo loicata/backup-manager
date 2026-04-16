@@ -295,6 +295,56 @@ class TestWriteEncryptedTar:
 
         assert ".wbverify" not in names
 
+    def test_cancellation_leaves_no_partial_or_final(self, tmp_path: Path) -> None:
+        """Cancel mid-write removes the .partial file and leaves no archive."""
+        from src.core.exceptions import CancelledError
+
+        src = tmp_path / "source"
+        _make_file(src / "a.txt", "a")
+        _make_file(src / "b.txt", "b")
+        _make_file(src / "c.txt", "c")
+
+        files = [
+            _make_file_info(src / "a.txt", "a.txt"),
+            _make_file_info(src / "b.txt", "b.txt"),
+            _make_file_info(src / "c.txt", "c.txt"),
+        ]
+
+        call_count = {"n": 0}
+
+        def cancel_after_two() -> None:
+            call_count["n"] += 1
+            if call_count["n"] > 2:
+                raise CancelledError("user cancelled")
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        with pytest.raises(CancelledError):
+            write_encrypted_tar(
+                files, dest, "Backup_FULL_2026", "pw", cancel_check=cancel_after_two
+            )
+
+        # No final archive and no .partial residue in destination.
+        assert not (dest / "Backup_FULL_2026.tar.wbenc").exists()
+        assert not (dest / "Backup_FULL_2026.tar.wbenc.partial").exists()
+        assert list(dest.iterdir()) == []
+
+    def test_success_leaves_no_partial_residue(self, tmp_path: Path) -> None:
+        """A completed encrypted write only produces the final archive."""
+        src = tmp_path / "source"
+        _make_file(src / "a.txt", "alpha")
+        files = [_make_file_info(src / "a.txt", "a.txt")]
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        archive = write_encrypted_tar(files, dest, "Backup_FULL_2026", "pw")
+
+        assert archive.exists()
+        assert not archive.with_name(archive.name + ".partial").exists()
+        # Only the final archive sits in the destination.
+        assert {p.name for p in dest.iterdir()} == {archive.name}
+
     def test_emits_progress_events(self, tmp_path: Path) -> None:
         """Progress events are emitted for each file in the archive."""
         src = tmp_path / "source"

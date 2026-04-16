@@ -170,6 +170,64 @@ class TestEncryptingWriterDecryptingReader:
         reader = DecryptingReader(buf, PASSWORD)
         assert reader.read() == b"hello world"
 
+    def test_close_is_idempotent(self):
+        """Calling close() twice must not raise or double-write."""
+        buf = io.BytesIO()
+        writer = EncryptingWriter(buf, PASSWORD)
+        writer.write(b"once")
+        writer.close()
+        size_after_first_close = len(buf.getvalue())
+
+        writer.close()  # Must be a no-op
+        assert len(buf.getvalue()) == size_after_first_close
+
+    def test_close_tolerates_already_closed_dest(self):
+        """GC-finalised writer with closed dest must not raise.
+
+        Reproduces the scenario where an exception mid-archive causes
+        the enclosing ``with open(...)`` to close the file before the
+        garbage collector gets to finalise the EncryptingWriter.  The
+        writer's close() used to raise ``ValueError: write to closed
+        file`` at interpreter shutdown; it now swallows the write.
+        """
+        buf = io.BytesIO()
+        writer = EncryptingWriter(buf, PASSWORD)
+        writer.write(b"partial")
+        buf.close()  # Destination closed before writer.close()
+        # Must not raise — mimics GC order during an interrupted write.
+        writer.close()
+        assert writer._closed is True
+
+    def test_close_propagates_write_error_on_open_dest(self):
+        """A genuine OSError on an open dest must NOT be swallowed.
+
+        If the destination is still open but writing fails (disk full,
+        broken pipe, network drop), close() must surface the error so
+        the caller aborts the backup and discards the partial archive.
+        Swallowing here would promote a truncated .tar.wbenc to its
+        final name and later delete the source material.
+        """
+
+        class _BrokenBuf(io.BytesIO):
+            def write(self, data):  # type: ignore[override]
+                if self._broken:
+                    raise OSError("pipe broken")
+                return super().write(data)
+
+            def flush(self):  # type: ignore[override]
+                if self._broken:
+                    raise OSError("pipe broken")
+                return super().flush()
+
+            _broken = False
+
+        buf = _BrokenBuf()
+        writer = EncryptingWriter(buf, PASSWORD)
+        writer.write(b"data")
+        buf._broken = True
+        with pytest.raises(OSError, match="pipe broken"):
+            writer.close()
+
     def test_multi_chunk_data(self):
         """Data spanning multiple chunks decrypts correctly."""
         payload = b"A" * (CHUNK_SIZE * 2 + 500)

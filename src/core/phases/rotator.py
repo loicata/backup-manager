@@ -5,6 +5,7 @@ daily, weekly, and monthly backups.
 """
 
 import logging
+import re
 from datetime import datetime
 
 from src.core.config import RetentionConfig
@@ -14,6 +15,13 @@ from src.core.phases.local_writer import sanitize_profile_name
 from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
+
+# Type marker anchored on the generated timestamp pattern so profile
+# names that happen to contain "_FULL_" or "_DIFF_" (allowed by
+# sanitize_profile_name) are not mis-classified.  See
+# generate_backup_name() which produces "<profile>_<TYPE>_YYYY-MM-DD_HHMMSS".
+_FULL_MARKER = re.compile(r"_FULL_\d{4}-\d{2}-\d{2}_\d{6}")
+_DIFF_MARKER = re.compile(r"_DIFF_\d{4}-\d{2}-\d{2}_\d{6}")
 
 
 def rotate_backups(
@@ -59,8 +67,23 @@ def rotate_backups(
 
 
 def _is_full_backup(name: str) -> bool:
-    """Check if a backup name contains the FULL marker."""
-    return "_FULL_" in name
+    """Return True if the backup name matches the FULL type marker.
+
+    The marker must be followed by the generated timestamp
+    ``YYYY-MM-DD_HHMMSS`` so that profile names containing ``_FULL_``
+    or ``_DIFF_`` substrings are not mis-classified.
+    """
+    return _FULL_MARKER.search(name) is not None
+
+
+def _is_diff_backup(name: str) -> bool:
+    """Return True if the backup name matches the DIFF type marker.
+
+    The marker must be followed by the generated timestamp
+    ``YYYY-MM-DD_HHMMSS`` so that profile names containing ``_DIFF_``
+    or ``_FULL_`` substrings are not mis-classified.
+    """
+    return _DIFF_MARKER.search(name) is not None
 
 
 def _rotate_gfs(
@@ -75,6 +98,9 @@ def _rotate_gfs(
     For weekly and monthly slots, only FULL backups are eligible.
     This ensures that retained long-term backups are always
     self-contained and restorable without a chain.
+
+    DIFF backups retained by the daily window are always paired with
+    their parent FULL to keep the restore chain intact.
     """
     phase_log = PhaseLogger("rotator", events)
     now = datetime.now()
@@ -100,6 +126,9 @@ def _rotate_gfs(
     # Always keep the most recent backup
     if dated_backups:
         keep.add(dated_backups[0][0]["name"])
+
+    # Protect FULL parents of any retained DIFF to preserve restore chains
+    _protect_full_parents(dated_backups, keep, phase_log)
 
     # Delete backups not in keep set
     to_delete = [b for b in backups if b["name"] not in keep]
@@ -146,6 +175,65 @@ def _apply_gfs_windows(
             if month_key not in monthly_dates:
                 monthly_dates.add(month_key)
                 keep.add(backup["name"])
+
+
+def _protect_full_parents(
+    dated_backups: list[tuple[dict, datetime]],
+    keep: set,
+    phase_log: PhaseLogger,
+) -> None:
+    """Add the FULL parent of every retained DIFF to the keep set.
+
+    A DIFF backup can only be restored together with the FULL it was
+    computed against.  Without this guard, the daily window can retain
+    a DIFF while weekly/monthly windows prune the older FULL that it
+    depends on, leaving an orphan DIFF that cannot be restored.
+
+    The parent FULL for a DIFF is the most recent FULL strictly older
+    than the DIFF in the same (already profile-filtered) backup list.
+
+    Args:
+        dated_backups: Backups sorted by modification time, newest first.
+        keep: Set of backup names to preserve; mutated in place.
+        phase_log: Logger for protection and orphan events.
+    """
+    for i, (backup, _dt) in enumerate(dated_backups):
+        name = backup["name"]
+        if not _is_diff_backup(name) or name not in keep:
+            continue
+        parent = _find_full_parent(dated_backups, i)
+        if parent is None:
+            phase_log.warning(f"Retained DIFF {name} has no FULL parent in the backup list")
+            continue
+        parent_name = parent["name"]
+        if parent_name not in keep:
+            keep.add(parent_name)
+            phase_log.info(
+                f"GFS rotation: protected FULL parent {parent_name} " f"for retained DIFF {name}"
+            )
+
+
+def _find_full_parent(
+    dated_backups: list[tuple[dict, datetime]],
+    diff_index: int,
+) -> dict | None:
+    """Find the most recent FULL strictly older than the DIFF at diff_index.
+
+    The list is ordered newest first, so the parent sits at a higher
+    index than the DIFF.
+
+    Args:
+        dated_backups: Backups sorted by modification time, newest first.
+        diff_index: Index of the DIFF whose parent to locate.
+
+    Returns:
+        The parent FULL backup dict, or None if no earlier FULL exists.
+    """
+    for j in range(diff_index + 1, len(dated_backups)):
+        candidate = dated_backups[j][0]
+        if _is_full_backup(candidate["name"]):
+            return candidate
+    return None
 
 
 def _delete_old_backups(

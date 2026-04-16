@@ -253,7 +253,13 @@ def _upload_encrypted_tar_pipe(
         upload_error = e
     finally:
         read_end.close()
-        thread.join(timeout=30)
+        # Closing read_end makes the next write on the pipe raise
+        # BrokenPipeError, which unblocks the producer almost
+        # immediately.  Join unconditionally so that the backup never
+        # leaves an orphan daemon thread still writing into a closed
+        # pipe — a 30 s timeout used to discard producer_error that
+        # the caller ought to see.
+        thread.join()
 
     if upload_error:
         raise WriteError("encrypted-tar", upload_error) from upload_error

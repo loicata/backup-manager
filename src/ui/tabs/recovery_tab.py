@@ -31,6 +31,27 @@ _PASSWORD_PLACEHOLDER = "****************"
 _BACKUP_PATTERNS = ("_FULL_", "_DIFF_", ".wbverify")
 
 
+def _is_within_restore_dir(target: Path, restore_dir: Path) -> bool:
+    """Return True if ``target`` stays inside ``restore_dir`` after resolving.
+
+    Defense against path-traversal in tar archives: a hostile archive
+    could hold members with absolute paths or ``..`` segments that
+    would extract outside the user-selected restore directory.
+    Backup Manager never produces such archives, but the check is
+    cheap and removes the trust requirement on the archive source.
+    """
+    try:
+        target_abs = target.resolve()
+        restore_abs = restore_dir.resolve()
+    except (OSError, RuntimeError):
+        return False
+    try:
+        target_abs.relative_to(restore_abs)
+    except ValueError:
+        return False
+    return True
+
+
 def _parse_backup_type(name: str) -> str:
     """Extract backup type (FULL / DIFF) from a backup name.
 
@@ -814,7 +835,15 @@ class RecoveryTab(ScrollableTab):
             # Step 2: Scan each bucket in parallel
             def _scan_one_bucket(bucket_name: str) -> list[dict]:
                 try:
-                    region_resp = client.get_bucket_location(Bucket=bucket_name)
+                    # boto3 clients are not safe to share across
+                    # threads: their underlying session can mutate
+                    # (STS/SSO credential refresh) and the endpoint
+                    # resolver holds per-call state.  Each worker
+                    # therefore gets its own global client for the
+                    # region lookup, independent of the outer ``client``
+                    # used earlier from the main thread.
+                    local_client = boto3.client(**client_kwargs)
+                    region_resp = local_client.get_bucket_location(Bucket=bucket_name)
                     region = region_resp.get("LocationConstraint") or "us-east-1"
 
                     regional_kwargs = dict(client_kwargs)
@@ -1584,10 +1613,17 @@ class RecoveryTab(ScrollableTab):
                             name = name[len(strip_prefix) :]
                         if not name:
                             continue
-                        if member.isdir():
-                            long_path_mkdir(restore_dir / name)
-                            continue
                         target = restore_dir / name
+                        if not _is_within_restore_dir(target, restore_dir):
+                            logger.warning(
+                                "Skipping archive member %r: would extract "
+                                "outside the restore directory",
+                                member.name,
+                            )
+                            continue
+                        if member.isdir():
+                            long_path_mkdir(target)
+                            continue
                         long_path_mkdir(target.parent)
                         fileobj = tar.extractfile(member)
                         if fileobj is not None:

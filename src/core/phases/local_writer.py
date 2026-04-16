@@ -99,10 +99,14 @@ def write_encrypted_tar(
 
     phase_log = PhaseLogger("writer", events)
     archive_path = destination / f"{backup_name}.tar.wbenc"
+    # Write to a sibling ".partial" file and atomically rename on success,
+    # so an interrupted run never leaves a truncated archive (missing EOF
+    # sentinel → undecryptable) at the final path.
+    partial_path = archive_path.with_name(archive_path.name + ".partial")
     total = len(files)
 
     try:
-        with open(archive_path, "wb") as out_file:
+        with open(partial_path, "wb") as out_file:
             enc_writer = EncryptingWriter(out_file, password)
             with tarfile.open(fileobj=enc_writer, mode="w|") as tar:
                 for i, file_info in enumerate(files):
@@ -133,8 +137,23 @@ def write_encrypted_tar(
                     _add_manifest_to_tar(tar, integrity_manifest)
 
             enc_writer.close()
+        os.replace(partial_path, archive_path)
     except (OSError, PermissionError) as e:
         raise WriteError("encrypted-tar", e) from e
+    finally:
+        # If os.replace succeeded, partial_path is gone.  Otherwise any
+        # exception (OSError, cancellation, tar error) left a truncated
+        # file on disk; remove it so it cannot be mistaken for a valid
+        # backup or waste destination quota.
+        if partial_path.exists():
+            try:
+                partial_path.unlink()
+            except OSError as cleanup_err:
+                logger.warning(
+                    "Failed to remove partial archive %s: %s",
+                    partial_path,
+                    cleanup_err,
+                )
 
     phase_log.info(f"Encrypted backup written: {total} files to {archive_path.name}")
     return archive_path

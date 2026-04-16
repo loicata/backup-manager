@@ -107,6 +107,10 @@ class LocalStorage(StorageBackend):
                 continue
             if entry.suffix == ".wbverify":
                 continue
+            if entry.name.endswith(".partial"):
+                # Leftover from an interrupted encrypted-tar write;
+                # never expose it as a usable backup.
+                continue
             if entry.name in SYSTEM_FOLDERS:
                 continue
             stat = entry.stat()

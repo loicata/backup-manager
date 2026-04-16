@@ -492,45 +492,53 @@ class SFTPStorage(StorageBackend):
             OSError: If the remote tar extraction fails.
         """
         transport = self._get_transport()
-        full_dir = self._join_remote(remote_dir)
-
-        if not self._check_exec_channel(transport):
-            self._tar_fallback(files, remote_dir, progress_callback)
-            return
-
-        self._ensure_remote_dir_exec(transport, full_dir)
-
-        escaped_dir = _shell_escape(full_dir)
-        channel = transport.open_session()
+        is_persistent = transport is self._persistent_transport
         try:
-            channel.exec_command(f"tar xf - -C {escaped_dir}")  # nosec B601
+            full_dir = self._join_remote(remote_dir)
 
-            total_bytes = sum(size for _, _, size in files)
-            writer = _ChannelWriter(
-                channel,
-                progress_callback,
-                total_bytes,
-                cancel_check,
-                limit_kbps=self._bandwidth_limit_kbps,
-            )
+            if not self._check_exec_channel(transport):
+                self._tar_fallback(files, remote_dir, progress_callback)
+                return
 
-            with tarfile.open(fileobj=writer, mode="w|") as tar:
-                for local_path, rel_path, size in files:
-                    if cancel_check is not None:
-                        cancel_check()
-                    info = tarfile.TarInfo(name=rel_path)
-                    info.size = size
-                    with open(local_path, "rb") as f:
-                        tar.addfile(info, fileobj=f)
+            self._ensure_remote_dir_exec(transport, full_dir)
 
-            # Flush remaining buffered data before closing channel
-            writer.flush()
-            channel.shutdown_write()
-            exit_status = channel.recv_exit_status()
-            if exit_status != 0:
-                raise OSError(f"Remote tar extraction failed (exit {exit_status})")
+            escaped_dir = _shell_escape(full_dir)
+            channel = transport.open_session()
+            try:
+                channel.exec_command(f"tar xf - -C {escaped_dir}")  # nosec B601
+
+                total_bytes = sum(size for _, _, size in files)
+                writer = _ChannelWriter(
+                    channel,
+                    progress_callback,
+                    total_bytes,
+                    cancel_check,
+                    limit_kbps=self._bandwidth_limit_kbps,
+                )
+
+                with tarfile.open(fileobj=writer, mode="w|") as tar:
+                    for local_path, rel_path, size in files:
+                        if cancel_check is not None:
+                            cancel_check()
+                        info = tarfile.TarInfo(name=rel_path)
+                        info.size = size
+                        with open(local_path, "rb") as f:
+                            tar.addfile(info, fileobj=f)
+
+                # Flush remaining buffered data before closing channel
+                writer.flush()
+                channel.shutdown_write()
+                exit_status = channel.recv_exit_status()
+                if exit_status != 0:
+                    raise OSError(f"Remote tar extraction failed (exit {exit_status})")
+            finally:
+                channel.close()
         finally:
-            channel.close()
+            # Ad-hoc transports (no connect() was called) must be closed
+            # to avoid leaking SSH sessions on every tar upload.  The
+            # persistent transport is reused across calls and stays open.
+            if not is_persistent:
+                transport.close()
 
     def _tar_fallback(self, files, remote_dir, progress_callback) -> None:
         """Fallback: upload files individually when exec is unavailable."""
@@ -697,6 +705,7 @@ class SFTPStorage(StorageBackend):
     def list_backups(self) -> list[dict]:
         """List backups in the remote directory."""
         transport = self._get_transport()
+        is_persistent = transport is self._persistent_transport
         try:
             sftp = self._get_sftp(transport)
             try:
@@ -707,6 +716,9 @@ class SFTPStorage(StorageBackend):
                         continue
                     # Skip manifests (.wbverify) — metadata, not backups
                     if entry.filename.endswith(".wbverify"):
+                        continue
+                    # Skip partial archives left by interrupted writes
+                    if entry.filename.endswith(".partial"):
                         continue
                     backups.append(
                         {
@@ -721,13 +733,15 @@ class SFTPStorage(StorageBackend):
             finally:
                 sftp.close()
         finally:
-            transport.close()
+            if not is_persistent:
+                transport.close()
 
     @with_retry(max_retries=2, base_delay=1.0)
     def delete_backup(self, remote_name: str) -> None:
         """Delete a backup from the remote server."""
         remote_name = _validate_remote_name(remote_name)
         transport = self._get_transport()
+        is_persistent = transport is self._persistent_transport
         try:
             sftp = self._get_sftp(transport)
             try:
@@ -743,13 +757,15 @@ class SFTPStorage(StorageBackend):
             finally:
                 sftp.close()
         finally:
-            transport.close()
+            if not is_persistent:
+                transport.close()
 
         logger.info("Deleted remote backup: %s", remote_name)
 
         # Remove associated .wbverify manifest if present
         verify_path = self._join_remote(f"{remote_name}.wbverify")
         transport2 = self._get_transport()
+        is_persistent2 = transport2 is self._persistent_transport
         try:
             sftp2 = self._get_sftp(transport2)
             try:
@@ -760,7 +776,8 @@ class SFTPStorage(StorageBackend):
             finally:
                 sftp2.close()
         finally:
-            transport2.close()
+            if not is_persistent2:
+                transport2.close()
 
     def _recursive_remove(self, sftp, path: str) -> None:
         """Recursively remove a remote directory."""
@@ -779,6 +796,7 @@ class SFTPStorage(StorageBackend):
         except Exception as e:
             return False, f"Connection failed: {e}"
 
+        is_persistent = transport is self._persistent_transport
         try:
             # Test SFTP subsystem
             sftp = self._get_sftp(transport)
@@ -809,7 +827,8 @@ class SFTPStorage(StorageBackend):
         except Exception as e:
             return False, f"SFTP Error: {type(e).__name__}: {e}"
         finally:
-            transport.close()
+            if not is_persistent:
+                transport.close()
 
     def _get_free_space_from_transport(
         self,
@@ -864,11 +883,13 @@ class SFTPStorage(StorageBackend):
         """Get free space on the remote filesystem."""
         try:
             transport = self._get_transport()
+            is_persistent = transport is self._persistent_transport
             try:
                 exec_ok = self._check_exec_channel(transport)
                 return self._get_free_space_from_transport(transport, exec_ok)
             finally:
-                transport.close()
+                if not is_persistent:
+                    transport.close()
         except Exception:
             return None
 
@@ -876,6 +897,7 @@ class SFTPStorage(StorageBackend):
         """Get size of a remote file."""
         try:
             transport = self._get_transport()
+            is_persistent = transport is self._persistent_transport
             try:
                 sftp = self._get_sftp(transport)
                 try:
@@ -884,7 +906,8 @@ class SFTPStorage(StorageBackend):
                 finally:
                     sftp.close()
             finally:
-                transport.close()
+                if not is_persistent:
+                    transport.close()
         except Exception:
             return None
 
@@ -1137,10 +1160,22 @@ class SFTPStorage(StorageBackend):
         local_dir.mkdir(parents=True, exist_ok=True)
         dst = local_dir / remote_name
         if dst.exists():
-            shutil.rmtree(dst, ignore_errors=True)
+            # Fail loudly instead of silently merging old + new files
+            # (ignore_errors=True used to mask permission denials and
+            # locked files, producing a restore with stale residue that
+            # was almost impossible to debug).
+            try:
+                shutil.rmtree(dst)
+            except OSError as e:
+                raise OSError(
+                    f"Cannot clear existing download destination {dst}: "
+                    f"{e}. Close any application using files inside it "
+                    f"and retry."
+                ) from e
         dst.mkdir(parents=True, exist_ok=True)
 
         transport = self._get_transport()
+        is_persistent = transport is self._persistent_transport
         try:
             sftp = self._get_sftp(transport)
             try:
@@ -1158,7 +1193,8 @@ class SFTPStorage(StorageBackend):
             finally:
                 sftp.close()
         finally:
-            transport.close()
+            if not is_persistent:
+                transport.close()
         return dst
 
     def _sftp_download_dir(self, sftp, remote_dir: str, local_dir: Path):

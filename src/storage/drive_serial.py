@@ -7,6 +7,7 @@ which is unique and immutable (survives reformats and port changes).
 Non-Windows platforms: all functions return None / passthrough.
 """
 
+import contextlib
 import logging
 import subprocess
 import sys
@@ -160,23 +161,25 @@ def _enumerate_drive_serials() -> dict[str, str]:
 
 
 def _probe_path_with_wake(path_str: str) -> bool:
-    """Return True if ``path_str`` becomes readable within ~5 seconds.
+    """Return True if ``path_str`` becomes readable within ~16 seconds.
 
     USB drives in power-save can return False on the first
     ``Path.exists()`` probe because Windows hasn't finished spinning
-    them up. A handful of short retries reliably catch the common
-    case (drive woke up during the first or second probe) and
-    avoid a spurious ``Destinations unavailable`` alert on a drive
-    that is fully functional.
+    them up. A few short retries reliably catch the common case
+    (drive woke up during the first or second probe); the long
+    8-second tail covers USB SSDs that need 10-12s to fully enumerate
+    on the first probe after reconnection — avoiding a spurious
+    ``Destinations unavailable`` alert on a drive that is fully
+    functional.
 
-    Wake sequence tries, with exponential back-off:
+    Wake sequence tries, with exponential back-off (cumulative):
         0.0s  immediate check
         0.3s  quick retry
         0.8s  second retry
         1.8s  after I/O-poke the drive root
-        3.8s  last chance
-    Total worst case ≈ 4 seconds, which is invisible in the UI and
-    far shorter than a real "not mounted" timeout.
+        3.8s  4th attempt
+        7.8s  5th attempt
+        15.8s last chance (covers deep-sleep USB SSD wake)
     """
     import os as _os
     import time as _time
@@ -191,12 +194,10 @@ def _probe_path_with_wake(path_str: str) -> bool:
     def _poke_root():
         if len(path_str) >= 2 and path_str[1] == ":":
             root = f"{path_str[0]}:\\"
-            try:
-                _os.listdir(root)
-            except OSError:
-                pass  # Ignore — we only wanted the side effect
+            with contextlib.suppress(OSError):
+                _os.listdir(root)  # Side effect only: wake the volume
 
-    for attempt, delay in enumerate((0.3, 0.5, 1.0, 2.0)):
+    for attempt, delay in enumerate((0.3, 0.5, 1.0, 2.0, 4.0, 8.0)):
         _time.sleep(delay)
         if attempt == 2:
             # After two naive retries, poke the drive root to wake

@@ -22,6 +22,12 @@ ERROR = "error"
 FILE_PROCESSED = "file_processed"
 PHASE_CHANGED = "phase_changed"
 PHASE_COUNT = "phase_count"
+# Emitted once per backup right after ``_maybe_force_full`` has decided
+# the effective backup_type. Payload: ``backup_type`` (str) and
+# ``forced_full`` (bool). Lets the UI reflect "full (auto-promoted)"
+# in the Run tab header instead of keeping the stale configured value
+# while a promoted FULL actually runs.
+BACKUP_TYPE_DETERMINED = "backup_type_determined"
 
 
 class EventBus:

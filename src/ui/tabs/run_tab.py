@@ -4,7 +4,15 @@ import contextlib
 import tkinter as tk
 from tkinter import ttk
 
-from src.core.events import LOG, PHASE_CHANGED, PHASE_COUNT, PROGRESS, STATUS, EventBus
+from src.core.events import (
+    BACKUP_TYPE_DETERMINED,
+    LOG,
+    PHASE_CHANGED,
+    PHASE_COUNT,
+    PROGRESS,
+    STATUS,
+    EventBus,
+)
 from src.core.health_checker import DestinationHealth, format_bytes
 from src.ui.theme import Colors, Fonts, Spacing
 
@@ -20,6 +28,10 @@ class RunTab(ttk.Frame):
         self._phase_order: list[str] = []
         self._phase_weights: dict[str, int] = {}
         self._last_pct = 0
+        # Profile info baseline — so the BACKUP_TYPE_DETERMINED override
+        # can be replaced with the canonical configured view once the
+        # backup ends (STATUS = success / error / idle).
+        self._profile_info_baseline: tuple[str, str, str, str] | None = None
         self._build_ui()
         self._subscribe_events()
 
@@ -357,6 +369,30 @@ class RunTab(ttk.Frame):
         self._events.subscribe(STATUS, self._on_status)
         self._events.subscribe(PHASE_CHANGED, self._on_phase)
         self._events.subscribe(PHASE_COUNT, self._on_phase_count)
+        self._events.subscribe(BACKUP_TYPE_DETERMINED, self._on_backup_type_determined)
+
+    def _on_backup_type_determined(self, backup_type: str = "", forced_full: bool = False, **_):
+        """Update the Run tab header with the effective backup_type.
+
+        Fires once per backup after ``_maybe_force_full``. When an
+        auto-promotion happened, display ``full (auto-promoted)`` so the
+        user sees what is ACTUALLY running, not the configured DIFF.
+        Thread-safe: the engine emits from the backup thread so we hop
+        onto the main thread via ``after``.
+        """
+        self.after(0, self._apply_active_backup_type, backup_type, forced_full)
+
+    def _apply_active_backup_type(self, backup_type: str, forced_full: bool) -> None:
+        if self._profile_info_baseline is None:
+            return
+        name, _configured_type, last, last_full = self._profile_info_baseline
+        type_display = (
+            "full (auto-promoted)" if forced_full else backup_type or _configured_type
+        )
+        with contextlib.suppress(tk.TclError):
+            self.profile_label.config(
+                text=f"Profile: {name} | Type: {type_display} | Last backup: {last}"
+            )
 
     def _on_phase_count(self, weights=None, **kw):
         """Receive phase weights for progress bar calculation.
@@ -459,14 +495,54 @@ class RunTab(ttk.Frame):
                 self.cancel_btn.config(state="disabled")
                 self.status_label.config(text="Waiting...", foreground=Colors.TEXT_SECONDARY)
 
-    def update_profile_info(self, name: str, backup_type: str, last_backup: str):
+    def update_profile_info(
+        self,
+        name: str,
+        backup_type: str,
+        last_backup: str,
+        last_full_backup: str = "",
+    ):
+        """Refresh the Run tab header with profile configuration.
+
+        When ``backup_type == "differential"`` and ``last_full_backup``
+        is within ~5 minutes of ``last_backup``, the previous run was
+        auto-promoted to FULL — surface this so the user understands
+        why a supposedly incremental backup ran as a full one.
+        """
         last = last_backup or "Never"
         type_display = backup_type
-        if backup_type == "differential" and not last_backup:
-            type_display = "differential (will auto-promote to full)"
-        self.profile_label.config(
-            text=f"Profile: {name} | Type: {type_display} | Last backup: {last}"
-        )
+        if backup_type == "differential":
+            if not last_backup:
+                type_display = "differential (will auto-promote to full)"
+            elif self._last_run_was_auto_promoted(last_backup, last_full_backup):
+                type_display = "differential — last run: full (auto-promoted)"
+        self._profile_info_baseline = (name, backup_type, last, last_full_backup)
+        with contextlib.suppress(tk.TclError):
+            self.profile_label.config(
+                text=f"Profile: {name} | Type: {type_display} | Last backup: {last}"
+            )
+
+    @staticmethod
+    def _last_run_was_auto_promoted(last_backup: str, last_full_backup: str) -> bool:
+        """True when the two timestamps point to the same backup run.
+
+        A DIFF that runs normally has ``last_backup > last_full_backup``
+        (days apart). An auto-promoted FULL writes both fields within
+        seconds of each other. Use a 5-minute window to stay robust to
+        whatever overhead sits between ``_phase_update_delta`` (sets
+        ``last_full_backup``) and the UI success callback (sets
+        ``last_backup``).
+        """
+        if not last_backup or not last_full_backup:
+            return False
+        try:
+            from datetime import datetime
+
+            t1 = datetime.fromisoformat(last_backup)
+            t2 = datetime.fromisoformat(last_full_backup)
+        except (ValueError, TypeError):
+            return False
+        return abs((t1 - t2).total_seconds()) < 300.0
 
     def clear_log(self):
         self.log_text.config(state="normal")

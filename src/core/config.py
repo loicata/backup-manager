@@ -251,6 +251,11 @@ class BackupProfile:
     # fire a full backup on every single app launch.
     crash_recovery_attempts: int = 0
     object_lock_enabled: bool = False  # True for professional S3 Object Lock profiles
+    # True once the General tab has auto-configured schedule/retention on the
+    # very first Full->Differential transition for this profile. Prevents the
+    # auto-config from running again on subsequent transitions so the user
+    # keeps full control after the initial friendly setup.
+    differential_auto_configured: bool = False
 
 
 # --- Profile fingerprint ---

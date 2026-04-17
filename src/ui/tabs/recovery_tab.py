@@ -1184,21 +1184,65 @@ class RecoveryTab(ScrollableTab):
     # Browse helpers
     # ------------------------------------------------------------------
 
+    def _default_backup_initialdir(self) -> str | None:
+        """Return a sensible ``initialdir`` for the backup-source Browse dialog.
+
+        Without this, Tk falls back on the OS "last used directory" —
+        after a user has done one restore, the Browse dialog for the
+        NEXT restore opens at the previous destination (where the files
+        were extracted) instead of where the backups actually live.
+
+        Priority:
+            1. Parent directory of whatever is already in the backup
+               path field (user typed or a previous Browse succeeded).
+            2. The profile's primary storage path when it is local —
+               that's where backups for this profile live.
+            3. ``None`` — Tk uses its default.
+        """
+        try:
+            existing = self.backup_path_var.get().strip()
+        except (tk.TclError, AttributeError):
+            existing = ""
+        if existing:
+            p = Path(existing)
+            # Always jump to the parent so the user sees sibling backups.
+            # When the field already holds ``G:\Backup Manager\BackupTest_*``
+            # we want the dialog to open at ``G:\Backup Manager``; opening
+            # inside the selected backup folder hides the alternatives.
+            parent = p.parent
+            if parent.exists() and parent != p:
+                return str(parent)
+        if self._profile is not None:
+            storage = self._profile.storage
+            if storage.storage_type == StorageType.LOCAL and storage.destination_path:
+                dest = Path(storage.destination_path)
+                if dest.exists():
+                    return str(dest)
+        return None
+
     def _browse_folder(self) -> None:
         """Browse for a backup folder (unencrypted backup)."""
-        path = filedialog.askdirectory(title="Select backup folder")
+        kwargs = {"title": "Select backup folder"}
+        initialdir = self._default_backup_initialdir()
+        if initialdir:
+            kwargs["initialdir"] = initialdir
+        path = filedialog.askdirectory(**kwargs)
         if path:
             self.backup_path_var.set(path)
 
     def _browse_encrypted(self) -> None:
         """Browse for an encrypted .tar.wbenc backup file."""
-        path = filedialog.askopenfilename(
-            title="Select encrypted backup",
-            filetypes=[
+        kwargs = {
+            "title": "Select encrypted backup",
+            "filetypes": [
                 ("Encrypted backups", "*.wbenc"),
                 ("All files", "*.*"),
             ],
-        )
+        }
+        initialdir = self._default_backup_initialdir()
+        if initialdir:
+            kwargs["initialdir"] = initialdir
+        path = filedialog.askopenfilename(**kwargs)
         if path:
             self.backup_path_var.set(path)
 

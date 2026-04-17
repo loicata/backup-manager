@@ -9,7 +9,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
 
-from src.core.config import BackupProfile, BackupType
+from src.core.config import BackupProfile, BackupType, ScheduleFrequency
 from src.core.scheduler import AutoStart
 from src.ui.tabs import ScrollableTab
 from src.ui.theme import Colors, Fonts, Spacing
@@ -25,8 +25,17 @@ class GeneralTab(ScrollableTab):
         super().__init__(parent, **kwargs)
         self._size_cancel = threading.Event()
         self._retention_tab = None
+        self._schedule_tab = None
+        self._current_profile: BackupProfile | None = None
         self._last_backup_type = BackupType.FULL.value
         self._loading = False
+        # Autoconfig snapshot state — set when _apply_autoconfig_if_needed()
+        # performs a change, cleared by _hide_autoconfig_block(). The expected
+        # values are what we WROTE; any subsequent user write to a different
+        # value hides the block and removes the traces.
+        self._autoconfig_expected_schedule: str | None = None
+        self._autoconfig_expected_retention_ui: int | None = None
+        self._autoconfig_traces: list[tuple[tk.Variable, str]] = []
         self._build_ui()
 
     def _build_ui(self):
@@ -344,12 +353,15 @@ class GeneralTab(ScrollableTab):
         thread.start()
 
     def _toggle_diff_info(self) -> None:
-        """Show/hide the differential info frame and handle Full\u2192Diff transition.
+        """Show/hide the differential info frame and drive the autoconfig.
 
-        On a user-initiated transition from Full to Differential, auto-bump
-        daily retention to cover the full-backup cycle so the validation at
-        save-time does not trip. The bump is one-shot: we never touch retention
-        again for subsequent cycle changes or the reverse transition.
+        On the VERY FIRST Full->Differential transition for the current
+        profile (gated by profile.differential_auto_configured), run the
+        one-shot autoconfig: set schedule to Daily if it isn't already, and
+        bump daily retention up to the full-backup cycle if it is below.
+        Persist the gate flag on the profile so subsequent transitions are
+        a no-op. On every Diff->Full transition, hide the snapshot block
+        and clear the traces but NEVER touch retention or schedule.
         """
         current = self.type_var.get()
         is_diff = current == BackupType.DIFFERENTIAL.value
@@ -361,62 +373,135 @@ class GeneralTab(ScrollableTab):
         if not self._loading:
             was_full = self._last_backup_type == BackupType.FULL.value
             if was_full and is_diff:
-                self._bump_retention_if_needed()
+                self._apply_autoconfig_if_needed()
+            elif not is_diff:
+                # Any departure from Diff clears the snapshot block.
+                self._hide_autoconfig_block()
 
-        self._update_retention_label()
         self._last_backup_type = current
 
-    def _bump_retention_if_needed(self) -> None:
-        """One-shot bump of daily retention to match the full-backup cycle.
+    def _apply_autoconfig_if_needed(self) -> None:
+        """One-shot autoconfig for the first Full->Differential transition.
 
-        Runs on Full\u2192Differential transition. Increases the retention
-        tab's daily value only when it is strictly below the cycle; never
-        reduces an already-sufficient value.
+        Gated by profile.differential_auto_configured so the autoconfig
+        runs at most once per profile (persistent across sessions). When
+        no current profile is available (tab not yet wired to one), the
+        autoconfig is skipped rather than silently mutating unrelated state.
         """
-        if self._retention_tab is None:
+        if self._current_profile is None:
             return
+        if self._current_profile.differential_auto_configured:
+            return
+        if self._retention_tab is None or self._schedule_tab is None:
+            return
+
         try:
-            gfs_var = self._retention_tab.get_gfs_daily_var()
-            ui_val = gfs_var.get()
+            freq_var = self._schedule_tab.get_frequency_var()
+            retention_var = self._retention_tab.get_gfs_daily_var()
+            current_freq = freq_var.get()
+            current_retention_ui = retention_var.get()
             cycle = self.full_every_var.get()
         except (tk.TclError, ValueError, AttributeError):
             return
-        current_internal = ui_val + 1
-        if current_internal < cycle:
-            gfs_var.set(cycle - 1)
 
-    def _update_retention_label(self) -> None:
-        """Show/hide the daily-retention info label in Differential mode."""
-        is_diff = self.type_var.get() == BackupType.DIFFERENTIAL.value
-        if not is_diff or self._retention_tab is None:
-            self._retention_info_label.pack_forget()
+        changed_schedule = current_freq.lower() != ScheduleFrequency.DAILY.value
+        changed_retention = (current_retention_ui + 1) < cycle
+
+        # Flip the gate regardless of whether anything concrete changed:
+        # the "first transition" event has happened and we never want to
+        # re-trigger on later bascules even if the user undoes our writes.
+        self._current_profile.differential_auto_configured = True
+
+        if not (changed_schedule or changed_retention):
             return
-        try:
-            ui_val = self._retention_tab.get_gfs_daily_var().get()
-        except (tk.TclError, ValueError, AttributeError):
-            self._retention_info_label.pack_forget()
-            return
-        internal = ui_val + 1
-        self._retention_info_label.config(
-            text=f"Retention: {internal} days (change in the Retention tab)."
-        )
+
+        # Apply the writes BEFORE registering the traces so our own
+        # programmatic sets do not immediately hide the block.
+        if changed_schedule:
+            target_freq = ScheduleFrequency.DAILY.value.capitalize()
+            freq_var.set(target_freq)
+            self._autoconfig_expected_schedule = target_freq
+            tid = freq_var.trace_add(
+                "write", lambda *_: self._on_autoconfig_var_changed("schedule")
+            )
+            self._autoconfig_traces.append((freq_var, tid))
+
+        if changed_retention:
+            target_retention_ui = cycle - 1
+            retention_var.set(target_retention_ui)
+            self._autoconfig_expected_retention_ui = target_retention_ui
+            tid = retention_var.trace_add(
+                "write", lambda *_: self._on_autoconfig_var_changed("retention")
+            )
+            self._autoconfig_traces.append((retention_var, tid))
+
+        # Build the snapshot label with only the lines that reflect an
+        # actual change. The text is frozen: no reactive update.
+        lines = ["Auto configuration for first differential (you can change):"]
+        if changed_schedule:
+            lines.append("    \u2022 Schedule: daily")
+        if changed_retention:
+            lines.append(f"    \u2022 Retention: {cycle} days")
+        self._retention_info_label.config(text="\n".join(lines))
         self._retention_info_label.pack(anchor="w", pady=(4, 0))
 
+    def _on_autoconfig_var_changed(self, which: str) -> None:
+        """Hide the snapshot block when the user writes a different value.
+
+        Matches only a real value change: writing the same value back is
+        a no-op (the Tk trace still fires but we compare against the
+        expected snapshot and find equality).
+        """
+        if which == "schedule":
+            if self._schedule_tab is None or self._autoconfig_expected_schedule is None:
+                return
+            try:
+                current = self._schedule_tab.get_frequency_var().get()
+            except (tk.TclError, ValueError, AttributeError):
+                return
+            if current != self._autoconfig_expected_schedule:
+                self._hide_autoconfig_block()
+        elif which == "retention":
+            if self._retention_tab is None or self._autoconfig_expected_retention_ui is None:
+                return
+            try:
+                current = self._retention_tab.get_gfs_daily_var().get()
+            except (tk.TclError, ValueError, AttributeError):
+                return
+            if current != self._autoconfig_expected_retention_ui:
+                self._hide_autoconfig_block()
+
+    def _hide_autoconfig_block(self) -> None:
+        """Hide the snapshot label and detach any registered traces."""
+        self._retention_info_label.pack_forget()
+        for var, tid in self._autoconfig_traces:
+            with contextlib.suppress(tk.TclError):
+                var.trace_remove("write", tid)
+        self._autoconfig_traces.clear()
+        self._autoconfig_expected_schedule = None
+        self._autoconfig_expected_retention_ui = None
+
     def set_retention_tab(self, tab) -> None:
-        """Wire the Retention tab so this tab can read/update daily retention.
+        """Wire the Retention tab so the autoconfig can read/write daily retention.
 
         Called once from the app after all tabs are constructed.
         """
         self._retention_tab = tab
-        try:
-            gfs_var = tab.get_gfs_daily_var()
-        except AttributeError:
-            return
-        gfs_var.trace_add("write", lambda *_: self._update_retention_label())
-        self._update_retention_label()
+
+    def set_schedule_tab(self, tab) -> None:
+        """Wire the Schedule tab so the autoconfig can read/write frequency.
+
+        Called once from the app after all tabs are constructed.
+        """
+        self._schedule_tab = tab
 
     def load_profile(self, profile: BackupProfile):
         """Load profile data into UI widgets."""
+        # Clear any snapshot block left from a previously loaded profile —
+        # the block is tied to a specific Full->Diff transition, not to the
+        # tab at large.
+        self._hide_autoconfig_block()
+        self._current_profile = profile
         self._loading = True
         try:
             self.name_var.set(profile.name)
@@ -450,10 +535,9 @@ class GeneralTab(ScrollableTab):
         finally:
             self._loading = False
 
-        # Refresh label for the freshly-loaded backup type (no bump since
-        # load_profile reflects persisted user choices, not a new transition).
+        # Remember the loaded backup type so the very next user-driven
+        # write to type_var is correctly detected as a transition.
         self._last_backup_type = self.type_var.get()
-        self._update_retention_label()
 
         self._update_total_size()
 

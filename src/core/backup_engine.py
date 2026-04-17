@@ -25,6 +25,7 @@ from src.core.config import (
 )
 from src.core.events import (
     BACKUP_DONE,
+    BACKUP_TYPE_DETERMINED,
     ERROR,
     LOG,
     PHASE_CHANGED,
@@ -389,6 +390,15 @@ class BackupEngine:
 
         # Record actual type for email report (before restore to DIFFERENTIAL)
         ctx.result.actual_backup_type = ctx.profile.backup_type.value.upper()
+
+        # Notify the UI of the effective backup_type NOW so the Run tab
+        # header can switch from the configured "differential" to
+        # "full (auto-promoted)" for the duration of this run.
+        self._events.emit(
+            BACKUP_TYPE_DETERMINED,
+            backup_type=ctx.profile.backup_type.value,
+            forced_full=bool(getattr(ctx, "forced_full", False)),
+        )
 
         # Log backup type and reference for differential
         if ctx.profile.backup_type == BackupType.DIFFERENTIAL:
@@ -1097,10 +1107,17 @@ class BackupEngine:
         differential counter.  After a differential backup:
         increments the counter.  The manifest is never overwritten
         by a differential, so it always reflects the last full.
+
+        Relies on ``ctx.forced_full`` as a fallback source of truth
+        because ``ctx.profile.backup_type`` can be overwritten mid-pipeline
+        when the UI saves the profile while a backup is in progress (the
+        engine and UI share the same ``BackupProfile`` instance). The flag
+        is set once in ``_maybe_force_full`` and never mutated by the UI.
         """
         manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
 
-        if ctx.profile.backup_type == BackupType.FULL:
+        is_full = ctx.profile.backup_type == BackupType.FULL or getattr(ctx, "forced_full", False)
+        if is_full:
             self._phase("Updating manifest...")
             full_manifest = build_updated_manifest(
                 ctx.all_files, ctx.file_hashes, cancel_check=self._check_cancel

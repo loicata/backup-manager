@@ -53,6 +53,11 @@ class ScheduleTab(ttk.Frame):
         ttk.Label(row1, text="Time (HH:MM):").pack(side="left", padx=(Spacing.LARGE, 0))
         self.time_var = tk.StringVar(value="02:00")
         ttk.Entry(row1, textvariable=self.time_var, width=8).pack(side="left", padx=Spacing.SMALL)
+        # Auto-insert ":" when the user types four digits without a
+        # separator (e.g. "2346" -> "23:46"). Keeps the field forgiving
+        # without needing explicit validation — a well-formed value
+        # like "23:46" matches no branch and is left alone.
+        self.time_var.trace_add("write", self._autoformat_time)
 
         row2 = ttk.Frame(freq_frame)
         row2.pack(fill="x", pady=(Spacing.MEDIUM, 0))
@@ -194,6 +199,29 @@ class ScheduleTab(ttk.Frame):
         self.verify_interval_var.set(s.verify_interval_days)
         self._toggle_enabled()
         self._refresh_journal()
+
+    def _autoformat_time(self, *_args) -> None:
+        """Auto-insert ``:`` when four digits are typed without a separator.
+
+        Silently no-ops on anything else (partial input, values that
+        already contain a colon, non-digit characters) so the user can
+        still type "23:46" manually or paste a value.
+        """
+        try:
+            current = self.time_var.get()
+        except tk.TclError:
+            return
+        if len(current) == 4 and current.isdigit():
+            self.time_var.set(f"{current[:2]}:{current[2:]}")
+
+    def get_frequency_var(self) -> tk.StringVar:
+        """Return the Tk StringVar holding the schedule frequency.
+
+        The value is stored capitalized ("Daily", "Weekly", "Monthly"),
+        matching the Combobox display. Consumers must .lower() before
+        building a ScheduleFrequency enum.
+        """
+        return self.freq_var
 
     def collect_config(self) -> dict:
         """Collect schedule configuration.

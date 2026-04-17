@@ -626,6 +626,13 @@ class BackupManagerApp:
         self.events = EventBus()
         self.engine: BackupEngine | None = None
         self._current_profile: BackupProfile | None = None
+        # True while a backup thread is active. Read by _save_profile
+        # to avoid mutating the shared BackupProfile instance that the
+        # engine is currently pipelining — a concurrent UI save would
+        # overwrite engine-managed fields (backup_type after auto-promotion,
+        # profile_hash, retention reference) and corrupt pipeline decisions
+        # like _phase_update_delta's FULL/DIFF branch.
+        self._backup_running: bool = False
 
         # Setup theme
         self.style = setup_theme(root)
@@ -737,7 +744,12 @@ class BackupManagerApp:
             lambda e: webbrowser.open("https://loicata.com"),
         )
 
-        # Profile listbox with section headers
+        # Profile listbox with section headers.
+        # exportselection=0: without this, Tk clears the selection when
+        # focus moves to another widget (changing tabs, clicking an
+        # entry field). The visual deselection confuses users into
+        # thinking no profile is loaded, and downstream code that reads
+        # ``curselection()`` gets an empty tuple.
         self.profile_listbox = tk.Listbox(
             sidebar,
             bg=Colors.SIDEBAR_BG,
@@ -748,6 +760,7 @@ class BackupManagerApp:
             borderwidth=0,
             font=Fonts.normal(),
             activestyle="none",
+            exportselection=0,
         )
         self.profile_listbox.pack(
             fill="both",
@@ -867,9 +880,10 @@ class BackupManagerApp:
         for tab, label in tabs:
             self.notebook.add(tab, text=f" {label} ")
 
-        # Wire the Retention tab into General so the latter can display the
-        # current daily retention and auto-bump it on Full->Diff transitions.
+        # Wire the Retention and Schedule tabs into General so the one-shot
+        # autoconfig (first Full->Diff per profile) can set both.
         self.tab_general.set_retention_tab(self.tab_retention)
+        self.tab_general.set_schedule_tab(self.tab_schedule)
 
         # Connect run tab buttons
         self.tab_run.start_btn.config(command=self._run_backup)
@@ -883,12 +897,15 @@ class BackupManagerApp:
         # Packed before notebook so it reserves space at the bottom.
         self._save_frame = ttk.Frame(parent)
         self._save_frame.pack(fill="x", side="bottom", before=self.notebook)
+        # Full-width bottom bar: Save is a critical action, so it must be
+        # impossible to miss and cheap to click. Edge-docked buttons make
+        # the user hunt for them.
         ttk.Button(
             self._save_frame,
             text="Save",
             style="Accent.TButton",
             command=self._save_profile,
-        ).pack(side="right", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
+        ).pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
         # Tabs where Save is not relevant
         self._no_save_tabs = {
@@ -1037,10 +1054,6 @@ class BackupManagerApp:
             self._load_profile(active[0])
 
     def _on_profile_selected(self, event=None):
-        # Save current profile before switching
-        if self._current_profile:
-            self._save_profile(silent=True)
-
         sel = self.profile_listbox.curselection()
         if not sel:
             return
@@ -1049,11 +1062,30 @@ class BackupManagerApp:
         if idx in self._header_indices:
             self.profile_listbox.selection_clear(idx)
             return
+
         # Find the profile for this index
+        new_profile = None
         for map_idx, profile in self._listbox_profile_map:
             if map_idx == idx and profile is not None:
-                self._load_profile(profile)
-                return
+                new_profile = profile
+                break
+        if new_profile is None:
+            return
+
+        # Programmatic select_set() calls (e.g. from _load_profiles after a
+        # _save_profile) fire <<ListboxSelect>> even when the target profile
+        # id matches the current one. Skip the save-before-switch path in
+        # that case — otherwise every _save_profile triggers a cascade
+        # (save -> load_profiles -> select_set -> ListboxSelect -> save)
+        # that can mutate the profile object while a backup is running.
+        if self._current_profile and self._current_profile.id == new_profile.id:
+            return
+
+        # Save current profile before switching to a different one
+        if self._current_profile:
+            self._save_profile(silent=True)
+
+        self._load_profile(new_profile)
 
     def _load_profile(self, profile: BackupProfile):
         """Load a profile into all tabs."""
@@ -1079,6 +1111,7 @@ class BackupManagerApp:
             profile.name,
             profile.backup_type.value,
             profile.last_backup,
+            profile.last_full_backup or "",
         )
         # Only clear log when switching to a different profile
         if profile.id != previous_id:
@@ -1268,6 +1301,20 @@ class BackupManagerApp:
             True if the profile was saved successfully, False otherwise.
         """
         if not self._current_profile:
+            return False
+
+        # Never mutate the profile while a backup is running — the engine
+        # holds the same instance and relies on a stable view of fields
+        # like backup_type, retention and profile_hash. Silent saves (auto)
+        # are dropped; explicit saves warn the user.
+        if self._backup_running:
+            if silent:
+                return True
+            messagebox.showwarning(
+                "Backup in progress",
+                "A backup is currently running. Profile changes will be "
+                "available after it completes.",
+            )
             return False
 
         # Validate encryption
@@ -1514,7 +1561,21 @@ class BackupManagerApp:
         self.tab_recovery.load_profile(blank)
 
     def _get_selected_profile(self):
-        """Get the currently selected profile and its listbox index."""
+        """Get the currently selected profile and its listbox index.
+
+        Tk listboxes with the default ``exportselection=1`` clear their
+        selection when focus moves to another widget (tab change, entry
+        field click, etc.) so ``curselection()`` can return empty even
+        when the user still has a profile loaded. ``self._current_profile``
+        is maintained by ``_load_profile`` and stays accurate regardless,
+        so it is the real source of truth; the listbox index is only
+        needed by the up/down move buttons.
+        """
+        if self._current_profile is not None:
+            for map_idx, profile in self._listbox_profile_map:
+                if profile is not None and profile.id == self._current_profile.id:
+                    return self._current_profile, map_idx
+        # Fallback: no current profile — honour the visible selection.
         sel = self.profile_listbox.curselection()
         if not sel:
             return None, None
@@ -1648,14 +1709,25 @@ class BackupManagerApp:
         # Pre-check targets in background, then start backup if all OK
         self._precheck_and_run(profile)
 
-    def _precheck_and_run(self, profile: BackupProfile) -> None:
+    def _precheck_and_run(self, profile: BackupProfile, _retry_attempt: int = 0) -> None:
         """Run target pre-check in background thread, then start backup.
 
         Shows a "Checking destinations..." message immediately so the user
         knows something is happening (SFTP timeouts can take 15+ seconds).
         Uses polling pattern (root.after) to stay thread-safe with tkinter.
+
+        On failure, retries the precheck ONCE silently before surfacing
+        the "Destinations unavailable" popup. Pairs with the extended
+        wake-up budget in ``LocalStorage.test_connection`` to give a USB
+        drive two full wake-up rounds before telling the user something
+        is wrong — the first round may have nudged the drive out of deep
+        sleep without fully re-enumerating in time.
         """
-        self._show_checking_message()
+        if _retry_attempt == 0:
+            # Only show the "Checking..." overlay on the first attempt;
+            # the silent retry keeps the UI quiet so a transparent
+            # second chance doesn't look like a stutter.
+            self._show_checking_message()
 
         result: list = [None]  # [None] = pending, [list] = done
 
@@ -1667,26 +1739,37 @@ class BackupManagerApp:
                 self.root.after(200, _poll)
                 return
 
-            self._hide_target_alert()  # Remove "Checking..." message
-
             failures = [r for r in result[0] if not r[2]]
             if not failures:
+                self._hide_target_alert()  # Remove "Checking..." message
                 self._start_backup_thread(profile)
-            else:
-                # Check if primary storage is OK (only mirrors failed)
-                primary_ok = all(r[2] for r in result[0] if r[0] == "Storage")
-                # The lambda wraps the whole ternary so on_continue is
-                # None when primary is down (no safe fallback).  The
-                # previous form wrapped only the true-branch, making
-                # on_continue always truthy and rendering a no-op
-                # "Continue without mirror" button in every case.
-                on_continue = (lambda: self._on_precheck_continue(profile)) if primary_ok else None
-                self._show_target_alert(
-                    failures,
-                    on_retry=lambda: self._on_precheck_retry(profile),
-                    on_cancel=lambda: self._on_precheck_cancel(),
-                    on_continue=on_continue,
+                return
+
+            # One silent retry before showing the popup. Half a second
+            # of pause lets Windows finish mounting a drive that the
+            # first precheck already started waking up.
+            if _retry_attempt == 0:
+                self.root.after(
+                    500,
+                    lambda: self._precheck_and_run(profile, _retry_attempt=1),
                 )
+                return
+
+            self._hide_target_alert()
+            # Check if primary storage is OK (only mirrors failed)
+            primary_ok = all(r[2] for r in result[0] if r[0] == "Storage")
+            # The lambda wraps the whole ternary so on_continue is
+            # None when primary is down (no safe fallback).  The
+            # previous form wrapped only the true-branch, making
+            # on_continue always truthy and rendering a no-op
+            # "Continue without mirror" button in every case.
+            on_continue = (lambda: self._on_precheck_continue(profile)) if primary_ok else None
+            self._show_target_alert(
+                failures,
+                on_retry=lambda: self._on_precheck_retry(profile),
+                on_cancel=lambda: self._on_precheck_cancel(),
+                on_continue=on_continue,
+            )
 
         threading.Thread(target=_do_check, daemon=True, name="Precheck").start()
         self.root.after(200, _poll)
@@ -1739,6 +1822,11 @@ class BackupManagerApp:
         self.tab_run.clear_log()
         self.tab_run._append_log(f"Backup started — {profile.name}")
 
+        # Raise the running flag BEFORE spawning the thread so any UI save
+        # queued between this point and the engine's _maybe_force_full sees
+        # the flag and skips. Reset in the thread's finally block.
+        self._backup_running = True
+
         def _backup_thread():
             from datetime import datetime
 
@@ -1782,6 +1870,11 @@ class BackupManagerApp:
 
                 # Refresh dashboard to show updated last backup info
                 self.root.after(0, self._update_health_dashboard, profile)
+                # Refresh the Run tab header so an auto-promoted run is
+                # annotated as "differential — last run: full (auto-promoted)"
+                # rather than leaving the transient "full (auto-promoted)"
+                # label from BACKUP_TYPE_DETERMINED.
+                self.root.after(0, self._refresh_run_header, profile)
 
                 # Send email notification
                 if profile.email.enabled:
@@ -1829,6 +1922,15 @@ class BackupManagerApp:
                         result,
                         str(e),
                     )
+            finally:
+                # Lower the flag so the next Save collects UI edits made
+                # during the backup (and warnings stop firing).
+                self._backup_running = False
+                # Reset the Run tab header so any transient
+                # "full (auto-promoted)" override from BACKUP_TYPE_DETERMINED
+                # is replaced by the canonical profile-derived label
+                # (even on cancel/error paths).
+                self.root.after(0, self._refresh_run_header, profile)
 
         threading.Thread(target=_backup_thread, daemon=True, name="Backup").start()
 
@@ -1862,8 +1964,13 @@ class BackupManagerApp:
 
         def _verify_thread():
             try:
-                for bvr in self._verifier.verify_iter():
-                    self.root.after(0, self._on_verify_result, bvr)
+                for idx, bvr in enumerate(self._verifier.verify_iter(), start=1):
+                    # ``total_backups`` is populated by the verifier as it
+                    # finishes listing each destination; by the time we
+                    # receive the first result past the listing phase
+                    # it's stable and we can compute a percentage.
+                    total = self._verifier._result.total_backups or idx
+                    self.root.after(0, self._on_verify_result, bvr, idx, total)
                 result = self._verifier.get_result()
                 self.root.after(0, self._on_verify_done, result)
             except Exception as e:
@@ -1882,9 +1989,16 @@ class BackupManagerApp:
             self.tab_verify.set_running(False)
             self.tab_verify.status_label.config(text="Cancelled", foreground=Colors.DANGER)
 
-    def _on_verify_result(self, bvr):
+    def _on_verify_result(self, bvr, checked: int = 0, total: int = 0):
         """Handle a single verification result on the main thread."""
-        self.tab_verify.add_result(bvr.destination, bvr.backup_name, bvr.status, bvr.message)
+        self.tab_verify.add_result(
+            bvr.destination,
+            bvr.backup_name,
+            bvr.status,
+            bvr.message,
+            checked=checked,
+            total=total,
+        )
 
     def _on_verify_done(self, result):
         """Handle verification completion on the main thread."""
@@ -1968,6 +2082,21 @@ class BackupManagerApp:
         except Exception as e:
             logger.warning("Could not send backup report: %s", e)
 
+    def _refresh_run_header(self, profile: BackupProfile) -> None:
+        """Re-render the Run tab header from profile state.
+
+        Called after every backup (success/cancel/error) so any transient
+        override set by the ``BACKUP_TYPE_DETERMINED`` event is replaced
+        with the canonical profile-derived view (including the
+        "last run: full (auto-promoted)" annotation when applicable).
+        """
+        self.tab_run.update_profile_info(
+            profile.name,
+            profile.backup_type.value,
+            profile.last_backup or "",
+            profile.last_full_backup or "",
+        )
+
     def _save_backup_log(self, profile: BackupProfile, result) -> None:
         """Write backup log lines to a timestamped file.
 
@@ -2029,6 +2158,11 @@ class BackupManagerApp:
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 raise RuntimeError("Backup cancelled: destinations unavailable")
 
+        # Scheduler owns its own profile instance (freshly loaded from disk)
+        # so UI saves cannot mutate it. Raise the flag anyway so a concurrent
+        # UI save cannot overwrite the JSON on disk while the scheduler is
+        # mid-pipeline.
+        self._backup_running = True
         try:
             self.tray.set_state(TrayState.BACKUP_RUNNING)
             stats = self.engine.run_backup(profile)
@@ -2096,6 +2230,8 @@ class BackupManagerApp:
 
             # Re-raise so the scheduler can trigger retry logic
             raise
+        finally:
+            self._backup_running = False
 
     def _scheduled_precheck_prompt(
         self,

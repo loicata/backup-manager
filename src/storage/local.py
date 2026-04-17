@@ -16,11 +16,11 @@ from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-# 20s: covers USB drive cold-wake + antivirus scan on first write.
-# Previously 10s — a sleeping USB plus a virus scan on the test file
-# routinely pushed past that budget, producing spurious
-# "Destinations unavailable" alerts on drives that were actually fine.
-CONNECTION_TIMEOUT = 20  # seconds
+# 30s: cumulative wake-up budget (~16s of sleep retries) + antivirus
+# scan on the first write on a freshly mounted volume. 20s was enough
+# for drives that spun up within ~8s but still tripped on USB SSDs in
+# deep power-save that need 10-12s to enumerate.
+CONNECTION_TIMEOUT = 30  # seconds
 
 # Windows system folders that must never be treated as backups
 SYSTEM_FOLDERS = frozenset(
@@ -202,13 +202,16 @@ class LocalStorage(StorageBackend):
             s = str(self._dest)
             if len(s) >= 2 and s[1] == ":":
                 root = f"{s[0]}:\\"
-            for attempt, delay in enumerate((0.3, 0.5, 1.0, 2.0, 4.0)):
+            # Cumulative sleep budget ~15.8s. External USB drives in
+            # deep power-save can need 10-12s to fully enumerate on the
+            # first probe after reconnection; the 8.0 s tail covers that
+            # long tail without penalising healthy drives (which return
+            # on the first ``exists()`` check above).
+            for attempt, delay in enumerate((0.3, 0.5, 1.0, 2.0, 4.0, 8.0)):
                 _time.sleep(delay)
                 if root and attempt == 1:
-                    try:
-                        _os.listdir(root)
-                    except OSError:
-                        pass
+                    with contextlib.suppress(OSError):
+                        _os.listdir(root)  # Wake the volume
                 if self._dest.exists():
                     return True
             return False
@@ -236,10 +239,7 @@ class LocalStorage(StorageBackend):
                     return
                 except OSError as we:
                     result[0] = False
-                    result[1] = (
-                        f"Destination present but write failed "
-                        f"({self._dest}): {we}"
-                    )
+                    result[1] = f"Destination present but write failed " f"({self._dest}): {we}"
                     return
 
                 free = self.get_free_space()

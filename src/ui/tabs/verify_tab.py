@@ -177,7 +177,15 @@ class VerifyTab(ttk.Frame):
         except tk.TclError:
             pass
 
-    def add_result(self, destination: str, backup_name: str, status: str, message: str) -> None:
+    def add_result(
+        self,
+        destination: str,
+        backup_name: str,
+        status: str,
+        message: str,
+        checked: int = 0,
+        total: int = 0,
+    ) -> None:
         """Add a result row to the treeview and update progress.
 
         This is called on the main thread via root.after(), so all
@@ -188,6 +196,10 @@ class VerifyTab(ttk.Frame):
             backup_name: Backup name.
             status: "ok", "corrupted", "missing", or "error".
             message: Detail message.
+            checked: Number of backups verified so far (optional,
+                enables incremental progress bar).
+            total: Total backups to verify (optional; paired with
+                ``checked`` to compute the percentage).
         """
         status_display = {
             "ok": "OK",
@@ -206,6 +218,15 @@ class VerifyTab(ttk.Frame):
             )
             self.results_tree.yview_moveto(1.0)
             self.status_label.config(text=f"{destination}: {backup_name}")
+
+            # Update progress bar if caller provided counts. Cap at 99%
+            # so the user sees the bar tick forward during the run — the
+            # 100% state is reserved for ``set_complete`` which also
+            # flips the status label to the final summary.
+            if total > 0 and checked > 0:
+                pct = min(99, int(checked * 100 / total))
+                self.progress_bar["value"] = pct
+                self.percent_label.config(text=f"{pct}%")
 
     def clear(self) -> None:
         """Reset the tab for a new verification run."""

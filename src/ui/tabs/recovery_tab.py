@@ -924,15 +924,31 @@ class RecoveryTab(ScrollableTab):
         self._scan_dot_count = 0
         self._animate_scan()
 
+    # Braille spinner: 10 frames at 100 ms gives a clearly moving glyph
+    # even on low-refresh displays, unlike the old "cycling dots" which
+    # was too subtle to tell apart from a frozen UI.
+    _SPINNER_FRAMES = (
+        "\u280b",
+        "\u2819",
+        "\u2839",
+        "\u2838",
+        "\u283c",
+        "\u2834",
+        "\u2826",
+        "\u2827",
+        "\u2807",
+        "\u280f",
+    )
+
     def _animate_scan(self) -> None:
-        """Animate the scan label with cycling dots."""
-        self._scan_dot_count = (self._scan_dot_count % 3) + 1
-        dots = "." * self._scan_dot_count
-        text = f"\u23f3 {self._scan_base_text}{dots}"
+        """Animate the scan label with a visible braille spinner."""
+        self._scan_dot_count = (self._scan_dot_count + 1) % len(self._SPINNER_FRAMES)
+        frame = self._SPINNER_FRAMES[self._scan_dot_count]
+        text = f"{frame} {self._scan_base_text}..."
         if self._scan_extra:
             text += f" {self._scan_extra}"
         self._scan_label.config(text=text, foreground=Colors.WARNING)
-        self._scan_animation_id = self.after(500, self._animate_scan)
+        self._scan_animation_id = self.after(100, self._animate_scan)
 
     def _update_scan_animation(self, base_text: str, extra: str = "") -> None:
         """Update scan animation text from main thread.
@@ -966,14 +982,21 @@ class RecoveryTab(ScrollableTab):
         self._animate_download()
 
     def _animate_download(self) -> None:
-        """Cycle dots on the status label."""
-        self._dl_dot_count = (self._dl_dot_count % 3) + 1
-        dots = "." * self._dl_dot_count
+        """Animate the status label with a visible braille spinner.
+
+        Same frames and interval as the scan animation so the user sees
+        a consistent "something is happening" indicator throughout. The
+        previous three-dots-every-500-ms was too subtle — several users
+        reported "I don't know if it's working" when an SFTP download
+        pulled several thousand small files.
+        """
+        self._dl_dot_count = (self._dl_dot_count + 1) % len(self._SPINNER_FRAMES)
+        frame = self._SPINNER_FRAMES[self._dl_dot_count]
         self.status_label.config(
-            text=f"{self._dl_base_text}{dots}",
+            text=f"{frame} {self._dl_base_text}...",
             foreground=Colors.WARNING,
         )
-        self._dl_animation_id = self.after(500, self._animate_download)
+        self._dl_animation_id = self.after(100, self._animate_download)
 
     def _stop_download_animation(self) -> None:
         """Stop the download animation."""
@@ -1018,6 +1041,12 @@ class RecoveryTab(ScrollableTab):
             after=self._source_frame,
         )
         self._update_post_source_sections()
+        # The "List available backups" button sits at the bottom of
+        # section 1. Without this scroll the freshly revealed selection
+        # tree lands below the fold and the user thinks nothing happened.
+        # Defer by 1 event loop tick so geometry managers finish laying
+        # out the newly packed frame before we ask for coordinates.
+        self.after_idle(lambda: self.scroll_to_widget(self._list_frame))
 
     def _on_list_error(self, error: str) -> None:
         """Handle listing error.
@@ -1039,6 +1068,9 @@ class RecoveryTab(ScrollableTab):
         )
         self._hide_post_source_sections()
         self._selection_summary.config(text="", foreground=Colors.TEXT_SECONDARY)
+        # Scroll the error banner into view too — silently failing below
+        # the fold would be worse than the original no-feedback problem.
+        self.after_idle(lambda: self.scroll_to_widget(self._list_frame))
 
     def _populate_tree(self, grouped: bool = False) -> None:
         """Populate the treeview with listed backups.

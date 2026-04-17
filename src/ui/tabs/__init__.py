@@ -69,6 +69,28 @@ class ScrollableTab(ttk.Frame):
         """Scroll the canvas back to the top."""
         self._canvas.yview_moveto(0)
 
+    def scroll_to_widget(self, widget: tk.Widget) -> None:
+        """Scroll the canvas so ``widget`` lands near the top of the view.
+
+        Useful when a section is revealed or populated asynchronously —
+        without scrolling, the user may not notice that new content has
+        appeared below a tall sibling section.
+
+        The inner frame's scrollregion has to be up to date before we
+        compute offsets, so we run one ``update_idletasks`` to flush
+        any pending geometry work.
+        """
+        self._canvas.update_idletasks()
+        bbox = self._canvas.bbox("all")
+        if not bbox:
+            return
+        total_height = bbox[3] - bbox[1]
+        if total_height <= 0:
+            return
+        # Widget position in the inner frame (inner frame is at 0,0 of canvas).
+        target_y = widget.winfo_y()
+        self._canvas.yview_moveto(max(0.0, target_y / total_height))
+
     def _disable_combobox_wheel(self, widget: tk.Widget) -> None:
         """Prevent all Combobox descendants from capturing mousewheel.
 

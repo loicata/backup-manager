@@ -1402,6 +1402,14 @@ class BackupManagerApp:
 
         self.config_manager.save_profile(profile)
 
+        # Immediate user feedback BEFORE the secondary work (registry
+        # write + profile-list rebuild) — those take 100-300 ms on a
+        # laptop and the user reads the popup as "the click did nothing"
+        # when they happen first. The data is safely on disk at this
+        # point, so the popup is truthful.
+        if not silent:
+            messagebox.showinfo("Saved", f"Profile '{profile.name}' saved.")
+
         # Apply auto-start setting
         if general["autostart"]:
             show_window = not general["autostart_minimized"]
@@ -1414,8 +1422,6 @@ class BackupManagerApp:
         # alert (e.g. a mirror that the user just deleted).  Drop the
         # stale alert rather than leaving it visible over the tabs.
         self._hide_target_alert()
-        if not silent:
-            messagebox.showinfo("Saved", f"Profile '{profile.name}' saved.")
         return True
 
     @staticmethod

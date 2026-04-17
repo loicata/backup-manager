@@ -729,7 +729,15 @@ class SFTPStorage(StorageBackend):
 
     @with_retry(max_retries=2, base_delay=1.0)
     def list_backups(self) -> list[dict]:
-        """List backups in the remote directory."""
+        """List backups in the remote directory.
+
+        Directory backups report their recursive byte count via a
+        single ``du -sb`` exec call so the UI shows a truthful size
+        instead of the inode's own 4 KB block. If ``du`` is not
+        available on the remote host or the exec channel fails we
+        fall back to the inode size — better to show something small
+        than to abort the whole listing.
+        """
         transport = self._get_transport()
         is_persistent = transport is self._persistent_transport
         try:
@@ -746,12 +754,19 @@ class SFTPStorage(StorageBackend):
                     # Skip partial archives left by interrupted writes
                     if entry.filename.endswith(".partial"):
                         continue
+                    is_dir = stat.S_ISDIR(entry.st_mode) if entry.st_mode else False
+                    size = entry.st_size or 0
+                    if is_dir:
+                        remote_path = self._join_remote(entry.filename)
+                        computed = self._remote_dir_size(transport, remote_path)
+                        if computed is not None:
+                            size = computed
                     backups.append(
                         {
                             "name": entry.filename,
-                            "size": entry.st_size or 0,
+                            "size": size,
                             "modified": entry.st_mtime or 0,
-                            "is_dir": stat.S_ISDIR(entry.st_mode) if entry.st_mode else False,
+                            "is_dir": is_dir,
                             "encrypted": ".wbenc" in entry.filename.lower(),
                         }
                     )
@@ -761,6 +776,73 @@ class SFTPStorage(StorageBackend):
         finally:
             if not is_persistent:
                 transport.close()
+
+    def _remote_file_count(self, transport, remote_path: str) -> int:
+        """Count regular files under ``remote_path`` via ``find | wc -l``.
+
+        Used to drive the "N/total files" counter in the restore UI.
+        Returns 0 on any failure so the caller can still show the
+        counter for the N part without a meaningful total — better
+        than no feedback at all while the spinner runs.
+        """
+        import paramiko
+
+        escaped = _shell_escape(remote_path)
+        try:
+            channel = transport.open_session()
+            try:
+                channel.exec_command(  # nosec B601
+                    f"find {escaped} -type f | wc -l"
+                )
+                out = b""
+                while True:
+                    chunk = channel.recv(4096)
+                    if not chunk:
+                        break
+                    out += chunk
+                exit_status = channel.recv_exit_status()
+                if exit_status != 0:
+                    return 0
+                text = out.decode("utf-8", errors="replace").strip()
+                return int(text) if text else 0
+            finally:
+                channel.close()
+        except (paramiko.SSHException, OSError, ValueError):
+            return 0
+
+    def _remote_dir_size(self, transport, remote_path: str) -> int | None:
+        """Return the recursive byte count of ``remote_path`` via ``du -sb``.
+
+        Returns ``None`` if the remote host does not have ``du`` or the
+        exec channel fails (restricted shells, Windows SSH, etc.). The
+        caller is expected to fall back to the inode size on ``None``.
+        """
+        import paramiko
+
+        escaped = _shell_escape(remote_path)
+        try:
+            channel = transport.open_session()
+            try:
+                channel.exec_command(f"du -sb {escaped}")  # nosec B601
+                # Read until EOF — ``du -sb`` output is tiny (one line).
+                out = b""
+                while True:
+                    chunk = channel.recv(4096)
+                    if not chunk:
+                        break
+                    out += chunk
+                exit_status = channel.recv_exit_status()
+                if exit_status != 0:
+                    return None
+                # Format: "<bytes>\t<path>\n"
+                first = out.decode("utf-8", errors="replace").split()
+                if not first:
+                    return None
+                return int(first[0])
+            finally:
+                channel.close()
+        except (paramiko.SSHException, OSError, ValueError, IndexError):
+            return None
 
     @with_retry(max_retries=2, base_delay=1.0)
     def delete_backup(self, remote_name: str) -> None:
@@ -1175,30 +1257,33 @@ class SFTPStorage(StorageBackend):
             if not is_persistent:
                 transport.close()
 
-    def download_backup(self, remote_name: str, local_dir: Path) -> Path:
+    def download_backup(
+        self,
+        remote_name: str,
+        local_dir: Path,
+        progress_callback=None,
+    ) -> Path:
         """Download a backup from SFTP to a local directory.
 
-        If the destination already exists it is removed first so that
-        a re-download always starts from a clean state.
+        Handles both layouts: an unencrypted backup is stored as a
+        directory tree on the server, while an encrypted one is a single
+        ``.tar.wbenc`` file. The previous implementation always treated
+        the target as a directory and called ``listdir_attr`` on it,
+        which raises ``FileNotFoundError`` for file backups — the user
+        could never restore an encrypted archive.
+
+        Args:
+            remote_name: Name of the backup on the server.
+            local_dir: Local directory to download into.
+            progress_callback: Optional ``callback(current, total,
+                filename)`` invoked after each file of a directory
+                backup is transferred. Ignored for encrypted archives
+                which are a single ``sftp.get`` call.
         """
         import shutil
+        import stat as stat_module
 
         local_dir.mkdir(parents=True, exist_ok=True)
-        dst = local_dir / remote_name
-        if dst.exists():
-            # Fail loudly instead of silently merging old + new files
-            # (ignore_errors=True used to mask permission denials and
-            # locked files, producing a restore with stale residue that
-            # was almost impossible to debug).
-            try:
-                shutil.rmtree(dst)
-            except OSError as e:
-                raise OSError(
-                    f"Cannot clear existing download destination {dst}: "
-                    f"{e}. Close any application using files inside it "
-                    f"and retry."
-                ) from e
-        dst.mkdir(parents=True, exist_ok=True)
 
         transport = self._get_transport()
         is_persistent = transport is self._persistent_transport
@@ -1206,9 +1291,63 @@ class SFTPStorage(StorageBackend):
             sftp = self._get_sftp(transport)
             try:
                 remote_base = self._join_remote(remote_name)
-                self._sftp_download_dir(sftp, remote_base, dst)
 
-                # Download .wbverify manifest if present
+                # Probe: is the remote a regular file or a directory?
+                # Raise a clean message if the backup has been deleted
+                # on the server between listing and download.
+                try:
+                    remote_attr = sftp.stat(remote_base)
+                except FileNotFoundError as e:
+                    raise FileNotFoundError(
+                        f"Backup '{remote_name}' not found at {remote_base}"
+                    ) from e
+
+                is_file = stat_module.S_ISREG(remote_attr.st_mode)
+                dst = local_dir / remote_name
+
+                if is_file:
+                    # Encrypted archive (.tar.wbenc) — single-file download.
+                    # Clear any stale local path: a previous restore of
+                    # the unencrypted variant may have left a folder with
+                    # the same name that would make sftp.get() fail.
+                    if dst.exists():
+                        if dst.is_dir():
+                            shutil.rmtree(dst)
+                        else:
+                            dst.unlink()
+                    sftp.get(remote_base, str(dst))
+                    logger.info("Downloaded encrypted archive: %s", remote_name)
+                    return dst
+
+                # Directory backup (unencrypted file tree).
+                if dst.exists():
+                    try:
+                        shutil.rmtree(dst)
+                    except OSError as e:
+                        raise OSError(
+                            f"Cannot clear existing download destination {dst}: "
+                            f"{e}. Close any application using files inside it "
+                            f"and retry."
+                        ) from e
+                dst.mkdir(parents=True, exist_ok=True)
+                total_files = self._remote_file_count(transport, remote_base)
+                counter = {"n": 0}
+
+                def _per_file(filename: str) -> None:
+                    counter["n"] += 1
+                    if progress_callback is not None:
+                        progress_callback(counter["n"], total_files, filename)
+
+                self._sftp_download_dir(
+                    sftp,
+                    remote_base,
+                    dst,
+                    progress_callback=_per_file if progress_callback else None,
+                )
+
+                # Download .wbverify manifest if present (only meaningful
+                # for directory backups — encrypted archives embed their
+                # manifest inside the tar).
                 manifest_remote = self._join_remote(f"{remote_name}.wbverify")
                 manifest_local = local_dir / f"{remote_name}.wbverify"
                 try:
@@ -1216,20 +1355,29 @@ class SFTPStorage(StorageBackend):
                     logger.info("Downloaded manifest: %s.wbverify", remote_name)
                 except FileNotFoundError:
                     pass  # Older backups may not have manifests
+                return dst
             finally:
                 sftp.close()
         finally:
             if not is_persistent:
                 transport.close()
-        return dst
 
-    def _sftp_download_dir(self, sftp, remote_dir: str, local_dir: Path):
+    def _sftp_download_dir(
+        self,
+        sftp,
+        remote_dir: str,
+        local_dir: Path,
+        progress_callback=None,
+    ):
         """Recursively download a remote directory via SFTP.
 
         Args:
             sftp: Open SFTP client.
             remote_dir: Remote directory path.
             local_dir: Local destination directory.
+            progress_callback: Optional ``callback(filename)`` invoked
+                once per file AFTER its transfer completes. Used by the
+                UI to update a "N/total files" counter in real time.
         """
         import stat as stat_module
 
@@ -1238,10 +1386,14 @@ class SFTPStorage(StorageBackend):
             local_path = local_dir / entry.filename
             if stat_module.S_ISDIR(entry.st_mode):
                 long_path_mkdir(local_path)
-                self._sftp_download_dir(sftp, remote_path, local_path)
+                self._sftp_download_dir(
+                    sftp, remote_path, local_path, progress_callback=progress_callback
+                )
             else:
                 long_path_mkdir(local_path.parent)
                 sftp.get(remote_path, long_path_str(local_path))
+                if progress_callback is not None:
+                    progress_callback(entry.filename)
 
     def _join_remote(self, name: str) -> str:
         """Join remote base path with a name."""

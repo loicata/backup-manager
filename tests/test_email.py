@@ -273,7 +273,12 @@ class TestSmtpEdgeCases:
 
     @patch("src.notifications.email_notifier.smtplib.SMTP")
     def test_smtp_recipient_refused(self, mock_smtp_class: MagicMock) -> None:
-        """Recipient refused (550 error) returns failure."""
+        """Recipient refused must surface a distinct, actionable message.
+
+        Previously this was swallowed into the generic "Email error"
+        message and the operator never learned their notifications
+        had stopped being delivered.
+        """
         mock_smtp = MagicMock()
         mock_smtp.sendmail.side_effect = smtplib.SMTPRecipientsRefused(
             {"bad@test.com": (550, b"User unknown")}
@@ -284,7 +289,11 @@ class TestSmtpEdgeCases:
         config = self._make_config(to_address="bad@test.com")
         ok, msg = send_backup_report(config, "Test", True, "OK")
         assert ok is False
-        assert "SMTPRecipientsRefused" in msg
+        # The message must clearly identify this as a recipient issue
+        # with the refused address and tell the user what to do.
+        assert "Recipients refused" in msg
+        assert "bad@test.com" in msg
+        assert "update" in msg.lower() or "not being delivered" in msg.lower()
 
     @patch("src.notifications.email_notifier.smtplib.SMTP")
     def test_smtp_data_error(self, mock_smtp_class: MagicMock) -> None:

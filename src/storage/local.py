@@ -3,6 +3,7 @@
 Supports flat directory copy and file-by-file streaming.
 """
 
+import contextlib
 import logging
 import os
 import shutil
@@ -15,7 +16,11 @@ from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-CONNECTION_TIMEOUT = 10  # seconds
+# 20s: covers USB drive cold-wake + antivirus scan on first write.
+# Previously 10s — a sleeping USB plus a virus scan on the test file
+# routinely pushed past that budget, producing spurious
+# "Destinations unavailable" alerts on drives that were actually fine.
+CONNECTION_TIMEOUT = 20  # seconds
 
 # Windows system folders that must never be treated as backups
 SYSTEM_FOLDERS = frozenset(
@@ -64,7 +69,11 @@ class LocalStorage(StorageBackend):
 
         if local_path.is_dir():
             if target.exists():
-                shutil.rmtree(target)
+                # Use the same read-only-forcing onerror handler as
+                # delete_backup; a previous backup with read-only
+                # attributes would otherwise raise PermissionError
+                # and abort the new upload.
+                shutil.rmtree(target, onerror=_force_remove_readonly)
             shutil.copytree(local_path, target)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -76,23 +85,41 @@ class LocalStorage(StorageBackend):
         logger.info("Uploaded %s -> %s", local_path.name, target)
 
     def upload_file(self, fileobj: BinaryIO, remote_path: str, size: int = 0) -> None:
-        """Write a file-like object to the destination."""
+        """Write a file-like object to the destination.
+
+        Writes to ``<target>.partial`` first and atomically renames on
+        success. Without this, a crash mid-write leaves a corrupted
+        file with the final name that ``list_backups`` surfaces as a
+        valid archive.
+        """
         target = self._dest / remote_path
         target.parent.mkdir(parents=True, exist_ok=True)
+
+        partial = target.with_suffix(target.suffix + ".partial")
 
         reader = self._get_throttled_reader(fileobj)
         bytes_written = 0
         chunk_size = 1024 * 1024  # 1 MB
 
-        with open(target, "wb") as out:
-            while True:
-                chunk = reader.read(chunk_size)
-                if not chunk:
-                    break
-                out.write(chunk)
-                bytes_written += len(chunk)
-                if self._progress_callback and size > 0:
-                    self._progress_callback(bytes_written, size)
+        try:
+            with open(partial, "wb") as out:
+                while True:
+                    chunk = reader.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    bytes_written += len(chunk)
+                    if self._progress_callback and size > 0:
+                        self._progress_callback(bytes_written, size)
+            # Atomic rename — the final name only appears on success.
+            os.replace(partial, target)
+        except BaseException:
+            # Best-effort cleanup of the partial file on any failure
+            # (exception, cancel). Swallow errors here so we don't
+            # mask the original exception.
+            with contextlib.suppress(OSError):
+                partial.unlink(missing_ok=True)
+            raise
 
     def list_backups(self) -> list[dict]:
         """List backups in the destination directory."""
@@ -148,19 +175,72 @@ class LocalStorage(StorageBackend):
             logger.info("Deleted manifest: %s.wbverify", remote_name)
 
     def test_connection(self) -> tuple[bool, str]:
-        """Check if the destination is accessible and writable."""
+        """Check if the destination is accessible and writable.
+
+        Designed to be tolerant of USB drives in power-save:
+        - Retries ``exists()`` a few times with back-off to let the
+          drive spin up.
+        - Pokes the drive root (``listdir``) between retries to force
+          Windows to mount a volume it has put to sleep.
+        - Separates "drive missing" from "permission denied" from
+          "write failed" so the user sees an actionable message rather
+          than a generic "Destinations unavailable".
+        """
         result: list = [False, "Connection timeout"]
+
+        def _wait_for_drive_online() -> bool:
+            """Return True as soon as ``self._dest`` can be stat'd."""
+            import os as _os
+            import time as _time
+
+            # Cheap initial check — responsive drives return instantly.
+            if self._dest.exists():
+                return True
+            # Drive letter root — listing it triggers Windows to bring
+            # the volume back online from power-save.
+            root = None
+            s = str(self._dest)
+            if len(s) >= 2 and s[1] == ":":
+                root = f"{s[0]}:\\"
+            for attempt, delay in enumerate((0.3, 0.5, 1.0, 2.0, 4.0)):
+                _time.sleep(delay)
+                if root and attempt == 1:
+                    try:
+                        _os.listdir(root)
+                    except OSError:
+                        pass
+                if self._dest.exists():
+                    return True
+            return False
 
         def _test() -> None:
             try:
-                if not self._dest.exists():
+                if not _wait_for_drive_online():
                     result[0] = False
-                    result[1] = f"Path does not exist: {self._dest}"
+                    result[1] = (
+                        f"Drive not ready after wake-up retries: {self._dest}. "
+                        f"Reconnect the drive or wait a few seconds and retry."
+                    )
                     return
 
                 test_file = self._dest / ".backup_manager_test"
-                test_file.write_text("test", encoding="utf-8")
-                test_file.unlink()
+                try:
+                    test_file.write_text("test", encoding="utf-8")
+                    test_file.unlink()
+                except PermissionError as pe:
+                    result[0] = False
+                    result[1] = (
+                        f"Destination is read-only or locked "
+                        f"(permission denied on {self._dest}): {pe}"
+                    )
+                    return
+                except OSError as we:
+                    result[0] = False
+                    result[1] = (
+                        f"Destination present but write failed "
+                        f"({self._dest}): {we}"
+                    )
+                    return
 
                 free = self.get_free_space()
                 if free is not None:
@@ -170,28 +250,42 @@ class LocalStorage(StorageBackend):
                 else:
                     result[0] = True
                     result[1] = "Connected"
-            except PermissionError:
-                result[0] = False
-                result[1] = f"Permission denied: {self._dest}"
             except Exception as e:
                 result[0] = False
-                result[1] = f"Error: {e}"
+                result[1] = f"Unexpected error on {self._dest}: {type(e).__name__}: {e}"
 
         thread = threading.Thread(target=_test, daemon=True)
         thread.start()
         thread.join(timeout=CONNECTION_TIMEOUT)
 
         if thread.is_alive():
-            return False, f"Connection timeout after {CONNECTION_TIMEOUT}s"
+            return False, (
+                f"Connection test timed out after {CONNECTION_TIMEOUT}s. "
+                f"The drive may be very slow or unresponsive; try unplugging "
+                f"and reconnecting it."
+            )
 
         return result[0], result[1]
 
     def get_free_space(self) -> int | None:
-        """Get available disk space in bytes."""
+        """Get available disk space in bytes.
+
+        Returns None when the destination is unreachable (drive
+        unplugged, permission denied, etc.) and logs the reason so
+        callers don't silently assume "unlimited space" and bypass
+        rotation cleanup.
+        """
         try:
             usage = shutil.disk_usage(self._dest)
             return usage.free
-        except Exception:
+        except FileNotFoundError:
+            logger.warning("get_free_space: destination missing: %s", self._dest)
+            return None
+        except PermissionError as e:
+            logger.warning("get_free_space: permission denied on %s: %s", self._dest, e)
+            return None
+        except OSError as e:
+            logger.warning("get_free_space: OS error on %s: %s", self._dest, e)
             return None
 
     def get_file_size(self, remote_name: str) -> int | None:

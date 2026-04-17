@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL = 30  # seconds
 MAX_JOURNAL_ENTRIES = 500
+# Stop auto-triggering "crash recovery" after this many consecutive
+# failures. Beyond that the user must explicitly run the profile to
+# acknowledge the problem (NAS offline, credentials expired, etc.).
+MAX_CRASH_RECOVERY_ATTEMPTS = 3
 
 
 @dataclass
@@ -239,6 +243,12 @@ class InAppScheduler:
         self._running = False
         self._last_check_time = time.monotonic()
         self.skip_startup_check = False
+        # Track profiles currently being backed up so a long-running
+        # backup cannot be re-triggered by a "sleep detected" pass
+        # (long backup > 3× CHECK_INTERVAL looks like an OS sleep).
+        # Guarded by ``_in_progress_lock`` for thread-safe add/discard.
+        self._profile_in_progress: set[str] = set()
+        self._in_progress_lock = threading.Lock()
 
     @property
     def journal(self) -> ScheduleJournal:
@@ -253,6 +263,22 @@ class InAppScheduler:
         in the same atomicity scheme as the scheduler daemon thread.
         """
         return self._op_lock
+
+    def mark_triggered_now(self, profile_id: str, dt: datetime | None = None) -> None:
+        """Record an out-of-band "triggered now" event for a profile.
+
+        Lets the UI bump a profile's ``last_trigger`` when the user
+        just ran it manually or just went through the wizard — so the
+        scheduler's next ``is_due`` check does not fire again
+        immediately. Callers were previously poking
+        ``scheduler._state.set_last_trigger`` directly, which is a
+        private attribute that can change shape between versions.
+
+        Args:
+            profile_id: The profile that was just triggered.
+            dt: Timestamp of the trigger. Defaults to ``datetime.now()``.
+        """
+        self._state.set_last_trigger(profile_id, dt or datetime.now())
 
     def start(self) -> None:
         if self._running:
@@ -309,6 +335,19 @@ class InAppScheduler:
             if profile.schedule.frequency == ScheduleFrequency.MANUAL:
                 continue
 
+            # A backup that is still running from before the sleep
+            # detection must not be re-triggered — double-triggers
+            # on the same profile waste work and trip the profile
+            # lock. The profile_lock catches it as a safety net but
+            # the cleaner fix is to never issue the second trigger.
+            with self._in_progress_lock:
+                if profile.id in self._profile_in_progress:
+                    logger.info(
+                        "Skipping missed-backup trigger for '%s' " "(already running)",
+                        profile.name,
+                    )
+                    continue
+
             last = self._state.get_last_trigger(profile.id)
             last_str = last.isoformat() if last else "never"
             logger.info(
@@ -319,11 +358,48 @@ class InAppScheduler:
                 last_str,
             )
 
-            if self._is_due(profile, now):
-                logger.info(
-                    "Missed backup detected on startup for '%s' — triggering",
+            # Force a catch-up when the previous run did not complete
+            # (process crash, hard power-off mid-backup) even if the
+            # current schedule window would normally suppress it.
+            # Circuit breaker: after MAX_CRASH_RECOVERY_ATTEMPTS
+            # consecutive failures we stop auto-retrying to avoid a
+            # boot-loop on broken storage. The user can always re-run
+            # manually from the UI.
+            crash_recovery_due = (
+                not profile.last_backup_completed
+                and bool(profile.incomplete_backup_name)
+                and profile.crash_recovery_attempts < MAX_CRASH_RECOVERY_ATTEMPTS
+            )
+            if (
+                not profile.last_backup_completed
+                and profile.crash_recovery_attempts >= MAX_CRASH_RECOVERY_ATTEMPTS
+            ):
+                logger.warning(
+                    "Crash recovery circuit breaker TRIPPED for '%s' "
+                    "after %d attempts — manual intervention required",
                     profile.name,
+                    profile.crash_recovery_attempts,
                 )
+
+            if crash_recovery_due or self._is_due(profile, now):
+                reason = "crash recovery" if crash_recovery_due else "missed schedule"
+                logger.info(
+                    "Missed backup detected on startup for '%s' (%s) — triggering",
+                    profile.name,
+                    reason,
+                )
+                if crash_recovery_due:
+                    # Increment BEFORE the trigger so a crash during
+                    # the trigger still bumps the counter on disk.
+                    profile.crash_recovery_attempts += 1
+                    if self._config_manager is not None:
+                        try:
+                            self._config_manager.save_profile(profile)
+                        except Exception as exc:
+                            logger.warning(
+                                "Could not persist crash_recovery_attempts: %s",
+                                exc,
+                            )
                 self._trigger_backup(profile, now, trigger="missed_recovery")
 
     def _check_schedules(self) -> None:
@@ -344,6 +420,12 @@ class InAppScheduler:
                 continue
             if profile.schedule.frequency == ScheduleFrequency.MANUAL:
                 continue
+            # Skip profiles that are already running — avoids
+            # double-triggering the same profile after a long backup
+            # was interpreted as an OS sleep.
+            with self._in_progress_lock:
+                if profile.id in self._profile_in_progress:
+                    continue
             if self._is_due(profile, now):
                 self._trigger_backup(profile, now)
 
@@ -418,6 +500,11 @@ class InAppScheduler:
                 )
             )
 
+        # Mark as in-progress BEFORE the callback so a concurrent
+        # "sleep detected" pass cannot re-trigger the same profile.
+        with self._in_progress_lock:
+            self._profile_in_progress.add(profile.id)
+
         # Callback runs OUTSIDE the lock (can take minutes)
         try:
             self._backup_callback(profile)
@@ -428,17 +515,36 @@ class InAppScheduler:
                 )
             logger.info("Scheduled backup succeeded: %s", profile.name)
         except Exception as e:
-            logger.exception("Scheduled backup failed: %s", profile.name)
+            # Do NOT retry a ProfileLockError: another run (UI "Run now",
+            # another scheduler instance) is already handling this
+            # profile, so our trigger has effectively been satisfied
+            # by the concurrent run. Retrying would produce a SECOND
+            # backup for the same schedule window once the other run
+            # releases the lock — wasteful and misleading in the
+            # journal.
+            from src.core.profile_lock import ProfileLockError
+
+            is_concurrent = isinstance(e, ProfileLockError)
+
+            level = logger.info if is_concurrent else logger.exception
+            level(
+                "Scheduled backup %s: %s",
+                "skipped (concurrent)" if is_concurrent else "failed",
+                profile.name,
+            )
             with self._op_lock:
                 self._journal.update_last(
-                    status="failed",
+                    status="skipped" if is_concurrent else "failed",
                     detail=f"{type(e).__name__}: {e}",
                     timestamp=datetime.now().isoformat(),
                 )
 
-            # Retry logic
-            if profile.schedule.retry_enabled:
+            # Retry logic — skip for concurrent-run rejections
+            if profile.schedule.retry_enabled and not is_concurrent:
                 self._retry_backup(profile, trigger)
+        finally:
+            with self._in_progress_lock:
+                self._profile_in_progress.discard(profile.id)
 
     def _retry_backup(self, profile: BackupProfile, trigger: str) -> None:
         """Retry a failed backup using configured delay intervals.
@@ -596,13 +702,50 @@ class InAppScheduler:
                 )
 
     def _check_missed_backups(self, now: datetime) -> None:
+        """Check for missed backups after a wake-from-sleep event.
+
+        Called from ``_check_schedules`` when the monotonic clock
+        shows a gap larger than ``CHECK_INTERVAL * 3``.
+        Two guards protect against spurious triggers:
+
+        1. ``_profile_in_progress`` — skips profiles that are still
+           running from before the sleep detection (a backup that
+           takes longer than 3× CHECK_INTERVAL itself looks like a
+           system sleep to this code).
+        2. ``crash_recovery_due`` — forces a trigger when the last
+           run did not complete even if the schedule window would
+           normally suppress it (process crash mid-backup).
+        """
         for profile in self._get_profiles():
             if not profile.active:
                 continue
             if not profile.schedule.enabled:
                 continue
-            if self._is_due(profile, now):
-                logger.info("Missed backup detected: %s", profile.name)
+            with self._in_progress_lock:
+                if profile.id in self._profile_in_progress:
+                    logger.info(
+                        "Skipping missed-backup trigger for '%s' " "(already running)",
+                        profile.name,
+                    )
+                    continue
+            crash_recovery_due = (
+                not profile.last_backup_completed
+                and bool(profile.incomplete_backup_name)
+                and profile.crash_recovery_attempts < MAX_CRASH_RECOVERY_ATTEMPTS
+            )
+            if crash_recovery_due or self._is_due(profile, now):
+                reason = "crash recovery" if crash_recovery_due else "missed schedule"
+                logger.info("Missed backup detected (%s): %s", reason, profile.name)
+                if crash_recovery_due:
+                    profile.crash_recovery_attempts += 1
+                    if self._config_manager is not None:
+                        try:
+                            self._config_manager.save_profile(profile)
+                        except Exception as exc:
+                            logger.warning(
+                                "Could not persist crash_recovery_attempts: %s",
+                                exc,
+                            )
                 self._trigger_backup(profile, now)
 
     def get_next_run_info(self, profile: BackupProfile) -> str:

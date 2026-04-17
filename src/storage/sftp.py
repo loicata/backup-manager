@@ -57,7 +57,13 @@ def _validate_remote_name(name: str) -> str:
 
     # Reject shell metacharacters that could allow command injection
     # even through single-quote escaping (e.g. backticks, $())
-    _DANGEROUS_CHARS = set("`$;&|><!")
+    # Also reject backslash (POSIX servers don't interpret Windows paths),
+    # newline/CR which break sha256sum line-by-line parsing,
+    # and the Unicode LINE SEPARATOR (U+2028) / PARAGRAPH SEPARATOR
+    # (U+2029) which Python's ``str.splitlines()`` treats as line
+    # breaks — a filename containing U+2028 would desynchronise the
+    # parsing of ``sha256sum`` or ``find -printf`` output.
+    _DANGEROUS_CHARS = set("`$;&|><!\\\n\r\u2028\u2029")
     for char in _DANGEROUS_CHARS:
         if char in name:
             raise ValueError(f"Remote name contains dangerous character: {char!r}")
@@ -374,7 +380,6 @@ class SFTPStorage(StorageBackend):
 
     # --- Upload methods ---
 
-    @with_retry(max_retries=3, base_delay=2.0)
     def _should_close_transport(self, transport) -> bool:
         """Check if a transport should be closed after use.
 
@@ -685,8 +690,20 @@ class SFTPStorage(StorageBackend):
         """
         if remote_dir in self._created_dirs:
             return
+        import paramiko
+
         parts = PurePosixPath(remote_dir).parts
         current = ""
+        # paramiko's SFTPError / SSHException do NOT inherit from OSError,
+        # so a plain ``except OSError`` would miss protocol-level failures
+        # (broken channel, malformed reply, unusual non-OpenSSH servers).
+        # Include both explicitly so the stat-after-mkdir race vs
+        # permission check still runs in those cases.
+        _MKDIR_EXCEPTIONS = (
+            OSError,
+            paramiko.SFTPError,
+            paramiko.SSHException,
+        )
         for part in parts:
             current = f"{current}/{part}" if current else f"/{part}"
             if current in self._created_dirs:
@@ -694,8 +711,17 @@ class SFTPStorage(StorageBackend):
             try:
                 sftp.stat(current)
             except FileNotFoundError:
-                with contextlib.suppress(OSError):  # Race condition or already exists
+                try:
                     sftp.mkdir(current)
+                except _MKDIR_EXCEPTIONS:
+                    # Could be a race (another client just created it)
+                    # or a real error (permission denied, disk full,
+                    # quota exceeded). Re-stat to distinguish: if the
+                    # directory now exists, treat mkdir as a benign
+                    # race; otherwise re-raise so the caller sees the
+                    # real failure instead of a cryptic "No such file"
+                    # at the next upload.
+                    sftp.stat(current)
             self._created_dirs.add(current)
         self._created_dirs.add(remote_dir)
 

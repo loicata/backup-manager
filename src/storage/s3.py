@@ -6,6 +6,7 @@ Supported providers:
 """
 
 import logging
+import threading
 from pathlib import Path
 from typing import BinaryIO
 
@@ -328,28 +329,91 @@ class S3Storage(StorageBackend):
             raise FileNotFoundError(f"Backup not found: {remote_name}")
 
         # Delete in batches of 1000
+        failed_deletes: list[dict] = []
         for i in range(0, len(objects_to_delete), 1000):
             batch = objects_to_delete[i : i + 1000]
-            client.delete_objects(
+            response = client.delete_objects(
                 Bucket=self._bucket,
                 Delete={"Objects": batch},
             )
+            # S3 returns HTTP 200 even when individual objects fail to
+            # delete (Object Lock retention, legal hold, permissions).
+            # Without inspecting ``Errors`` the caller wrongly assumes
+            # the backup is gone while it's still billed and still
+            # counts as "has_full" in rotation logic.
+            batch_errors = response.get("Errors", []) or []
+            if batch_errors:
+                failed_deletes.extend(batch_errors)
 
-        logger.info("Deleted %d objects for backup %s", len(objects_to_delete), remote_name)
+        deleted_count = len(objects_to_delete) - len(failed_deletes)
+        if failed_deletes:
+            first = failed_deletes[0]
+            code = first.get("Code", "Unknown")
+            msg = first.get("Message", "")
+            sample_key = first.get("Key", "")
+            raise OSError(
+                f"Failed to delete {len(failed_deletes)}/{len(objects_to_delete)} "
+                f"objects for backup {remote_name!r}: first failure — "
+                f"{code} on {sample_key!r}: {msg}"
+            )
+
+        logger.info("Deleted %d objects for backup %s", deleted_count, remote_name)
 
     def test_connection(self) -> tuple[bool, str]:
-        """Test S3 connection."""
+        """Test S3 connection, read access AND write permission.
+
+        A read-only credential passes head_bucket + list_objects but
+        fails at the first real upload — after potentially 30 minutes
+        of streaming. Probing write at connection time surfaces the
+        problem immediately.
+
+        Under Object Lock COMPLIANCE mode the probe object cannot be
+        deleted until retention expires, so the probe is skipped there
+        to avoid leaving a locked object behind on every click of
+        "Test connection". Write will be indirectly proven by the
+        first real backup.
+        """
         try:
             client = self._get_client()
             client.head_bucket(Bucket=self._bucket)
 
-            # Count objects
+            # Count objects (confirms list permission)
             prefix = f"{self._prefix}/" if self._prefix else ""
             client.list_objects_v2(Bucket=self._bucket, Prefix=prefix, MaxKeys=1)
+
+            # Probe write permission when safe to do so (no Object Lock)
+            if self._retain_until is None:
+                self._probe_write(client, prefix)
 
             return True, f"Connected to {self._bucket} ({self._provider})"
         except Exception as e:
             return False, f"S3 Error: {type(e).__name__}: {e}"
+
+    def _probe_write(self, client, prefix: str) -> None:
+        """Upload and delete a small probe object to confirm write access.
+
+        Raises:
+            Exception: If the bucket rejects the probe (permissions,
+                quota, bucket policy). Surfaces the same way as any
+                S3 error in ``test_connection``.
+        """
+        import uuid
+
+        probe_key = f"{prefix}.backup_manager_probe_{uuid.uuid4().hex[:16]}"
+        try:
+            client.put_object(
+                Bucket=self._bucket,
+                Key=probe_key,
+                Body=b"probe",
+            )
+        finally:
+            # Best-effort delete — if put failed we still try to clean
+            # up in case it partially succeeded. Delete failures on a
+            # non-existent key are harmless.
+            try:
+                client.delete_object(Bucket=self._bucket, Key=probe_key)
+            except Exception as e:
+                logger.debug("Probe cleanup failed (non-fatal): %s", e)
 
     def get_free_space(self) -> int | None:
         """S3 has unlimited space."""
@@ -547,12 +611,23 @@ class S3Storage(StorageBackend):
         return dst
 
     def _make_progress_cb(self, total: int):
-        """Create a progress callback for boto3."""
+        """Create a thread-safe progress callback for boto3.
+
+        boto3's s3transfer worker pool invokes this callback from
+        multiple threads during a multipart upload. A plain
+        ``sent[0] += bytes_amount`` is not atomic under interleaving,
+        which caused occasional backwards jumps in the UI progress
+        bar. A lock serializes increments and the snapshot read so the
+        reported position is monotonically non-decreasing.
+        """
         sent = [0]
+        lock = threading.Lock()
 
         def callback(bytes_amount):
-            sent[0] += bytes_amount
+            with lock:
+                sent[0] += bytes_amount
+                snapshot = sent[0]
             if self._progress_callback and total > 0:
-                self._progress_callback(sent[0], total)
+                self._progress_callback(snapshot, total)
 
         return callback if self._progress_callback else None

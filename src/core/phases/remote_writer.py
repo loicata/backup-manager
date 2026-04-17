@@ -174,11 +174,13 @@ def _build_encrypted_tar(
         Total source bytes written.
     """
     from src.core.phases.local_writer import _add_manifest_to_tar
+    from src.core.phases.manifest import prune_manifest_entries
     from src.security.encryption import EncryptingWriter
 
     total_bytes = sum(f.size for f in files)
     progress_total = max(total_bytes, 1)
     bytes_written = 0
+    skipped: set[str] = set()
 
     enc_writer = EncryptingWriter(dest, password)
     with tarfile.open(fileobj=enc_writer, mode="w|") as tar:
@@ -190,6 +192,7 @@ def _build_encrypted_tar(
                 actual_size = os.path.getsize(src_path)
             except OSError:
                 logger.warning("File vanished, skipping: %s", file_info.relative_path)
+                skipped.add(file_info.relative_path)
                 continue
             info = tarfile.TarInfo(name=file_info.relative_path)
             info.size = actual_size
@@ -202,7 +205,11 @@ def _build_encrypted_tar(
                 filename=file_info.relative_path,
                 phase="upload",
             )
+        # Keep embedded manifest consistent with the archive: drop
+        # entries for files that vanished between manifest build and
+        # write, otherwise post-restore verify reports "missing" forever.
         if integrity_manifest:
+            prune_manifest_entries(integrity_manifest, skipped)
             _add_manifest_to_tar(tar, integrity_manifest)
     enc_writer.close()
     return bytes_written

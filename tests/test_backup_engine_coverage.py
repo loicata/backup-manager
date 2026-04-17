@@ -105,12 +105,11 @@ class TestDiskSpaceChecks:
     def test_check_path_space_insufficient(self, env, profile):
         """Insufficient disk space raises RuntimeError."""
         engine = _engine(env)
-        with patch(
-            "shutil.disk_usage",
-            return_value=MagicMock(free=1024),  # 1 KB free
+        with (
+            patch("shutil.disk_usage", return_value=MagicMock(free=1024)),
+            pytest.raises(RuntimeError, match="Insufficient disk space"),
         ):
-            with pytest.raises(RuntimeError, match="Insufficient disk space"):
-                engine.run_backup(profile)
+            engine.run_backup(profile)
 
     def test_check_path_space_oserror_skipped(self):
         """OSError from disk_usage is silently skipped."""
@@ -399,8 +398,8 @@ class TestCleanupIncomplete:
         profile.incomplete_backup_name = ""
         engine = _engine(env)
 
-        from src.core.phases.base import PipelineContext
         from src.core.backup_result import BackupResult
+        from src.core.phases.base import PipelineContext
 
         ctx = PipelineContext(
             profile=profile,
@@ -421,8 +420,8 @@ class TestCleanupIncomplete:
         profile.incomplete_backup_name = "CovTest_FULL_2026-01-01_120000"
         engine = _engine(env)
 
-        from src.core.phases.base import PipelineContext
         from src.core.backup_result import BackupResult
+        from src.core.phases.base import PipelineContext
 
         ctx = PipelineContext(
             profile=profile,
@@ -454,8 +453,8 @@ class TestPhaseCleanup:
             temp_dir.mkdir()
             (temp_dir / "partial.dat").write_bytes(b"temp data")
 
-            from src.core.phases.base import PipelineContext
             from src.core.backup_result import BackupResult
+            from src.core.phases.base import PipelineContext
 
             ctx = PipelineContext(
                 profile=profile,
@@ -482,8 +481,8 @@ class TestAnyDestinationMissingFull:
         mock_backend.list_backups.return_value = [
             {"name": "CovTest_FULL_2026-01-01_120000"},
         ]
-        from src.core.phases.base import PipelineContext
         from src.core.backup_result import BackupResult
+        from src.core.phases.base import PipelineContext
 
         ctx = PipelineContext(
             profile=profile,
@@ -502,8 +501,8 @@ class TestAnyDestinationMissingFull:
         mock_backend.list_backups.return_value = [
             {"name": "CovTest_DIFF_2026-01-01_120000"},
         ]
-        from src.core.phases.base import PipelineContext
         from src.core.backup_result import BackupResult
+        from src.core.phases.base import PipelineContext
 
         ctx = PipelineContext(
             profile=profile,
@@ -518,8 +517,8 @@ class TestAnyDestinationMissingFull:
     def test_connection_error_skipped(self, env, profile):
         """Connection error during check is silently skipped."""
         engine = _engine(env)
-        from src.core.phases.base import PipelineContext
         from src.core.backup_result import BackupResult
+        from src.core.phases.base import PipelineContext
 
         ctx = PipelineContext(
             profile=profile,

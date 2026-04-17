@@ -100,8 +100,22 @@ def filter_changed_files(
                 changed.append(file_info)
             else:
                 skipped += 1
-        except OSError:
-            changed.append(file_info)  # Can't read = include
+        except OSError as e:
+            # Unreadable at filter time — drop from the changed set so
+            # the downstream integrity-manifest phase (which is
+            # intentionally fail-fast) is not re-attempted on a file
+            # it already cannot hash. Previously this path added the
+            # file to ``changed`` without a hash entry, causing
+            # build_integrity_manifest to crash on the retry.
+            # Without a hash we also cannot tell if it changed, so
+            # the next run's manifest will still reference the old
+            # hash and naturally pick this file up again if it comes
+            # back online.
+            logger.warning(
+                "filter: skipping unreadable file %s: %s",
+                file_info.relative_path,
+                e,
+            )
 
     phase_log.info(f"Filter: {len(changed)} changed, {skipped} unchanged")
     return changed, computed_hashes
@@ -126,6 +140,7 @@ def build_updated_manifest(
     """
     cache = cached_hashes or {}
     manifest = {}
+    skipped = 0
     for file_info in files:
         if cancel_check is not None:
             cancel_check()
@@ -138,6 +153,17 @@ def build_updated_manifest(
                 "size": file_info.size,
                 "mtime": file_info.mtime,
             }
-        except OSError:
-            pass
+        except OSError as e:
+            # File unreadable at this moment — omit it from the updated
+            # manifest so the next run will see it as "new" and retry.
+            # Do not swallow silently: log so operators can investigate
+            # recurring skips (locked files, broken symlinks, etc.).
+            logger.warning(
+                "updated-manifest: skipping unreadable file %s: %s",
+                file_info.relative_path,
+                e,
+            )
+            skipped += 1
+    if skipped:
+        logger.info("updated-manifest: %d file(s) skipped due to read errors", skipped)
     return manifest

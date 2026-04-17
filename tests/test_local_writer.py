@@ -389,6 +389,77 @@ class TestWriteEncryptedTar:
 
 
 # ---------------------------------------------------------------------------
+# Embedded manifest consistency on vanishing files
+# ---------------------------------------------------------------------------
+
+
+class TestVanishingFileManifestSync:
+    """When a file vanishes between manifest build and write, the
+    embedded .wbverify must drop its entry.
+
+    Before the fix the file was silently skipped but the manifest
+    still listed it → post-restore verify reported "missing" forever
+    on an otherwise valid archive.
+    """
+
+    def test_manifest_pruned_for_vanished_file(self, tmp_path: Path) -> None:
+        from src.security.encryption import DecryptingReader
+
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        f1 = src_dir / "a.txt"
+        f2 = src_dir / "b.txt"
+        f1.write_text("aaa", encoding="utf-8")
+        f2.write_text("bbb", encoding="utf-8")
+
+        files = [_make_file_info(f1, "a.txt"), _make_file_info(f2, "b.txt")]
+
+        # Build a manifest that references both files.
+        manifest = {
+            "version": 1,
+            "algorithm": "sha256",
+            "files": {
+                "a.txt": {"hash": "a" * 64, "size": 3},
+                "b.txt": {"hash": "b" * 64, "size": 3},
+            },
+            "total_checksum": "stale_will_be_recomputed",
+        }
+
+        # Now remove b.txt BEFORE the write phase runs, so the writer
+        # encounters OSError and skips it.
+        f2.unlink()
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        archive = write_encrypted_tar(
+            files=files,
+            destination=dest,
+            backup_name="Prof_FULL_2026-04-17_000000",
+            password="pw",
+            integrity_manifest=manifest,
+        )
+
+        # Read the embedded manifest back and verify it only lists a.txt.
+        with open(archive, "rb") as f:
+            reader = DecryptingReader(f, "pw")
+            with tarfile.open(fileobj=reader, mode="r|") as tar:
+                for member in tar:
+                    if member.name == ".wbverify":
+                        body = tar.extractfile(member).read()
+                        embedded = json.loads(body)
+                        break
+                else:
+                    pytest.fail("No .wbverify entry in archive")
+
+        assert "a.txt" in embedded["files"]
+        assert (
+            "b.txt" not in embedded["files"]
+        ), "Vanished file must be pruned from the embedded manifest"
+        # Checksum must have been recomputed (not the stale sentinel).
+        assert embedded["total_checksum"] != "stale_will_be_recomputed"
+
+
+# ---------------------------------------------------------------------------
 # generate_backup_name
 # ---------------------------------------------------------------------------
 

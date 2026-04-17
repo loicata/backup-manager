@@ -85,11 +85,22 @@ def check_for_update(
 def _version_tuple(version: str) -> tuple[int, ...]:
     """Convert version string to comparable tuple.
 
+    Extracts numeric-only components. Pre-release suffixes
+    (``rc1``, ``a2``, ``b3``) are intentionally ignored so that
+    ``3.4.0rc1`` compares equal to ``3.4.0`` on the stable path and
+    is never offered as an update to a stable install.
+
     Args:
-        version: Version string like "3.1.2".
+        version: Version string like "3.1.2" or "3.4.0rc1".
 
     Returns:
         Tuple of integers, e.g. (3, 1, 2).
     """
-    parts = re.findall(r"\d+", version)
-    return tuple(int(p) for p in parts)
+    # Strip any pre-release suffix (letters + number after the numeric
+    # core) so "3.4.0rc1" yields (3, 4, 0) — matching the stable.
+    # Previously the regex picked up the trailing number and produced
+    # (3, 4, 0, 1), making rc1 look strictly newer than 3.4.0.
+    match = re.match(r"^\s*v?(\d+(?:\.\d+)*)", version.strip())
+    if not match:
+        return tuple(int(p) for p in re.findall(r"\d+", version))
+    return tuple(int(p) for p in match.group(1).split("."))

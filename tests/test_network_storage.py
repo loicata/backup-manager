@@ -84,7 +84,13 @@ class TestConnect:
         assert cmd[1] == "use"
         assert cmd[2] == r"\\server\share"
         assert "/user:admin" in cmd
-        assert "secret" in cmd
+        # Password must NOT appear on the command line — it's piped
+        # via stdin to avoid leaking to Process Explorer / Event 4688.
+        assert "secret" not in cmd
+        assert "*" in cmd  # placeholder that triggers the stdin prompt
+        # ... and it's sent via the ``input`` kwarg.
+        passed_input = mock_run.call_args.kwargs.get("input", "")
+        assert "secret" in passed_input
 
     @patch("src.storage.network.subprocess.run")
     def test_already_connected_error_1219(self, mock_run):

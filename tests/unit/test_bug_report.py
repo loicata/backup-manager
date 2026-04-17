@@ -808,10 +808,15 @@ class TestAnonymizationBypasses:
         result = anonymize_log_lines(lines)
         assert "fileserver" not in result[0]
 
-    def test_s3_bucket_with_brackets_anonymized(self):
-        lines = ["Uploading to s3://[my-bucket-name]"]
+    def test_s3_bucket_anonymized(self):
+        """Real AWS bucket names never contain brackets (they allow
+        letters, digits, dots, and hyphens only) so the tightened
+        regex no longer matches ``s3://[name]`` on purpose. Test with
+        a realistic name."""
+        lines = ["Uploading to s3://my-bucket-name"]
         result = anonymize_log_lines(lines)
         assert "my-bucket-name" not in result[0]
+        assert "s3://[bucket]" in result[0]
 
 
 # ── verify_full_report_hmac ─────────────────────────────────────────
@@ -903,8 +908,9 @@ class TestIdVerification:
     """Tests for ID hash and decoy file generation."""
 
     def test_id_hash_in_diagnostic(self, tmp_path):
-        from src.ui.app import BackupManagerApp
         import hashlib as hl
+
+        from src.ui.app import BackupManagerApp
 
         fake_id = tmp_path / "passport.jpg"
         fake_id.write_bytes(b"fake image content for testing")

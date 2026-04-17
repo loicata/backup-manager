@@ -98,6 +98,52 @@ def _collect_source_content(files: list[FileInfo]) -> dict[str, bytes]:
 
 
 # ---------------------------------------------------------------------------
+# Colliding mirror target name must not silently lose data
+# ---------------------------------------------------------------------------
+
+
+class TestMirrorTargetCollision:
+    """When the mirror target already exists (name collision, interrupted
+    previous run), the existing directory must be renamed to ``.orphan-*``
+    rather than silently deleted. Data loss prevention."""
+
+    def test_existing_target_renamed_not_deleted(self, tmp_path, source_files):
+        from src.core.phase_logger import PhaseLogger
+        from src.core.phases.local_writer import write_flat
+        from src.core.phases.mirror import _copy_local_mirror
+
+        files, _ = source_files
+
+        # Primary backup
+        primary = tmp_path / "primary"
+        primary.mkdir()
+        backup_path = write_flat(files, primary, "bk_2026-04-17")
+
+        # Mirror destination with a COLLIDING pre-existing directory
+        mirror_root = tmp_path / "mirror"
+        mirror_root.mkdir()
+        existing_backup = mirror_root / "bk_2026-04-17"
+        existing_backup.mkdir()
+        (existing_backup / "PRECIOUS.txt").write_text(
+            "do not lose me",
+            encoding="utf-8",
+        )
+
+        backend = LocalStorage(str(mirror_root))
+        phase_log = PhaseLogger("test", None)
+
+        _copy_local_mirror(backup_path, backend, "bk_2026-04-17", phase_log)
+
+        # New mirror was written
+        assert (mirror_root / "bk_2026-04-17").is_dir()
+
+        # Orphan of the old one survives with content intact
+        orphans = list(mirror_root.glob("bk_2026-04-17.orphan-*"))
+        assert len(orphans) == 1, f"Expected one orphan, got {orphans}"
+        assert (orphans[0] / "PRECIOUS.txt").read_text(encoding="utf-8") == ("do not lose me")
+
+
+# ---------------------------------------------------------------------------
 # LOCAL primary → LOCAL mirror(s)
 # ---------------------------------------------------------------------------
 

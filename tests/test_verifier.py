@@ -97,3 +97,28 @@ class TestVerifyBackup:
         assert ok is False
         assert "... and" in msg
         assert "5 more" in msg
+
+    def test_verify_detects_extra_files(self, verified_backup):
+        """Files present in the backup but not in the manifest must fail
+        verification, not be silently ignored.
+
+        A "verified OK" backup that contains extras can confuse restore
+        tooling and wastes space.
+        """
+        backup, manifest_path = verified_backup
+        # Drop a stray .tmp file that is not in the manifest
+        (backup / "leftover.tmp").write_text("junk", encoding="utf-8")
+
+        ok, msg = verify_backup(backup, manifest_path)
+        assert ok is False
+        assert "Extra" in msg
+
+    def test_verify_ignores_os_noise(self, verified_backup):
+        """.DS_Store / Thumbs.db / .wbverify are ignored as extras."""
+        backup, manifest_path = verified_backup
+        (backup / ".DS_Store").write_bytes(b"mac")
+        (backup / "Thumbs.db").write_bytes(b"win")
+
+        ok, msg = verify_backup(backup, manifest_path)
+        assert ok is True
+        assert "OK" in msg

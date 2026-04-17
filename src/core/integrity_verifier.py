@@ -31,7 +31,15 @@ class BackupVerifyResult:
         backup_name: Name of the backup (directory or archive).
         destination: Role label ("primary", "mirror1", "mirror2").
         storage_type: Backend type ("local", "sftp", "s3").
-        status: Outcome ("ok", "corrupted", "missing", "error").
+        status: Outcome — one of:
+            - "ok": hash/manifest confirmed
+            - "warning": no reference hash available; cannot confirm
+              integrity (was "ok" before — hid the fact that an
+              attacker who deleted the reference hash could swap the
+              archive unnoticed).
+            - "corrupted": hash mismatch or manifest errors
+            - "missing": file not present on the backend
+            - "error": transient/backend failure during check
         message: Human-readable detail.
         checked_at: ISO timestamp of the check.
     """
@@ -53,18 +61,25 @@ class VerifyAllResult:
         duration_seconds: Wall-clock time for the entire verification.
         total_backups: Number of backups checked.
         ok_count: Number of backups that passed verification.
-        error_count: Number of backups with errors.
+        warning_count: Number of backups with warnings (e.g. no
+            reference hash available — integrity unverifiable but no
+            corruption detected).
+        error_count: Number of backups with errors (corrupted,
+            missing, or backend error).
     """
 
     results: list[BackupVerifyResult] = field(default_factory=list)
     duration_seconds: float = 0.0
     total_backups: int = 0
     ok_count: int = 0
+    warning_count: int = 0
     error_count: int = 0
 
     @property
     def success(self) -> bool:
-        """True if all backups passed verification."""
+        """True if no backup reported a hard error. Warnings do not
+        flip this flag — the user sees them via the UI and chooses
+        whether to act — but ``error_count == 0`` is still required."""
         return self.error_count == 0
 
 
@@ -170,6 +185,8 @@ class IntegrityVerifier:
                 self._result.results.append(bvr)
                 if bvr.status == "ok":
                     self._result.ok_count += 1
+                elif bvr.status == "warning":
+                    self._result.warning_count += 1
                 else:
                     self._result.error_count += 1
 
@@ -277,16 +294,22 @@ class IntegrityVerifier:
 
             stored = verify_hashes.get(backup_name)
             if not stored:
-                # No stored hash — can only check file exists and size > 0
+                # No stored hash — cannot prove integrity. Previously
+                # returned "ok" which gave a false sense of security:
+                # an attacker who deleted the reference-hash entry in
+                # verify_hashes.json could then swap the archive with
+                # anything and the check would still pass.
+                # "warning" surfaces the ambiguity in the UI without
+                # falsely asserting integrity.
                 size = archive_path.stat().st_size
                 if size > 0:
-                    msg = f"No reference hash — file exists ({size:,} bytes)"
-                    self._log.info(f"{role}/{backup_name}: {msg}")
+                    msg = f"No reference hash — cannot verify ({size:,} bytes)"
+                    self._log.warning(f"{role}/{backup_name}: {msg}")
                     return BackupVerifyResult(
                         backup_name=backup_name,
                         destination=role,
                         storage_type=storage_type,
-                        status="ok",
+                        status="warning",
                         message=msg,
                     )
                 return BackupVerifyResult(

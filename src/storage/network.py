@@ -72,6 +72,15 @@ class NetworkStorage(LocalStorage):
     def _connect(self) -> tuple[bool, str]:
         r"""Mount the network share via ``net use``.
 
+        The password is passed via the ``*`` placeholder so ``net.exe``
+        prompts for it on stdin — we then pipe the password in. The
+        previous implementation inlined the password on the command
+        line, which makes it visible to any process with
+        ``SeDebugPrivilege`` (most antivirus and admin tools) and
+        writes it verbatim to Windows Event 4688 when command-line
+        auditing is enabled via GPO. Piping via stdin removes both
+        exposures.
+
         Returns:
             Tuple ``(success, message)``.
         """
@@ -84,14 +93,15 @@ class NetworkStorage(LocalStorage):
             "net",
             "use",
             share_root,
+            "*",
             f"/user:{self._username}",
-            self._password,
             "/persistent:no",
         ]
 
         try:
             result = subprocess.run(
                 cmd,
+                input=self._password + "\n",
                 capture_output=True,
                 text=True,
                 timeout=NET_USE_TIMEOUT,

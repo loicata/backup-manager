@@ -557,15 +557,24 @@ class TestDifferentialEngine:
 class TestFilterErrorHandling:
     """Errors during filtering should be handled gracefully."""
 
-    def test_unreadable_file_included_as_changed(self, source_dir, manifest_path):
-        """File that can't be hashed should be included (fail-safe)."""
+    def test_unreadable_file_skipped(self, source_dir, manifest_path, caplog):
+        """File that can't be hashed is skipped with a warning.
+
+        The integrity-manifest phase is intentionally fail-fast on
+        hash errors. Including an unreadable file in ``changed`` and
+        leaving it without a computed hash would cause the next
+        phase to re-attempt the hash and crash the whole backup.
+        The safer behavior is to drop the unreadable file at the
+        filter stage (a warning surfaces to the user) and let the
+        next backup pick it up if the lock clears.
+        """
+        import logging
+
         _do_backup_cycle(source_dir, manifest_path)
 
         files = _collect(source_dir)
-        # Find the doc.txt file
         doc_file = next(f for f in files if f.relative_path.endswith("/doc.txt"))
 
-        # Mock compute_sha256 to raise for this specific file
         original_sha = None
 
         def _failing_sha(path):
@@ -579,10 +588,15 @@ class TestFilterErrorHandling:
             original_sha = compute_sha256
             mock_sha.side_effect = _failing_sha
 
-            changed, _ = filter_changed_files(files, manifest_path)
+            with caplog.at_level(logging.WARNING, logger="src.core.phases.filter"):
+                changed, hashes = filter_changed_files(files, manifest_path)
 
-        # doc.txt should be in changed (fail-safe: can't read = include)
-        assert any(f.relative_path.endswith("/doc.txt") for f in changed)
+        # doc.txt must NOT appear in ``changed`` (would crash the next phase).
+        assert not any(f.relative_path.endswith("/doc.txt") for f in changed)
+        # No hash entry for a file we couldn't read.
+        assert doc_file.relative_path not in hashes
+        # A warning must be logged so operators see the skip.
+        assert any("unreadable" in r.message for r in caplog.records)
 
     def test_manifest_with_permissions_error_triggers_full(self, source_dir, tmp_path):
         """Unreadable manifest should trigger full backup."""

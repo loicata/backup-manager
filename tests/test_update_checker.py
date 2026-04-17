@@ -48,6 +48,19 @@ class TestVersionComparison:
     def test_patch_upgrade(self) -> None:
         assert _version_tuple("3.0.1") > _version_tuple("3.0.0")
 
+    def test_prerelease_not_newer_than_stable(self) -> None:
+        """A rc/alpha/beta tag must not be offered as an update to
+        a stable install of the same core version.
+
+        Before the fix, ``3.4.0rc1`` was parsed as (3, 4, 0, 1) which
+        compared strictly greater than the stable (3, 4, 0).
+        """
+        assert _version_tuple("3.4.0rc1") == _version_tuple("3.4.0")
+        assert _version_tuple("3.4.0a2") == _version_tuple("3.4.0")
+        assert _version_tuple("3.4.0b1") == _version_tuple("3.4.0")
+        # And a later stable is still newer than the rc.
+        assert _version_tuple("3.4.1") > _version_tuple("3.4.0rc1")
+
 
 # ---------------------------------------------------------------------------
 # check_for_update — GitHub Releases API (mocked network)

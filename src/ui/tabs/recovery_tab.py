@@ -410,12 +410,12 @@ class RecoveryTab(ScrollableTab):
                         self._filling = False
                     return
 
-        # No matching config — clear S3 fields
-        for key, var in self._ret_s3_vars.items():
-            if key not in ("s3_access_key", "s3_secret_key"):
-                var.set("")
-            else:
-                var.set("")
+        # No matching config — clear all S3 fields. The previous
+        # code had an if/else where both branches called ``var.set("")``,
+        # which served no purpose beyond suggesting a distinction that
+        # did not exist.
+        for var in self._ret_s3_vars.values():
+            var.set("")
 
     # --- Step 2: Select backups ---
 
@@ -1487,6 +1487,13 @@ class RecoveryTab(ScrollableTab):
                     self._start_download_animation(f"Downloading {idx}/{total}... {name}")
 
                 local_path = backend.download_backup(name, dest)
+                # Clear the progress callback so a lingering reference
+                # from this iteration cannot fire later (boto3
+                # s3transfer can dispatch a final callback after the
+                # download returns) and overwrite the status label
+                # while the next backup is being prepared.
+                if is_s3:
+                    backend.set_progress_callback(None)
                 self._stop_download_animation()
                 logger.info("Downloaded %s to %s", name, local_path)
 
@@ -1630,10 +1637,24 @@ class RecoveryTab(ScrollableTab):
                             with open(long_path_str(target), "wb") as out:
                                 shutil.copyfileobj(fileobj, out)
                             count += 1
+                # Force HMAC trailer verification: if ``tarfile`` exited
+                # early (e.g. reached its own internal EOF without
+                # consuming every chunk), the DecryptingReader has NOT
+                # seen the EOF sentinel and the HMAC was never checked.
+                # A truncated archive would silently deliver N files
+                # without any tamper alert. Raise explicitly here.
+                reader.verify_complete()
         except Exception as e:
             if InvalidTag is not None and isinstance(e, InvalidTag):
                 raise RuntimeError("The password you provided is incorrect") from e
             err_msg = str(e)
+            if "HMAC mismatch" in err_msg:
+                raise RuntimeError(
+                    "Archive integrity check FAILED — truncation or tamper "
+                    "detected. Already-extracted files in the restore "
+                    "directory must NOT be trusted; delete them and "
+                    "restore from another copy."
+                ) from e
             if "tag" in err_msg.lower() or "authentication" in err_msg.lower():
                 raise RuntimeError("The password you provided is incorrect") from e
             raise

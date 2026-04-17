@@ -15,6 +15,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime
 
 from src.storage.base import StorageBackend
 
@@ -127,6 +128,12 @@ def _write_sample(backend: StorageBackend, size: int) -> float:
     This measures true end-to-end throughput, not just local buffer
     fill speed.
 
+    Under S3 Object Lock COMPLIANCE, the upload would be non-deletable
+    for the retention period. The test refuses to run in that case
+    because leaving a 128 MB or 512 MB probe locked for days is both
+    expensive and surprising. The caller is expected to route the
+    test to a dedicated speedtest bucket instead.
+
     Args:
         backend: Storage backend to write to.
         size: Sample size in bytes.
@@ -135,14 +142,27 @@ def _write_sample(backend: StorageBackend, size: int) -> float:
         Speed in bytes per second.
 
     Raises:
+        RuntimeError: If Object Lock is active on the backend.
         Exception: On upload failure.
     """
+    # Refuse to write a probe that cannot be cleaned up afterwards.
+    # The ``isinstance(_, datetime)`` check (rather than ``is not None``)
+    # avoids false-positives with MagicMock-based test backends whose
+    # auto-created attributes are truthy but not real datetimes.
+    retain_until = getattr(backend, "_retain_until", None)
+    if isinstance(retain_until, datetime):
+        raise RuntimeError(
+            "Bandwidth test aborted: target bucket uses S3 Object Lock and "
+            "the probe would be locked for days. Configure a dedicated "
+            "'s3_speedtest_bucket' (no lock) for bandwidth measurement."
+        )
+
     temp_name = f"{TEMP_PREFIX}{uuid.uuid4().hex[:8]}_{size}"
-    data = os.urandom(size)
+    random_source = _RandomStream(size)
 
     start = time.monotonic()
     try:
-        backend.upload_file(io.BytesIO(data), temp_name, size=size)
+        backend.upload_file(random_source, temp_name, size=size)
 
         # Force remote flush — ensures we measure real throughput,
         # not just how fast we can fill the local TCP/SSH buffer.
@@ -154,6 +174,54 @@ def _write_sample(backend: StorageBackend, size: int) -> float:
     if elapsed <= 0:
         return 0.0
     return size / elapsed
+
+
+class _RandomStream(io.RawIOBase):
+    """File-like object that yields random bytes without pre-allocating.
+
+    ``os.urandom(512 * 1024 * 1024)`` allocated half a gigabyte of RAM
+    up front and blocked briefly while the entropy pool was drained
+    on Linux. The streaming variant keeps a small rolling buffer and
+    hands out chunks lazily.
+    """
+
+    _CHUNK = 1 * 1024 * 1024  # 1 MB refresh
+
+    def __init__(self, size: int) -> None:
+        self._remaining = size
+        self._buf = b""
+        self._pos = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, n: int = -1) -> bytes:
+        if self._remaining <= 0:
+            return b""
+
+        if n is None or n < 0:
+            # Exhaust the rest in one go — only used by non-streaming
+            # backends that read the whole payload.
+            out = bytearray()
+            while self._remaining > 0:
+                chunk = min(self._CHUNK, self._remaining)
+                out.extend(os.urandom(chunk))
+                self._remaining -= chunk
+            return bytes(out)
+
+        # Serve from the buffer, refilling as needed.
+        if self._pos >= len(self._buf):
+            chunk = min(self._CHUNK, self._remaining)
+            if chunk <= 0:
+                return b""
+            self._buf = os.urandom(chunk)
+            self._pos = 0
+
+        take = min(n, len(self._buf) - self._pos, self._remaining)
+        data = self._buf[self._pos : self._pos + take]
+        self._pos += take
+        self._remaining -= take
+        return bytes(data)
 
 
 def _remote_sync(backend: StorageBackend) -> None:

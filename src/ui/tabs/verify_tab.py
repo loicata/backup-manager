@@ -94,6 +94,7 @@ class VerifyTab(ttk.Frame):
 
         # Configure tag colors for status
         self.results_tree.tag_configure("ok", foreground=Colors.SUCCESS)
+        self.results_tree.tag_configure("warning", foreground="#f39c12")
         self.results_tree.tag_configure("corrupted", foreground=Colors.DANGER)
         self.results_tree.tag_configure("missing", foreground="#f39c12")
         self.results_tree.tag_configure("error", foreground=Colors.DANGER)
@@ -132,13 +133,22 @@ class VerifyTab(ttk.Frame):
         except tk.TclError:
             pass
 
-    def set_complete(self, ok_count: int, error_count: int, duration: float) -> None:
+    def set_complete(
+        self,
+        ok_count: int,
+        error_count: int,
+        duration: float,
+        warning_count: int = 0,
+    ) -> None:
         """Update UI after verification completes.
 
         Args:
             ok_count: Number of backups that passed.
             error_count: Number of backups that failed.
             duration: Duration in seconds.
+            warning_count: Number of backups with warnings (e.g. no
+                reference hash available — integrity unverifiable but
+                no corruption detected).
         """
         self._running = False
         try:
@@ -147,12 +157,22 @@ class VerifyTab(ttk.Frame):
             self.progress_bar["value"] = 100
             self.percent_label.config(text="100%")
 
-            if error_count == 0:
+            if error_count > 0:
+                msg = (
+                    (
+                        f"{error_count} error(s), {warning_count} warning(s), "
+                        f"{ok_count} OK ({duration:.1f}s)"
+                    )
+                    if warning_count
+                    else (f"{error_count} error(s), {ok_count} OK ({duration:.1f}s)")
+                )
+                color = Colors.DANGER
+            elif warning_count > 0:
+                msg = f"{warning_count} warning(s), {ok_count} OK ({duration:.1f}s)"
+                color = "#f39c12"
+            else:
                 msg = f"All {ok_count} backups verified OK ({duration:.1f}s)"
                 color = Colors.SUCCESS
-            else:
-                msg = f"{error_count} error(s), {ok_count} OK ({duration:.1f}s)"
-                color = Colors.DANGER
             self.status_label.config(text=msg, foreground=color)
         except tk.TclError:
             pass
@@ -171,6 +191,7 @@ class VerifyTab(ttk.Frame):
         """
         status_display = {
             "ok": "OK",
+            "warning": "WARNING",
             "corrupted": "CORRUPTED",
             "missing": "MISSING",
             "error": "ERROR",

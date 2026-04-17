@@ -210,7 +210,11 @@ class StorageTab(ScrollableTab):
             ttk.Label(frame, text=f"{label}:").pack(anchor="w", pady=(Spacing.SMALL, 0))
             var = tk.StringVar(value=default)
             self._s3_vars[key] = var
-            if "secret" in key or "key" in key.lower() and "access" in key.lower():
+            # Mask secrets: explicit parentheses make the intent
+            # unambiguous. Python's ``and`` binds tighter than ``or``,
+            # but the unparenthesised form is hard to audit at a glance.
+            is_secret = "secret" in key or ("key" in key.lower() and "access" in key.lower())
+            if is_secret:
                 ttk.Entry(frame, textvariable=var, show="●").pack(fill="x")
             else:
                 ttk.Entry(frame, textvariable=var).pack(fill="x")

@@ -505,3 +505,40 @@ class TestBackupTypeClassifier:
         # before the regex-based classification).
         assert deleted == 1
         backend.delete_backup.assert_called_once_with("My_DIFF_Notes_FULL_2026-02-01_120000")
+
+
+class TestWeeklyIsoCalendarFix:
+    """Weekly slots are grouped by ISO-8601 week, not strftime('%Y-W%W').
+
+    Dec 31 and Jan 1 of consecutive years fall in the same ISO week
+    when Dec 31 is e.g. a Thursday. ``%W`` would emit "2026-W52" and
+    "2027-W00" — two separate keys for the same physical week —
+    inflating the weekly slot count beyond what the user configured.
+    """
+
+    def test_year_boundary_same_iso_week_counts_once(self):
+        # 2026-12-31 is a Thursday -> ISO week 53 of 2026
+        # 2027-01-01 is a Friday   -> ISO week 53 of 2026
+        # Both should land in the SAME weekly slot.
+        backups = [
+            _backup("P_FULL_2027-01-01_060000", datetime(2027, 1, 1, 6)),
+            _backup("P_FULL_2026-12-31_060000", datetime(2026, 12, 31, 6)),
+        ]
+        backend = _make_backend(backups)
+        # Only 1 weekly slot, 0 daily/monthly.
+        retention = RetentionConfig(gfs_daily=0, gfs_weekly=1, gfs_monthly=0, gfs_enabled=True)
+
+        # "Now" is a few days later so both backups are within the
+        # 1-week window (7 days back).
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2027, 1, 3, 6)
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            rotate_backups(backend, retention, profile_name="P")
+
+        # Under the old %W grouping, BOTH would be kept in different slots.
+        # Under ISO-8601 they share the slot and only the newest (first
+        # in iteration = the 2027-01-01 one) is retained; the older one
+        # is deleted.
+        deleted_names = [c.args[0] for c in backend.delete_backup.call_args_list]
+        # Must include exactly the older backup
+        assert "P_FULL_2026-12-31_060000" in deleted_names

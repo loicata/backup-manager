@@ -306,7 +306,13 @@ class TestVerifyEncryptedBackup:
         verifier = IntegrityVerifier(profile, mgr)
         result = verifier.verify_all()
 
-        assert result.ok_count == 1
+        # Without a stored hash we cannot prove integrity, so the
+        # status is "warning" (was "ok" before — a silent bypass
+        # vector if the hash file was tampered with).
+        assert result.warning_count == 1
+        assert result.ok_count == 0
+        assert result.error_count == 0
+        assert result.results[0].status == "warning"
         assert "No reference hash" in result.results[0].message
 
 

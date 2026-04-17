@@ -157,6 +157,15 @@ class RetentionTab(ttk.Frame):
 
         self._update_summary()
 
+    def get_gfs_daily_var(self) -> tk.IntVar:
+        """Return the Tk IntVar holding the user-facing daily retention.
+
+        The displayed value is offset by -1 from the internal value
+        (internal = var.get() + 1). Consumers that need the internal
+        value must add 1 after reading.
+        """
+        return self._gfs_vars["gfs_daily"]
+
     def collect_config(self) -> dict:
         """Collect retention configuration.
 

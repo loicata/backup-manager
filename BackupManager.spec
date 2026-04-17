@@ -11,7 +11,7 @@ a = Analysis(
     ['F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\src\\__main__.py'],
     pathex=['F:\\Documents\\loicata\\BackupManager\\Backup Manager v3'],
     binaries=[],
-    datas=[('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\backup_manager.ico', 'assets'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\License.rtf', 'assets'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\launch.vbs', '.')],
+    datas=[('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\backup_manager.ico', 'assets'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\License.rtf', 'assets'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\launch.vbs', '.'), ('F:\\Documents\\loicata\\BackupManager\\Backup Manager v3\\assets\\report_signing_key.pem', 'assets')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

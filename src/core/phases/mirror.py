@@ -331,7 +331,31 @@ def _copy_local_mirror(
 
     target = Path(backend._dest) / backup_name
     if target.exists():
-        shutil.rmtree(target)
+        # Rename the existing directory to ``.orphan-<timestamp>-<uuid8>``
+        # rather than silently deleting it. The UUID suffix is required
+        # because two mirror re-runs in the same second (scheduler +
+        # manual, two mirror configs to the same dest) would otherwise
+        # collide on the rename and raise FileExistsError, aborting an
+        # otherwise recoverable run.
+        # ``_cleanup_incomplete_backup`` runs before the pipeline starts,
+        # so reaching this point with an existing target means one of:
+        #   (a) the previous mirror crashed after this code point but
+        #       before the primary backup committed (rare, recoverable);
+        #   (b) a name collision with a legitimate previous backup
+        #       (clock skew, mocked datetime, manual filesystem edits).
+        # In both cases the operator can inspect/restore the orphan
+        # rather than lose data outright.
+        import uuid
+        from datetime import datetime
+
+        orphan_suffix = f"{datetime.now():%Y%m%d_%H%M%S}-{uuid.uuid4().hex[:8]}"
+        orphan = target.with_name(f"{target.name}.orphan-{orphan_suffix}")
+        logger.warning(
+            "mirror: target %s already exists — renaming to %s to avoid data loss",
+            target,
+            orphan.name,
+        )
+        target.rename(orphan)
     target.mkdir(parents=True, exist_ok=True)
 
     # Collect all files to copy

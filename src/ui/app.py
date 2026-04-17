@@ -10,6 +10,7 @@ import platform
 import re
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -66,8 +67,11 @@ _ANON_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b"), "***.***.***.***"),
     # Email addresses
     (re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"), "***@***.***"),
-    # S3 bucket URIs
-    (re.compile(r"s3://[a-zA-Z0-9._\-\[\]]+"), "s3://[bucket]"),
+    # S3 bucket URIs — match AWS naming rules (letters, digits,
+    # dots, hyphens). The previous pattern also matched ``[`` and
+    # ``]`` which are not valid in bucket names, so it would never
+    # legitimately fire and was effectively dead weight.
+    (re.compile(r"s3://[a-zA-Z0-9.\-]+"), "s3://[bucket]"),
     # Hostnames (word.word.tld patterns, min 2 dots)
     (re.compile(r"\b[a-zA-Z0-9-]+\.[a-zA-Z0-9-]+\.[a-zA-Z]{2,}\b"), "[host]"),
     # Quoted strings (profile names, paths, etc.)
@@ -863,6 +867,10 @@ class BackupManagerApp:
         for tab, label in tabs:
             self.notebook.add(tab, text=f" {label} ")
 
+        # Wire the Retention tab into General so the latter can display the
+        # current daily retention and auto-bump it on Full->Diff transitions.
+        self.tab_general.set_retention_tab(self.tab_retention)
+
         # Connect run tab buttons
         self.tab_run.start_btn.config(command=self._run_backup)
         self.tab_run.cancel_btn.config(command=self._cancel_backup)
@@ -933,7 +941,9 @@ class BackupManagerApp:
                 self.notebook.select(self.tab_run)
                 from datetime import datetime
 
-                self.scheduler._state.set_last_trigger(profile.id, datetime.now())
+                # Use the public scheduler API rather than poking at
+                # the private ``_state`` attribute (SLF001 and fragile).
+                self.scheduler.mark_triggered_now(profile.id, datetime.now())
             else:
                 # Wizard cancelled — revert to previous mode
                 self._current_mode = old_mode
@@ -1880,7 +1890,12 @@ class BackupManagerApp:
         """Handle verification completion on the main thread."""
         from datetime import datetime
 
-        self.tab_verify.set_complete(result.ok_count, result.error_count, result.duration_seconds)
+        self.tab_verify.set_complete(
+            result.ok_count,
+            result.error_count,
+            result.duration_seconds,
+            warning_count=result.warning_count,
+        )
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.tab_verify.update_last_verify(ts)
@@ -2089,6 +2104,11 @@ class BackupManagerApp:
     ) -> str:
         """Show target alert from scheduler thread, wait for user response.
 
+        Loops until the user either cancels or the precheck passes.
+        Previously implemented with recursion: every Retry click pushed
+        a new frame onto the Python stack, and a user who clicked Retry
+        repeatedly on a still-offline NAS could blow the stack.
+
         Uses root.after() to show UI on the main thread and
         threading.Event to block the scheduler thread until the
         user makes a choice.
@@ -2100,38 +2120,67 @@ class BackupManagerApp:
         Returns:
             "ok" if all targets eventually pass, "cancel" if user cancels.
         """
-        decision = {"value": None}  # "retry", "cancel", or None
-        event = threading.Event()
+        # Hard timeout so the scheduler thread cannot block forever if
+        # the user ignores or dismisses the alert. Past this point we
+        # give up, hide the alert and treat it as cancel — subsequent
+        # scheduler ticks get a fresh chance to prompt again.
+        _ALERT_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
 
-        def _show_alert():
-            self._show_target_alert(
-                failures,
-                on_retry=lambda: _on_choice("retry"),
-                on_cancel=lambda: _on_choice("cancel"),
-            )
+        current_failures = failures
+        deadline = time.monotonic() + _ALERT_TIMEOUT_SECONDS
+        while True:
+            decision = {"value": None}  # "retry", "cancel", or None
+            event = threading.Event()
 
-        def _on_choice(choice: str):
-            decision["value"] = choice
-            event.set()
+            # Default-argument binding for ``decision`` and ``event``
+            # makes these closures properly capture the per-iteration
+            # values rather than the surrounding name (which ruff B023
+            # would otherwise flag as fragile to maintenance).
+            def _on_choice(choice: str, d=decision, e=event):
+                d["value"] = choice
+                e.set()
 
-        # Show alert on main thread
-        self.root.after(0, _show_alert)
-        event.wait()  # Block scheduler thread until user clicks
+            def _show_alert(f=current_failures, pick=_on_choice):
+                self._show_target_alert(
+                    f,
+                    on_retry=lambda: pick("retry"),
+                    on_cancel=lambda: pick("cancel"),
+                )
 
-        if decision["value"] == "cancel":
+            # Show alert on main thread
+            self.root.after(0, _show_alert)
+            remaining = max(1.0, deadline - time.monotonic())
+            clicked = event.wait(timeout=remaining)
+
+            if not clicked:
+                # No response within budget — treat as cancel to release
+                # the scheduler thread. The next tick will re-prompt.
+                logger.warning(
+                    "Precheck prompt timed out after %ds — releasing scheduler thread",
+                    _ALERT_TIMEOUT_SECONDS,
+                )
+                self.root.after(0, self._hide_target_alert)
+                return "cancel"
+
+            if decision["value"] == "cancel":
+                self.root.after(0, self._hide_target_alert)
+                return "cancel"
+
+            # User clicked retry — hide alert and re-check
             self.root.after(0, self._hide_target_alert)
-            return "cancel"
+            results = self.engine.precheck_targets(profile)
+            new_failures = [r for r in results if not r[2]]
 
-        # User clicked retry — hide alert and re-check
-        self.root.after(0, self._hide_target_alert)
-        results = self.engine.precheck_targets(profile)
-        new_failures = [r for r in results if not r[2]]
+            if not new_failures:
+                return "ok"
 
-        if not new_failures:
-            return "ok"
-
-        # Still failing — prompt again (recursive)
-        return self._scheduled_precheck_prompt(new_failures, profile)
+            # Still failing — loop back to prompt again (bounded by
+            # user input OR the deadline).
+            current_failures = new_failures
+            if time.monotonic() >= deadline:
+                logger.warning("Precheck retry budget exhausted — releasing scheduler thread")
+                self.root.after(0, self._hide_target_alert)
+                return "cancel"
 
     # --- Target pre-check alert ---
 
@@ -2381,7 +2430,7 @@ class BackupManagerApp:
         def _close_about():
             about.destroy()
             self._about_frame = None
-            self._save_frame.pack(fill="x", side="bottom", before=None)
+            self._save_frame.pack(fill="x", side="bottom")
             self.notebook.pack(fill="both", expand=True)
 
         def _open_bug_report():
@@ -2524,7 +2573,10 @@ class BackupManagerApp:
 
         # Backup history (last 10 runs, anonymized)
         try:
-            journal = self.scheduler._journal
+            # Use the public ``journal`` property — the underscore
+            # attribute is private and couples this caller to the
+            # Scheduler internal naming.
+            journal = self.scheduler.journal
             entries = journal.get_entries(limit=10)
             if entries:
                 lines.append("- Recent backup runs:")
@@ -2876,7 +2928,7 @@ class BackupManagerApp:
         def _close_bug_report():
             bug.destroy()
             self._bug_frame = None
-            self._save_frame.pack(fill="x", side="bottom", before=None)
+            self._save_frame.pack(fill="x", side="bottom")
             self.notebook.pack(fill="both", expand=True)
 
         def _send_report():
@@ -2982,7 +3034,7 @@ class BackupManagerApp:
 
         def _close_ready():
             ready.destroy()
-            self._save_frame.pack(fill="x", side="bottom", before=None)
+            self._save_frame.pack(fill="x", side="bottom")
             self.notebook.pack(fill="both", expand=True)
 
         ttk.Button(

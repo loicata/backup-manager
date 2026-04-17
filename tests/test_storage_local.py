@@ -205,3 +205,62 @@ class TestLocalStorage:
             str(tmp_path / "nonexistent"),
             (FileNotFoundError, FileNotFoundError("not found"), None),
         )
+
+    def test_upload_overwrites_readonly_backup_directory(self, storage, tmp_path):
+        """upload(dir) must replace a previous backup that has read-only files.
+
+        Before the fix, ``shutil.rmtree`` without ``onerror`` raised
+        PermissionError and the new backup aborted, leaving the old
+        locked backup in place.
+        """
+        # First upload: regular backup
+        src1 = tmp_path / "src1"
+        src1.mkdir()
+        (src1 / "old.txt").write_text("old", encoding="utf-8")
+        storage.upload(src1, "my_backup")
+
+        # Make the previously uploaded file read-only to simulate
+        # the condition that breaks plain rmtree on Windows.
+        locked = Path(storage._dest) / "my_backup" / "old.txt"
+        locked.chmod(stat.S_IREAD)
+
+        # Second upload of the same name must succeed by force-removing
+        # the locked backup.
+        src2 = tmp_path / "src2"
+        src2.mkdir()
+        (src2 / "new.txt").write_text("new", encoding="utf-8")
+        storage.upload(src2, "my_backup")
+
+        assert (Path(storage._dest) / "my_backup" / "new.txt").exists()
+        assert not (Path(storage._dest) / "my_backup" / "old.txt").exists()
+
+    def test_upload_file_atomic_rename_on_success(self, storage):
+        """upload_file writes to .partial then renames on success."""
+        data = io.BytesIO(b"final content")
+        storage.upload_file(data, "atomic.bin", size=13)
+        target = Path(storage._dest) / "atomic.bin"
+        assert target.read_bytes() == b"final content"
+        # No .partial left behind.
+        assert not target.with_suffix(target.suffix + ".partial").exists()
+
+    def test_upload_file_partial_cleaned_on_failure(self, storage, monkeypatch):
+        """upload_file must delete the .partial file if the write fails."""
+
+        class _ExplodingStream:
+            def read(self, *_a, **_kw):
+                raise OSError("simulated I/O failure")
+
+        with pytest.raises(OSError, match="simulated"):
+            storage.upload_file(_ExplodingStream(), "boom.bin", size=100)
+
+        target = Path(storage._dest) / "boom.bin"
+        partial = target.with_suffix(target.suffix + ".partial")
+        assert not target.exists(), "target must not exist after failure"
+        assert not partial.exists(), ".partial must be cleaned up on failure"
+
+    def test_get_free_space_missing_destination_returns_none(self, tmp_path):
+        """Unplugged / deleted destination surfaces None with a warning."""
+        dest = tmp_path / "gone"
+        # Do NOT create it
+        storage = LocalStorage(str(dest))
+        assert storage.get_free_space() is None

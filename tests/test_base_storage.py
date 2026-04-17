@@ -209,3 +209,40 @@ class TestWithRetry:
             pass
 
         assert my_special_func.__name__ == "my_special_func"
+
+    def test_cancelled_error_propagates_without_retry(self):
+        """CancelledError must bypass the retry loop entirely.
+
+        A user cancel during a long upload must stop immediately,
+        not wait through exponential backoff before surfacing.
+        """
+        from src.core.exceptions import CancelledError
+
+        call_count = [0]
+
+        @with_retry(max_retries=5, base_delay=10.0)
+        def func():
+            call_count[0] += 1
+            raise CancelledError("user cancel")
+
+        start = time.monotonic()
+        with pytest.raises(CancelledError, match="user cancel"):
+            func()
+        elapsed = time.monotonic() - start
+
+        assert call_count[0] == 1, "CancelledError must not retry"
+        assert elapsed < 1.0, "CancelledError must surface immediately"
+
+    def test_keyboard_interrupt_propagates(self):
+        """KeyboardInterrupt must surface without retry (it's not Exception)."""
+        call_count = [0]
+
+        @with_retry(max_retries=3, base_delay=0.01)
+        def func():
+            call_count[0] += 1
+            raise KeyboardInterrupt()
+
+        with pytest.raises(KeyboardInterrupt):
+            func()
+
+        assert call_count[0] == 1

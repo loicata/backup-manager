@@ -1799,7 +1799,28 @@ class SetupWizard:
         self._win.after(500, self._run_pro_setup)
 
     def _run_pro_setup(self) -> None:
-        """Execute S3 bucket provisioning in a background thread."""
+        """Execute S3 bucket provisioning in a background thread.
+
+        Guarded against re-entry: if the user clicks Back→Next quickly
+        on step 11, ``_show_step`` destroys and recreates the widgets
+        but the previous setup thread is still running and will try
+        to log into a destroyed ``_setup_log`` (TclError). Worse, it
+        could create the S3 bucket twice. The ``pro_setup_done`` and
+        ``pro_setup_running`` flags in ``_data`` short-circuit a
+        duplicate launch.
+        """
+        if self._data.get("pro_setup_done"):
+            # Already succeeded — nothing to redo. Just re-enable the
+            # Next button (Finish) since widget state was reset by
+            # ``_show_step`` rebuilding the page.
+            self._next_btn.state(["!disabled"])
+            self._next_btn.config(text="Finish")
+            return
+        if self._data.get("pro_setup_running"):
+            # A previous thread is still working. Don't spawn another.
+            return
+        self._data["pro_setup_running"] = True
+
         self._next_btn.state(["disabled"])
 
         ak = self._data["pro_aws_key"]
@@ -1825,14 +1846,32 @@ class SetupWizard:
                 result[0] = [("Setup", False, str(e))]
 
         def _append_log(text: str) -> None:
-            self._setup_log.config(state="normal")
-            self._setup_log.insert("end", text + "\n")
-            self._setup_log.config(state="disabled")
-            self._setup_log.see("end")
+            # The wizard can be cancelled while ``_run_pro_setup`` is
+            # still finishing in the background; by then ``_setup_log``
+            # has been destroyed and any write raises ``TclError``.
+            # Swallow it silently — the user closed the window, they
+            # don't want the background noise.
+            import contextlib
+            import tkinter as _tk
+
+            with contextlib.suppress(_tk.TclError):
+                self._setup_log.config(state="normal")
+                self._setup_log.insert("end", text + "\n")
+                self._setup_log.config(state="disabled")
+                self._setup_log.see("end")
 
         def _poll() -> None:
+            # Suppress TclError across the whole poll: the wizard
+            # window can be closed while the background setup is
+            # running, in which case ``self._win.after`` and
+            # ``self._next_btn.config`` both raise. Swallowing the
+            # error lets the thread finish cleanly.
+            import contextlib
+            import tkinter as _tk
+
             if result[0] is None:
-                self._win.after(300, _poll)
+                with contextlib.suppress(_tk.TclError):
+                    self._win.after(300, _poll)
                 return
 
             steps = result[0]
@@ -1848,10 +1887,14 @@ class SetupWizard:
             if not critical_fail:
                 _append_log("\n  Configuration complete!")
                 self._data["pro_setup_done"] = True
-                self._next_btn.state(["!disabled"])
-                self._next_btn.config(text="Finish")
+                with contextlib.suppress(_tk.TclError):
+                    self._next_btn.state(["!disabled"])
+                    self._next_btn.config(text="Finish")
             else:
                 _append_log("\n  Setup failed. Please go back and check your settings.")
+            # Setup is no longer running — allow a retry if the user
+            # fixed the underlying issue (e.g. corrected the region).
+            self._data["pro_setup_running"] = False
 
         _append_log("Starting S3 configuration...")
         threading.Thread(target=_do, daemon=True).start()

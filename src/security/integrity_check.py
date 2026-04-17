@@ -86,19 +86,147 @@ def compute_checksums() -> dict[str, str]:
     return checksums
 
 
+def _dpapi_wrap(data: bytes) -> bytes:
+    """Encrypt ``data`` with Windows DPAPI (user scope).
+
+    The wrapped blob can only be decrypted by the same Windows user
+    on the same machine. Returns the raw data unchanged on
+    non-Windows platforms (no equivalent system-managed key store
+    available without introducing an interactive step).
+
+    Raises:
+        OSError: if DPAPI is unavailable or the call fails. Callers
+            decide whether to fall back or abort.
+    """
+    if sys.platform != "win32":
+        return data
+    import ctypes
+    from ctypes import wintypes
+
+    class _DATA_BLOB(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_char)),
+        ]
+
+    # ``create_string_buffer`` preserves embedded null bytes — using
+    # ``c_char_p`` would silently truncate at the first ``\x00`` and
+    # corrupt binary payloads (HMAC keys are uniformly random, so a
+    # zero byte in the first 32 bytes happens ~12% of the time).
+    buf_in = ctypes.create_string_buffer(data, len(data))
+    blob_in = _DATA_BLOB(
+        len(data),
+        ctypes.cast(buf_in, ctypes.POINTER(ctypes.c_char)),
+    )
+    blob_out = _DATA_BLOB()
+    if not ctypes.windll.crypt32.CryptProtectData(
+        ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
+    ):
+        raise OSError(f"CryptProtectData failed (error {ctypes.GetLastError()})")
+    try:
+        wrapped = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    return wrapped
+
+
+def _dpapi_unwrap(data: bytes) -> bytes:
+    """Decrypt ``data`` with Windows DPAPI. Inverse of ``_dpapi_wrap``.
+
+    Raises:
+        OSError: on Windows if the blob cannot be unwrapped (e.g.
+            different user, different machine, or the data was
+            never wrapped).
+    """
+    if sys.platform != "win32":
+        return data
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _DATA_BLOB(ctypes.Structure):
+            _fields_ = [
+                ("cbData", wintypes.DWORD),
+                ("pbData", ctypes.POINTER(ctypes.c_char)),
+            ]
+
+        # create_string_buffer (NOT c_char_p) preserves null bytes
+        # inside the ciphertext — DPAPI blobs are binary and routinely
+        # contain zeros.
+        buf_in = ctypes.create_string_buffer(data, len(data))
+        blob_in = _DATA_BLOB(
+            len(data),
+            ctypes.cast(buf_in, ctypes.POINTER(ctypes.c_char)),
+        )
+        blob_out = _DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(blob_in), None, None, None, None, 0, ctypes.byref(blob_out)
+        ):
+            raise OSError(f"CryptUnprotectData failed (error {ctypes.GetLastError()})")
+        try:
+            plain = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+        return plain
+    except Exception as e:
+        raise OSError(f"DPAPI unwrap failed: {e}") from e
+
+
+# Marker prefix so we know a key file has been wrapped. Without this
+# marker the file contents are either legacy plaintext (32 bytes) or
+# some other format; we can distinguish and handle each case.
+_DPAPI_MARKER = b"DPAPI\x01"
+
+
 def _get_hmac_key() -> bytes:
-    """Get or create the HMAC key for checksum signing."""
+    """Get or create the HMAC key for checksum signing.
+
+    On Windows, the key is wrapped with DPAPI (user scope) before
+    writing so that a malware process running as the user still
+    needs to issue CryptUnprotectData — it cannot simply read the
+    file to recover the key. Without the wrap, a read-the-file
+    attacker could forge the checksum HMAC and defeat the
+    tamper-detection mechanism entirely.
+    """
     appdata = os.environ.get("APPDATA", "")
     key_path = Path(appdata) / "BackupManager" / HMAC_KEY_FILE
     if key_path.exists():
         try:
-            return key_path.read_bytes()
+            stored = key_path.read_bytes()
+            if stored.startswith(_DPAPI_MARKER):
+                try:
+                    return _dpapi_unwrap(stored[len(_DPAPI_MARKER) :])
+                except OSError as e:
+                    logger.warning("Could not unwrap HMAC key, regenerating: %s", e)
+            else:
+                # Plain 32-byte key (from a previous version or from a
+                # platform without DPAPI). Keep using it, but on the
+                # next save it will be re-wrapped.
+                if len(stored) == 32:
+                    return stored
+                logger.warning("HMAC key file has unexpected size, regenerating")
         except OSError:
             logger.warning("Could not read HMAC key, generating new one")
 
     key = secrets.token_bytes(32)
     key_path.parent.mkdir(parents=True, exist_ok=True)
-    key_path.write_bytes(key)
+
+    if sys.platform == "win32":
+        try:
+            wrapped_payload = _dpapi_wrap(key)
+            wrapped = _DPAPI_MARKER + wrapped_payload
+        except OSError as e:
+            # DPAPI broken (service unavailable, user profile issues).
+            # Without the marker the key is stored in clear — store it
+            # that way rather than silently writing a bogus "DPAPI"
+            # file that cannot be unwrapped next time (would trigger a
+            # regen loop and neutralise tamper-detection entirely).
+            logger.warning("DPAPI wrap failed, HMAC key stored in clear: %s", e)
+            wrapped = key
+    else:
+        wrapped = key
+
+    key_path.write_bytes(wrapped)
     return key
 
 

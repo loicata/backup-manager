@@ -4,6 +4,7 @@ Sends HTML-formatted backup reports via SMTP.
 Supports Gmail, Outlook, ProtonMail (via Bridge), and custom servers.
 """
 
+import html
 import logging
 import smtplib
 import ssl
@@ -12,6 +13,21 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from src.core.config import EmailConfig
+
+
+def _esc(value) -> str:
+    """HTML-escape ``value`` for safe inclusion in a template.
+
+    All user-supplied fields (profile names, file paths, error
+    messages from exceptions) flow straight into f-string HTML
+    templates. Without escaping, a profile named ``</td><script>``
+    or a file path with ``&``/``<`` in it breaks the rendered
+    email — and on lax webmail clients could even execute the
+    script. ``html.escape`` covers the five metacharacters that
+    matter: ``&``, ``<``, ``>``, ``"``, ``'``.
+    """
+    return html.escape(str(value), quote=True)
+
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +183,32 @@ def _send_email(
         return False, "SMTP authentication failed — check username/password"
     except smtplib.SMTPConnectError:
         return False, f"Could not connect to {config.smtp_host}:{config.smtp_port}"
+    except smtplib.SMTPRecipientsRefused as e:
+        # The recipient (user's notification inbox) was rejected by
+        # the server. Previously this tumbled into the generic
+        # ``except Exception`` and was logged as a one-line warning
+        # — the caller kept going, the backup was marked success,
+        # and the user never learned their notifications stopped
+        # being delivered. Surface a distinct, actionable message
+        # AND an ERROR-level log so the operator's log watcher or
+        # the bug report surface catches it.
+        refused = ", ".join(e.recipients.keys()) if e.recipients else config.to_address
+        logger.error(
+            "SMTP recipients refused for %s — notifications are NOT being delivered. "
+            "Check that the address is valid and the mailbox is not full.",
+            refused,
+        )
+        return False, (
+            f"Recipients refused: {refused}. Notifications are not being "
+            f"delivered — update the 'To' address."
+        )
+    except smtplib.SMTPSenderRefused as e:
+        logger.error("SMTP sender refused: %s (%s)", config.from_address, e.smtp_error)
+        return False, (
+            f"Sender refused: {config.from_address}. The SMTP server will not "
+            f"relay mail from this address — check the 'From' field and the "
+            f"provider's sending policy."
+        )
     except Exception as e:
         # Log without traceback to avoid leaking credentials from login() frames
         logger.error("Email send failed: %s: %s", type(e).__name__, e)
@@ -201,7 +243,7 @@ def _build_html(
             <td style="padding: 12px; border-top: 1px solid #eee;">
                 <strong>Details</strong>
                 <pre style="background: #f8f9fa; padding: 10px; border-radius: 4px;
-                            font-size: 12px; overflow-x: auto;">{details}</pre>
+                            font-size: 12px; overflow-x: auto;">{_esc(details)}</pre>
             </td>
         </tr>
         """
@@ -216,7 +258,7 @@ def _build_html(
             <tr>
                 <td style="background: {color}; color: white; padding: 16px 20px;
                            font-size: 18px; font-weight: bold;">
-                    Backup Manager — {status}
+                    Backup Manager — {_esc(status)}
                 </td>
             </tr>
             <tr>
@@ -224,15 +266,15 @@ def _build_html(
                     <table style="width: 100%; border-collapse: collapse;">
                         <tr>
                             <td style="padding: 8px 0; color: #666;">Profile</td>
-                            <td style="padding: 8px 0; font-weight: bold;">{profile_name}</td>
+                            <td style="padding: 8px 0; font-weight: bold;">{_esc(profile_name)}</td>
                         </tr>
                         <tr>
                             <td style="padding: 8px 0; color: #666;">Time</td>
-                            <td style="padding: 8px 0;">{timestamp}</td>
+                            <td style="padding: 8px 0;">{_esc(timestamp)}</td>
                         </tr>
                         <tr>
                             <td style="padding: 8px 0; color: #666;">Summary</td>
-                            <td style="padding: 8px 0;">{summary}</td>
+                            <td style="padding: 8px 0;">{_esc(summary)}</td>
                         </tr>
                     </table>
                 </td>
@@ -241,7 +283,7 @@ def _build_html(
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
                            border-top: 1px solid #eee; text-align: center;">
-                    Backup Manager v{__version__}
+                    Backup Manager v{_esc(__version__)}
                 </td>
             </tr>
         </table>
@@ -276,6 +318,7 @@ def _build_verify_html(
     # Status colors for table cells
     status_colors = {
         "ok": "#27ae60",
+        "warning": "#f39c12",
         "corrupted": "#e74c3c",
         "missing": "#f39c12",
         "error": "#e74c3c",
@@ -285,16 +328,16 @@ def _build_verify_html(
     table_rows = ""
     for bvr in results:
         s_color = status_colors.get(bvr.status, "#666")
-        s_label = bvr.status.upper()
+        s_label = _esc(bvr.status.upper())
         table_rows += f"""
             <tr>
-                <td style="padding: 8px; border-bottom: 1px solid #eee;">{bvr.destination}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #eee;">{_esc(bvr.destination)}</td>
                 <td style="padding: 8px; border-bottom: 1px solid #eee;
-                           font-family: monospace; font-size: 12px;">{bvr.backup_name}</td>
+                           font-family: monospace; font-size: 12px;">{_esc(bvr.backup_name)}</td>
                 <td style="padding: 8px; border-bottom: 1px solid #eee;
                            color: {s_color}; font-weight: bold;">{s_label}</td>
                 <td style="padding: 8px; border-bottom: 1px solid #eee;
-                           color: #666; font-size: 12px;">{bvr.message}</td>
+                           color: #666; font-size: 12px;">{_esc(bvr.message)}</td>
             </tr>"""
 
     return f"""
@@ -307,7 +350,7 @@ def _build_verify_html(
             <tr>
                 <td style="background: {color}; color: white; padding: 16px 20px;
                            font-size: 18px; font-weight: bold;">
-                    Backup Manager — {status}
+                    Backup Manager — {_esc(status)}
                 </td>
             </tr>
             <tr>
@@ -315,15 +358,15 @@ def _build_verify_html(
                     <table style="width: 100%; border-collapse: collapse;">
                         <tr>
                             <td style="padding: 8px 0; color: #666;">Profile</td>
-                            <td style="padding: 8px 0; font-weight: bold;">{profile_name}</td>
+                            <td style="padding: 8px 0; font-weight: bold;">{_esc(profile_name)}</td>
                         </tr>
                         <tr>
                             <td style="padding: 8px 0; color: #666;">Time</td>
-                            <td style="padding: 8px 0;">{timestamp}</td>
+                            <td style="padding: 8px 0;">{_esc(timestamp)}</td>
                         </tr>
                         <tr>
                             <td style="padding: 8px 0; color: #666;">Summary</td>
-                            <td style="padding: 8px 0;">{summary}</td>
+                            <td style="padding: 8px 0;">{_esc(summary)}</td>
                         </tr>
                     </table>
                 </td>
@@ -348,7 +391,7 @@ def _build_verify_html(
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
                            border-top: 1px solid #eee; text-align: center;">
-                    Backup Manager v{__version__}
+                    Backup Manager v{_esc(__version__)}
                 </td>
             </tr>
         </table>
@@ -445,13 +488,13 @@ def _build_backup_html(
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # --- Overview section ---
-    overview_rows = _ROW.format(label="Profile", value=f"<strong>{profile_name}</strong>")
+    overview_rows = _ROW.format(label="Profile", value=f"<strong>{_esc(profile_name)}</strong>")
     if backup_type:
-        overview_rows += _ROW.format(label="Type", value=backup_type)
-    overview_rows += _ROW.format(label="Time", value=timestamp)
+        overview_rows += _ROW.format(label="Type", value=_esc(backup_type))
+    overview_rows += _ROW.format(label="Time", value=_esc(timestamp))
     if result and result.duration_seconds > 0:
         overview_rows += _ROW.format(
-            label="Duration", value=_format_duration(result.duration_seconds)
+            label="Duration", value=_esc(_format_duration(result.duration_seconds))
         )
 
     sections = _SECTION.format(title="Overview", rows=overview_rows)
@@ -472,16 +515,16 @@ def _build_backup_html(
     if result and result.mirror_results:
         dest_rows = _ROW.format(
             label="Primary",
-            value=f"{result.backup_path or 'OK'}",
+            value=_esc(result.backup_path or "OK"),
         )
         for mirror_tuple in result.mirror_results:
             name, ok, msg = mirror_tuple[0], mirror_tuple[1], mirror_tuple[2]
             desc = mirror_tuple[3] if len(mirror_tuple) > 3 else ""
             if ok:
-                display = desc if desc else msg
+                display = _esc(desc if desc else msg)
             else:
-                display = f'<span style="color: #e74c3c;">FAILED</span> {msg}'
-            dest_rows += _ROW.format(label=name, value=display)
+                display = f'<span style="color: #e74c3c;">FAILED</span> {_esc(msg)}'
+            dest_rows += _ROW.format(label=_esc(name), value=display)
         sections += _SECTION.format(title="Destinations", rows=dest_rows)
 
     # --- Retention section ---
@@ -505,12 +548,15 @@ def _build_backup_html(
         warnings = [e for e in result.phase_errors if e.severity == ErrorSeverity.WARNING]
 
         def _render_lines(items):
+            # The result is embedded in a ``<pre>`` so escape everything
+            # — file paths and raw exception messages routinely contain
+            # ``<`` / ``>`` / ``&`` that would break or inject HTML.
             lines = []
             for err in items[:20]:
                 if err.file_path:
-                    lines.append(f"[{err.phase}] {err.file_path}: {err.message}")
+                    lines.append(f"[{_esc(err.phase)}] {_esc(err.file_path)}: {_esc(err.message)}")
                 else:
-                    lines.append(f"[{err.phase}] {err.message}")
+                    lines.append(f"[{_esc(err.phase)}] {_esc(err.message)}")
             remaining = len(items) - 20
             if remaining > 0:
                 lines.append(f"... and {remaining} more")
@@ -544,7 +590,7 @@ def _build_backup_html(
         <strong style="color: #333; font-size: 13px;">Log</strong>
         <pre style="background: #f8f9fa; padding: 10px; border-radius: 4px;
                     font-size: 11px; overflow-x: auto; max-height: 400px;
-                    overflow-y: auto; margin-top: 6px;">{details}</pre>
+                    overflow-y: auto; margin-top: 6px;">{_esc(details)}</pre>
     </td>
 </tr>"""
 
@@ -558,7 +604,7 @@ def _build_backup_html(
             <tr>
                 <td style="background: {color}; color: white; padding: 16px 20px;
                            font-size: 18px; font-weight: bold;">
-                    Backup Manager \u2014 {status}
+                    Backup Manager \u2014 {_esc(status)}
                 </td>
             </tr>
             {sections}
@@ -566,7 +612,7 @@ def _build_backup_html(
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
                            border-top: 1px solid #eee; text-align: center;">
-                    Backup Manager v{__version__}
+                    Backup Manager v{_esc(__version__)}
                 </td>
             </tr>
         </table>
@@ -593,18 +639,36 @@ def send_verify_report(
     if not config.enabled:
         return False, "Email notifications disabled"
 
-    # Only send if errors detected or send_on_success is enabled
-    if result.success and not config.send_on_success:
-        return False, "No errors and success notifications disabled"
+    warning_count = getattr(result, "warning_count", 0)
+    has_warnings = warning_count > 0
 
-    if result.success:
-        subject = f"Backup Manager — Verification OK — {profile_name}"
-    else:
+    # Send when: errors detected, warnings detected, OR success+send_on_success.
+    # Warnings MUST trigger a notification even on ``result.success == True``
+    # because they indicate integrity cannot be proven — the operator needs
+    # to know. Without this branch, a silent "all OK but actually 5 backups
+    # unverifiable" state was possible.
+    if result.success and not has_warnings and not config.send_on_success:
+        return False, "No errors/warnings and success notifications disabled"
+
+    if not result.success:
         subject = f"Backup Manager — Verification FAILED — {profile_name}"
+    elif has_warnings:
+        subject = (
+            f"Backup Manager — Verification with {warning_count} warning(s) " f"— {profile_name}"
+        )
+    else:
+        subject = f"Backup Manager — Verification OK — {profile_name}"
 
-    summary = (
-        f"{result.ok_count} OK, {result.error_count} error(s) " f"in {result.duration_seconds:.1f}s"
-    )
+    if has_warnings:
+        summary = (
+            f"{result.ok_count} OK, {warning_count} warning(s), "
+            f"{result.error_count} error(s) in {result.duration_seconds:.1f}s"
+        )
+    else:
+        summary = (
+            f"{result.ok_count} OK, {result.error_count} error(s) "
+            f"in {result.duration_seconds:.1f}s"
+        )
 
     html = _build_verify_html(
         profile_name,

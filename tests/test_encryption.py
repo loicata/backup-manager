@@ -45,6 +45,28 @@ class TestDeriveKey:
         k2 = derive_key("password", s2)
         assert k1 != k2
 
+    def test_empty_password_rejected(self):
+        """Empty passwords must raise: they derive a deterministic key
+        from the salt alone — a meaningless 'encryption' that decrypts
+        with any empty password on any machine."""
+        salt = os.urandom(SALT_SIZE)
+        with pytest.raises(ValueError, match="empty"):
+            derive_key("", salt)
+
+    def test_unicode_password_normalised_nfc(self):
+        """Visually identical passwords must derive the same key.
+
+        ``é`` as a single codepoint (U+00E9, precomposed, NFC) and
+        ``é`` as ``e`` + ``U+0301`` (combining acute, NFD) look the
+        same but encode to different byte sequences. Without NFC
+        normalisation a user whose IME sometimes emits NFD would lose
+        access to a backup encrypted when the IME emitted NFC.
+        """
+        salt = os.urandom(SALT_SIZE)
+        precomposed = derive_key("caf\u00e9", salt)  # "café" NFC
+        combining = derive_key("cafe\u0301", salt)  # "café" NFD
+        assert precomposed == combining
+
 
 class TestEncryptDecryptBytes:
     def test_roundtrip(self):
@@ -126,8 +148,13 @@ class TestPasswordStorage:
             retrieved = retrieve_password(stored)
             assert retrieved == "my_secret_password"
 
-    def test_legacy_plaintext_passthrough(self):
-        assert retrieve_password("plaintext_value") == "plaintext_value"
+    def test_unprefixed_payload_rejected(self):
+        """Unprefixed payloads are a downgrade-attack surface and must
+        raise. Previously they were silently returned as plaintext,
+        letting anyone who could edit the profile file plant an
+        arbitrary 'password'."""
+        with pytest.raises(ValueError, match="format prefix"):
+            retrieve_password("plaintext_value")
 
     def test_invalid_aes_format_raises(self):
         with pytest.raises(ValueError):

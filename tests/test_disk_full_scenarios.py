@@ -117,9 +117,15 @@ class TestManifestDiskFull:
 
 
 class TestConfigSaveDiskFull:
-    """Disk full when saving profile JSON."""
+    """Disk full when saving profile JSON.
+
+    ``_atomic_write`` now uses ``os.open``/``os.write``/``os.fsync``
+    instead of ``Path.write_text`` so the mock targets that path.
+    """
 
     def test_atomic_write_enospc_on_tmp(self, tmp_path):
+        import os as _os
+
         from src.core.config import ConfigManager
 
         cm = ConfigManager(config_dir=tmp_path / "cfg")
@@ -127,10 +133,16 @@ class TestConfigSaveDiskFull:
 
         enospc = OSError(errno.ENOSPC, "No space left on device")
         with (
-            patch.object(Path, "write_text", side_effect=enospc),
+            patch("src.core.config.os.write", side_effect=enospc),
             pytest.raises(OSError, match="No space left"),
         ):
             cm._atomic_write(filepath, {"key": "value"})
+
+        # .tmp must be cleaned up so secrets never linger after failure.
+        assert not (cm.profiles_dir / "test.json.tmp").exists(), ".tmp should be removed on failure"
+
+        # Avoid unused-import warning in Python 3.13+
+        assert _os is not None
 
     def test_save_profile_enospc(self, tmp_path):
         from src.core.config import BackupProfile, ConfigManager
@@ -140,7 +152,7 @@ class TestConfigSaveDiskFull:
 
         enospc = OSError(errno.ENOSPC, "No space left on device")
         with (
-            patch.object(Path, "write_text", side_effect=enospc),
+            patch("src.core.config.os.write", side_effect=enospc),
             pytest.raises(OSError, match="No space left"),
         ):
             cm.save_profile(profile)

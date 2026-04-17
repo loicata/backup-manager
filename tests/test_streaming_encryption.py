@@ -366,3 +366,93 @@ class TestTarfileIntegration:
             reader = DecryptingReader(buf, "wrong-password-1234567")
             with tarfile.open(fileobj=reader, mode="r|"):
                 pass
+
+
+class TestHmacTrailerTruncation:
+    """Global HMAC-SHA256 trailer detects archive truncation.
+
+    Per-chunk AES-GCM tags authenticate each chunk's content but
+    cannot detect whether whole chunks were removed from the end of
+    the archive. The version-2 format appends an HMAC-SHA256 over
+    (header + all records + EOF sentinel) specifically to catch this.
+    """
+
+    def _encrypt_multi_chunks(self, chunks: list[bytes]) -> bytes:
+        enc = StreamEncryptor(PASSWORD)
+        out = enc.header()
+        for c in chunks:
+            out += enc.encrypt_chunk(c)
+        out += enc.finalize()
+        return out
+
+    def test_truncated_before_hmac_raises(self):
+        """Remove the last 32 bytes (HMAC trailer) -> decryption fails."""
+        data = self._encrypt_multi_chunks([b"chunk1", b"chunk2", b"chunk3"])
+        # Drop the HMAC trailer (last 32 bytes).
+        truncated = data[:-32]
+        stream = io.BytesIO(truncated)
+        dec = StreamDecryptor(PASSWORD)
+        dec.read_header(stream)
+        # Consume chunks successfully...
+        assert dec.decrypt_next_chunk(stream) == b"chunk1"
+        assert dec.decrypt_next_chunk(stream) == b"chunk2"
+        assert dec.decrypt_next_chunk(stream) == b"chunk3"
+        # ... then the EOF-sentinel branch attempts to read the
+        # missing 32-byte HMAC and surfaces a clear error.
+        with pytest.raises(ValueError):
+            dec.decrypt_next_chunk(stream)
+
+    def test_truncated_mid_chunk_raises(self):
+        """Drop several chunks + trailer -> HMAC mismatch is flagged."""
+        data = self._encrypt_multi_chunks([b"chunk1", b"chunk2", b"chunk3", b"chunk4"])
+        # Emulate the attack described in the audit: keep the first
+        # two chunks and splice an EOF + bogus trailer.
+        # Parse header to extract the position of chunks.
+        # Header is 37 bytes; each chunk record = 4 + 12 + len + 16.
+        header_end = TAR_WBENC_HEADER_SIZE
+        chunk1_size = 4 + 12 + 6 + 16  # "chunk1" = 6 bytes
+        chunk2_size = 4 + 12 + 6 + 16
+        keep = header_end + chunk1_size + chunk2_size
+        tampered = data[:keep] + b"\x00\x00\x00\x00" + (b"\x00" * 32)
+
+        stream = io.BytesIO(tampered)
+        dec = StreamDecryptor(PASSWORD)
+        dec.read_header(stream)
+        assert dec.decrypt_next_chunk(stream) == b"chunk1"
+        assert dec.decrypt_next_chunk(stream) == b"chunk2"
+        with pytest.raises(ValueError, match="HMAC mismatch"):
+            dec.decrypt_next_chunk(stream)
+
+    def test_tampered_ciphertext_fails_chunk_tag_first(self):
+        """Flipping a ciphertext byte trips the per-chunk GCM tag
+        before the HMAC even gets a chance (defense in depth)."""
+        data = self._encrypt_multi_chunks([b"chunk1"])
+        # Flip a byte in the middle of the ciphertext.
+        tampered = bytearray(data)
+        # Chunk data starts after header+4(len)+12(nonce)
+        offset = TAR_WBENC_HEADER_SIZE + 4 + 12 + 2
+        tampered[offset] ^= 0xFF
+        stream = io.BytesIO(bytes(tampered))
+        dec = StreamDecryptor(PASSWORD)
+        dec.read_header(stream)
+        with pytest.raises(
+            (ValueError, cryptography.exceptions.InvalidTag),
+        ):
+            dec.decrypt_next_chunk(stream)
+
+    def test_full_integrity_roundtrip_with_hmac(self):
+        """End-to-end: encrypt -> decrypt yields the same plaintext AND
+        the HMAC verifies cleanly (no exception)."""
+        chunks = [b"a", b"bb", b"ccc", b"dddd" * 1000]
+        data = self._encrypt_multi_chunks(chunks)
+
+        stream = io.BytesIO(data)
+        dec = StreamDecryptor(PASSWORD)
+        dec.read_header(stream)
+        decrypted = []
+        while True:
+            chunk = dec.decrypt_next_chunk(stream)
+            if chunk is None:
+                break
+            decrypted.append(chunk)
+        assert decrypted == chunks

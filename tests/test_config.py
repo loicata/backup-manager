@@ -100,8 +100,11 @@ class TestStorageConfig:
 
 class TestBackupProfile:
     def test_default_profile_has_id(self):
+        # Full UUID hex — 8-char IDs gave a measurable collision rate
+        # for users importing profiles across installs.
         p = BackupProfile()
-        assert len(p.id) == 8
+        assert len(p.id) == 32
+        assert all(c in "0123456789abcdef" for c in p.id)
 
     def test_unique_ids(self):
         p1 = BackupProfile()
@@ -174,6 +177,38 @@ class TestConfigManager:
         profiles = mgr.get_all_profiles()
         assert len(profiles) == 1
         assert profiles[0].name == "Recoverable"
+
+    def test_atomic_write_no_tmp_leftover_on_success(self, tmp_config_dir):
+        """After a successful save no .tmp file lingers."""
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="Clean")
+        mgr.save_profile(profile)
+
+        tmp_files = list((tmp_config_dir / "profiles").glob("*.json.tmp"))
+        assert tmp_files == [], f"Leaked .tmp files: {tmp_files}"
+
+    def test_atomic_write_cleans_tmp_on_failure(self, tmp_config_dir, monkeypatch):
+        """If os.replace fails, the .tmp must be removed so a secret
+        payload never lingers on disk with a predictable name."""
+        import os as _os
+
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="Failing")
+
+        real_replace = _os.replace
+
+        def _boom(src, dst):
+            raise PermissionError("simulated rename failure")
+
+        monkeypatch.setattr(_os, "replace", _boom)
+        with pytest.raises(PermissionError):
+            mgr.save_profile(profile)
+
+        # Restore for teardown
+        monkeypatch.setattr(_os, "replace", real_replace)
+
+        tmp_files = list((tmp_config_dir / "profiles").glob("*.json.tmp"))
+        assert tmp_files == [], f"Orphan .tmp must be cleaned up on failure: {tmp_files}"
 
     def test_duplicate_ids_deduplicated(self, tmp_config_dir):
         mgr = ConfigManager(config_dir=tmp_config_dir)
@@ -365,6 +400,23 @@ class TestComputeProfileHash:
         p1 = BackupProfile(retention=RetentionConfig(gfs_daily=7))
         p2 = BackupProfile(retention=RetentionConfig(gfs_daily=14))
         assert compute_profile_hash(p1) != compute_profile_hash(p2)
+
+    def test_backup_type_excluded_from_hash(self):
+        """backup_type (FULL/DIFFERENTIAL) must NOT affect the hash.
+
+        The backup engine temporarily flips ``backup_type`` to FULL
+        when a DIFF is auto-promoted (e.g. profile changed, cycle
+        reached). If the hash depended on backup_type, the
+        ``profile_hash`` computed during the promoted run would differ
+        from the hash computed next time (when backup_type is back to
+        DIFFERENTIAL), incorrectly triggering another FULL and
+        defeating the differential-backup savings.
+        """
+        p_full = BackupProfile(backup_type=BackupType.FULL)
+        p_diff = BackupProfile(backup_type=BackupType.DIFFERENTIAL)
+        assert compute_profile_hash(p_full) == compute_profile_hash(
+            p_diff
+        ), "compute_profile_hash must be independent of backup_type"
 
     def test_name_change_changes_hash(self):
         """Changing profile name changes the hash."""

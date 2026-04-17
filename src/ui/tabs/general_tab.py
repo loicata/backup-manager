@@ -24,6 +24,9 @@ class GeneralTab(ScrollableTab):
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self._size_cancel = threading.Event()
+        self._retention_tab = None
+        self._last_backup_type = BackupType.FULL.value
+        self._loading = False
         self._build_ui()
 
     def _build_ui(self):
@@ -85,6 +88,15 @@ class GeneralTab(ScrollableTab):
         )
         full_spin.pack(side="left", padx=4)
         ttk.Label(self._full_every_frame, text="backups").pack(side="left")
+
+        # Info label: shows current daily retention while DIFF is selected.
+        # Updated reactively when retention_tab is wired via set_retention_tab().
+        self._retention_info_label = ttk.Label(
+            self._diff_info_frame,
+            text="",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        )
 
         self.type_var.trace_add("write", lambda *a: self._toggle_diff_info())
         self._toggle_diff_info()
@@ -332,43 +344,116 @@ class GeneralTab(ScrollableTab):
         thread.start()
 
     def _toggle_diff_info(self) -> None:
-        """Show/hide the differential info and cycle field."""
-        is_diff = self.type_var.get() == BackupType.DIFFERENTIAL.value
+        """Show/hide the differential info frame and handle Full\u2192Diff transition.
+
+        On a user-initiated transition from Full to Differential, auto-bump
+        daily retention to cover the full-backup cycle so the validation at
+        save-time does not trip. The bump is one-shot: we never touch retention
+        again for subsequent cycle changes or the reverse transition.
+        """
+        current = self.type_var.get()
+        is_diff = current == BackupType.DIFFERENTIAL.value
         if is_diff:
             self._diff_info_frame.pack(fill="x", pady=(4, 0))
         else:
             self._diff_info_frame.pack_forget()
 
+        if not self._loading:
+            was_full = self._last_backup_type == BackupType.FULL.value
+            if was_full and is_diff:
+                self._bump_retention_if_needed()
+
+        self._update_retention_label()
+        self._last_backup_type = current
+
+    def _bump_retention_if_needed(self) -> None:
+        """One-shot bump of daily retention to match the full-backup cycle.
+
+        Runs on Full\u2192Differential transition. Increases the retention
+        tab's daily value only when it is strictly below the cycle; never
+        reduces an already-sufficient value.
+        """
+        if self._retention_tab is None:
+            return
+        try:
+            gfs_var = self._retention_tab.get_gfs_daily_var()
+            ui_val = gfs_var.get()
+            cycle = self.full_every_var.get()
+        except (tk.TclError, ValueError, AttributeError):
+            return
+        current_internal = ui_val + 1
+        if current_internal < cycle:
+            gfs_var.set(cycle - 1)
+
+    def _update_retention_label(self) -> None:
+        """Show/hide the daily-retention info label in Differential mode."""
+        is_diff = self.type_var.get() == BackupType.DIFFERENTIAL.value
+        if not is_diff or self._retention_tab is None:
+            self._retention_info_label.pack_forget()
+            return
+        try:
+            ui_val = self._retention_tab.get_gfs_daily_var().get()
+        except (tk.TclError, ValueError, AttributeError):
+            self._retention_info_label.pack_forget()
+            return
+        internal = ui_val + 1
+        self._retention_info_label.config(
+            text=f"Retention: {internal} days (change in the Retention tab)."
+        )
+        self._retention_info_label.pack(anchor="w", pady=(4, 0))
+
+    def set_retention_tab(self, tab) -> None:
+        """Wire the Retention tab so this tab can read/update daily retention.
+
+        Called once from the app after all tabs are constructed.
+        """
+        self._retention_tab = tab
+        try:
+            gfs_var = tab.get_gfs_daily_var()
+        except AttributeError:
+            return
+        gfs_var.trace_add("write", lambda *_: self._update_retention_label())
+        self._update_retention_label()
+
     def load_profile(self, profile: BackupProfile):
         """Load profile data into UI widgets."""
-        self.name_var.set(profile.name)
-        self.type_var.set(profile.backup_type.value)
+        self._loading = True
+        try:
+            self.name_var.set(profile.name)
+            self.type_var.set(profile.backup_type.value)
 
-        # Set mode based on profile
-        if profile.object_lock_enabled:
-            self.mode_var.set("anti-ransomware")
-            self._type_frame.pack_forget()
-        else:
-            self.mode_var.set("classic")
+            # Set mode based on profile
+            if profile.object_lock_enabled:
+                self.mode_var.set("anti-ransomware")
+                self._type_frame.pack_forget()
+            else:
+                self.mode_var.set("classic")
 
-        # Clear and reload sources
-        for item in self.sources_tree.get_children():
-            self.sources_tree.delete(item)
-        for path in profile.source_paths:
-            p = Path(path)
-            ptype = "Folder" if p.is_dir() else "File"
-            self.sources_tree.insert("", "end", values=(path, ptype))
+            # Clear and reload sources
+            for item in self.sources_tree.get_children():
+                self.sources_tree.delete(item)
+            for path in profile.source_paths:
+                p = Path(path)
+                ptype = "Folder" if p.is_dir() else "File"
+                self.sources_tree.insert("", "end", values=(path, ptype))
 
-        self.exclude_var.set(", ".join(profile.exclude_patterns))
-        self.bw_percent_var.set(profile.bandwidth_percent)
-        self.full_every_var.set(profile.full_backup_every)
+            self.exclude_var.set(", ".join(profile.exclude_patterns))
+            self.bw_percent_var.set(profile.bandwidth_percent)
+            self.full_every_var.set(profile.full_backup_every)
 
-        # Retry from schedule config
-        self.retry_var.set(profile.schedule.retry_enabled)
+            # Retry from schedule config
+            self.retry_var.set(profile.schedule.retry_enabled)
 
-        # Load auto-start state from system
-        self.autostart_var.set(AutoStart.is_enabled())
-        self.minimized_var.set(not AutoStart.is_show_window())
+            # Load auto-start state from system
+            self.autostart_var.set(AutoStart.is_enabled())
+            self.minimized_var.set(not AutoStart.is_show_window())
+        finally:
+            self._loading = False
+
+        # Refresh label for the freshly-loaded backup type (no bump since
+        # load_profile reflects persisted user choices, not a new transition).
+        self._last_backup_type = self.type_var.get()
+        self._update_retention_label()
 
         self._update_total_size()
 

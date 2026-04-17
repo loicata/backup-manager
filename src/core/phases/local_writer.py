@@ -105,6 +105,7 @@ def write_encrypted_tar(
     partial_path = archive_path.with_name(archive_path.name + ".partial")
     total = len(files)
 
+    skipped: set[str] = set()
     try:
         with open(partial_path, "wb") as out_file:
             enc_writer = EncryptingWriter(out_file, password)
@@ -120,6 +121,7 @@ def write_encrypted_tar(
                             "File vanished, skipping: %s",
                             file_info.relative_path,
                         )
+                        skipped.add(file_info.relative_path)
                         continue
                     info = tarfile.TarInfo(name=file_info.relative_path)
                     info.size = actual_size
@@ -132,8 +134,13 @@ def write_encrypted_tar(
                         phase="backup",
                     )
 
-                # Embed integrity manifest inside the encrypted archive
+                # Embed integrity manifest inside the encrypted archive.
+                # Remove entries for files that vanished during write so
+                # the embedded manifest stays in sync with the archive.
                 if integrity_manifest:
+                    from src.core.phases.manifest import prune_manifest_entries
+
+                    prune_manifest_entries(integrity_manifest, skipped)
                     _add_manifest_to_tar(tar, integrity_manifest)
 
             enc_writer.close()

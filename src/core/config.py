@@ -5,6 +5,7 @@ Sensitive fields (passwords, keys) are encrypted via DPAPI or AES-256-GCM
 before writing to disk.
 """
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -199,7 +200,9 @@ class EmailConfig:
 
 @dataclass
 class BackupProfile:
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    # Full 32-char UUID: 8 chars = 2^32 collision space gave ~1% clash
+    # probability at 10k profiles; full UUID moves that to effectively nil.
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
     name: str = "New profile"
     source_paths: list[str] = field(default_factory=list)
     exclude_patterns: list[str] = field(
@@ -241,6 +244,12 @@ class BackupProfile:
     last_backup_completed: bool = True  # False while any backup is in progress
     incomplete_backup_name: str = ""  # Name of interrupted backup to clean up
     incomplete_backup_was_full: bool = False  # True if the interrupted backup was full
+    # Circuit breaker: counts consecutive crash-recovery triggers that
+    # themselves failed. After MAX_CRASH_RECOVERY_ATTEMPTS the scheduler
+    # stops retrying automatically to avoid a boot-loop DoS on broken
+    # storage (NAS offline, credentials expired) that would otherwise
+    # fire a full backup on every single app launch.
+    crash_recovery_attempts: int = 0
     object_lock_enabled: bool = False  # True for professional S3 Object Lock profiles
 
 
@@ -371,10 +380,8 @@ class ConfigManager:
         import uuid
 
         new_id = uuid.uuid4().hex
-        try:
+        with contextlib.suppress(OSError):
             self._install_id_path.write_text(new_id, encoding="utf-8")
-        except OSError:
-            pass
         return new_id
 
     def get_all_profiles(self) -> list[BackupProfile]:
@@ -397,7 +404,16 @@ class ConfigManager:
                 seen_ids.add(profile.id)
                 profiles.append(profile)
             except Exception:
-                logger.exception("Failed to load profile %s, trying .bak", path)
+                # ERROR-level so UI / log tail surfaces this, not hidden
+                # as an ignorable warning. A bad profile dropped from the
+                # list is visible to the user (profile vanished) — make
+                # it diagnosable from the logs.
+                logger.error(
+                    "Profile file %s is corrupted (bad JSON, unknown enum "
+                    "value, missing required field) — trying .bak fallback",
+                    path,
+                    exc_info=True,
+                )
                 bak = path.with_suffix(".json.bak")
                 if bak.exists():
                     try:
@@ -409,7 +425,12 @@ class ConfigManager:
                             shutil.copy2(bak, path)
                             logger.info("Recovered profile from %s", bak)
                     except Exception:
-                        logger.exception("Failed to recover from %s", bak)
+                        logger.error(
+                            "Profile %s unrecoverable from .bak — skipping. "
+                            "User will see the profile disappear from the UI.",
+                            path,
+                            exc_info=True,
+                        )
 
         profiles.sort(key=lambda p: (p.sort_order, p.name.lower()))
         return profiles
@@ -659,19 +680,54 @@ class ConfigManager:
                 enc["stored_password"] = ""
 
     def _atomic_write(self, filepath: Path, data: dict) -> None:
-        """Crash-safe write: .tmp → .bak → final."""
+        """Crash-safe write: backup existing → fsync .tmp → os.replace.
+
+        The steps matter for crash resilience on Windows:
+
+        1. ``bak`` is copied from the **current** ``filepath`` BEFORE
+           we touch anything, so if a crash happens mid-write the
+           previous good version is still available for recovery.
+
+        2. The serialized payload is written to ``.tmp`` and
+           ``fsync``'d so the bytes are on physical media before we
+           rename. Without ``fsync``, Windows can hold the write in
+           the filesystem cache and a power loss after the rename
+           leaves a zero-length file with the final name.
+
+        3. ``os.replace`` is atomic on POSIX and atomic on NTFS for
+           files on the same volume. ``shutil.move`` can fall back to
+           copy+delete which defeats atomicity.
+
+        4. The ``.tmp`` is written with restrictive permissions where
+           supported (ignored on Windows/FAT) since it may briefly
+           contain encrypted-but-still-sensitive payloads.
+        """
         tmp = filepath.with_suffix(".json.tmp")
         bak = filepath.with_suffix(".json.bak")
 
-        # Write to temp
-        tmp.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-        # Backup existing
+        # Step 1: backup existing FIRST so we never lose the old copy
         if filepath.exists():
             shutil.copy2(filepath, bak)
 
-        # Replace
-        shutil.move(str(tmp), str(filepath))
+        # Step 2: write to .tmp with fsync for durability
+        payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+        try:
+            fd = os.open(
+                str(tmp),
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            try:
+                os.write(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+
+            # Step 3: atomic rename
+            os.replace(tmp, filepath)
+        except BaseException:
+            # If anything failed, remove the partial .tmp so a secret
+            # payload never lingers on disk with a predictable name.
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            raise

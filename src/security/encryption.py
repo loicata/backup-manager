@@ -29,6 +29,8 @@ import os
 import secrets
 import struct
 import sys
+import threading
+import unicodedata
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,32 @@ def _has_dpapi() -> bool:
         return False
 
 
+def _normalize_password(password: str) -> bytes:
+    """Return the UTF-8 encoding of ``password`` after NFC normalisation.
+
+    Without NFC, a user who enters ``é`` via a combining accent
+    (``e`` + U+0301) produces a different byte sequence from ``é``
+    stored as U+00E9, and the derived key is different — losing access
+    to the backup when the user reinstalls on another OS or IME.
+
+    Args:
+        password: The user-entered password.
+
+    Returns:
+        UTF-8 encoded, NFC-normalised password bytes.
+
+    Raises:
+        ValueError: If ``password`` is empty. An empty password would
+            derive a deterministic key from the salt alone — a
+            meaningless "encryption" that trivially decrypts.
+    """
+    if not isinstance(password, str):
+        raise TypeError(f"password must be str, got {type(password).__name__}")
+    if password == "":
+        raise ValueError("Encryption password cannot be empty")
+    return unicodedata.normalize("NFC", password).encode("utf-8")
+
+
 def derive_key(password: str, salt: bytes) -> bytes:
     """Derive a 256-bit key from password using PBKDF2-HMAC-SHA256.
 
@@ -74,10 +102,13 @@ def derive_key(password: str, salt: bytes) -> bytes:
 
     Returns:
         32-byte derived key.
+
+    Raises:
+        ValueError: If the password is empty (see ``_normalize_password``).
     """
     return hashlib.pbkdf2_hmac(
         "sha256",
-        password.encode("utf-8"),
+        _normalize_password(password),
         salt,
         PBKDF2_ITERATIONS,
         dklen=KEY_SIZE,
@@ -144,9 +175,26 @@ def decrypt_bytes(encrypted: bytes, password: str) -> bytes:
 # --- Streaming tar encryption (.tar.wbenc) ---
 
 TAR_WBENC_MAGIC = b"WBEC"
-TAR_WBENC_VERSION = 1
+TAR_WBENC_VERSION = 2
 TAR_WBENC_HEADER_SIZE = 37  # 4 magic + 1 version + 16 salt + 16 reserved
 _RESERVED = b"\x00" * 16
+
+# Version 2 appends an HMAC-SHA256 trailer after the EOF sentinel.
+# Per-chunk GCM tags authenticate each chunk's content, but without a
+# global MAC an attacker could truncate the archive at a chunk
+# boundary and every remaining chunk would still pass its own tag —
+# the ``tarfile`` consumer would extract N files on disk and only
+# raise at the very end, when the damage is already done. The global
+# HMAC is verified by ``DecryptingReader`` as soon as the EOF
+# sentinel is reached; a mismatch raises before returning EOF to the
+# caller so truncation is caught.
+HMAC_TRAILER_SIZE = 32  # SHA-256
+
+# PBKDF2 now derives 64 bytes instead of 32 so we can split them
+# into an AES-GCM key (first 32 bytes) and a separate HMAC-SHA256
+# key (last 32 bytes) without reusing the same material for both
+# primitives — standard TLS-record-layer pattern.
+_MASTER_KEY_SIZE = KEY_SIZE + 32
 
 
 def _read_exact(stream: io.RawIOBase, n: int) -> bytes:
@@ -171,30 +219,71 @@ def _read_exact(stream: io.RawIOBase, n: int) -> bytes:
     return bytes(buf)
 
 
+def _derive_stream_keys(password: str, salt: bytes) -> tuple[bytes, bytes]:
+    """Derive (enc_key, mac_key) from the password via PBKDF2.
+
+    A single PBKDF2 invocation produces 64 bytes of material, split
+    into two independent keys. Using the same master secret for AES
+    and HMAC would be dangerous without domain separation; splitting
+    via a deterministic offset is equivalent to HKDF-expand with the
+    distinct-output-blocks construction and is safe for this use.
+
+    Args:
+        password: User password.
+        salt: 16-byte random salt.
+
+    Returns:
+        ``(enc_key, mac_key)`` — 32 bytes each.
+    """
+    material = hashlib.pbkdf2_hmac(
+        "sha256",
+        _normalize_password(password),
+        salt,
+        PBKDF2_ITERATIONS,
+        dklen=_MASTER_KEY_SIZE,
+    )
+    return material[:KEY_SIZE], material[KEY_SIZE:]
+
+
 class StreamEncryptor:
     """Encrypts data in independent GCM chunks sharing a single derived key.
 
     Each chunk gets a sequential nonce (counter encoded as 12-byte
-    big-endian).  A single PBKDF2 derivation is performed at init.
+    big-endian). A single PBKDF2 derivation is performed at init, and
+    a running HMAC-SHA256 is maintained over every byte emitted —
+    header, chunk records, and EOF sentinel — so the reader can
+    detect truncation even at chunk boundaries.
 
     Args:
         password: Encryption password.
     """
 
     def __init__(self, password: str):
+        import hmac as _hmac
+
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         self._salt = secrets.token_bytes(SALT_SIZE)
-        key = bytearray(derive_key(password, self._salt))
-        self._aesgcm = AESGCM(bytes(key))
-        # Zero out the intermediate key copy
-        for i in range(len(key)):
-            key[i] = 0
+        enc_key, mac_key = _derive_stream_keys(password, self._salt)
+        self._aesgcm = AESGCM(enc_key)
+        self._hmac = _hmac.new(mac_key, digestmod=hashlib.sha256)
         self._counter = 0
+        self._finalized = False
+        # Serialise counter / HMAC / finalize mutations. Two concurrent
+        # callers on the same instance would otherwise get the same GCM
+        # nonce — AES-GCM nonce reuse lets an attacker recover the XOR
+        # of plaintexts and forge tags on arbitrary messages (Joux 2006
+        # "forbidden attack"). The writer is single-threaded today, but
+        # a future ThreadPoolExecutor wrap would reintroduce the
+        # vulnerability silently without this lock.
+        self._lock = threading.Lock()
 
     def header(self) -> bytes:
-        """Return the 37-byte .tar.wbenc file header."""
-        return TAR_WBENC_MAGIC + bytes([TAR_WBENC_VERSION]) + self._salt + _RESERVED
+        """Return the 37-byte .tar.wbenc file header and feed it to HMAC."""
+        with self._lock:
+            h = TAR_WBENC_MAGIC + bytes([TAR_WBENC_VERSION]) + self._salt + _RESERVED
+            self._hmac.update(h)
+            return h
 
     def encrypt_chunk(self, plaintext: bytes) -> bytes:
         """Encrypt one chunk.
@@ -207,19 +296,50 @@ class StreamEncryptor:
         """
         if not plaintext:
             raise ValueError("Cannot encrypt empty chunk")
-        nonce = self._counter.to_bytes(NONCE_SIZE, "big")
-        self._counter += 1
-        ct = self._aesgcm.encrypt(nonce, plaintext, None)
-        length_prefix = struct.pack(">I", len(plaintext))
-        return length_prefix + nonce + ct
+        with self._lock:
+            if self._finalized:
+                raise ValueError("Cannot encrypt after finalize()")
+            # Guard against the (astronomically unreachable) case of the
+            # GCM 96-bit counter rolling over. If reached, ``to_bytes``
+            # would raise OverflowError anyway; the explicit check gives
+            # a clearer error.
+            if self._counter >= (1 << (NONCE_SIZE * 8)):
+                raise ValueError("GCM nonce counter would overflow")
+            nonce = self._counter.to_bytes(NONCE_SIZE, "big")
+            self._counter += 1
+            ct = self._aesgcm.encrypt(nonce, plaintext, None)
+            length_prefix = struct.pack(">I", len(plaintext))
+            record = length_prefix + nonce + ct
+            self._hmac.update(record)
+            return record
 
     def finalize(self) -> bytes:
-        """Return the 4-byte EOF sentinel."""
-        return b"\x00\x00\x00\x00"
+        """Return the EOF sentinel followed by the global HMAC trailer.
+
+        Format: ``b"\\x00\\x00\\x00\\x00" + sha256_hmac_digest`` —
+        36 bytes total. The HMAC covers the full header + every
+        chunk record + the EOF sentinel itself so any truncation
+        before this trailer is detectable.
+        """
+        with self._lock:
+            if self._finalized:
+                raise ValueError("finalize() already called")
+            self._finalized = True
+            eof = b"\x00\x00\x00\x00"
+            self._hmac.update(eof)
+            return eof + self._hmac.digest()
 
 
 class StreamDecryptor:
     """Decrypts a .tar.wbenc stream chunk by chunk.
+
+    Maintains the same running HMAC-SHA256 as the encryptor over
+    every byte read (header + chunk records + EOF sentinel). When
+    EOF is reached the decryptor reads the 32-byte HMAC trailer and
+    compares it with ``hmac.compare_digest`` (constant-time). A
+    mismatch raises ``ValueError`` before EOF is reported to the
+    caller, so a truncated or tampered archive cannot silently
+    deliver the bytes it happened to contain.
 
     Args:
         password: Decryption password.
@@ -228,6 +348,7 @@ class StreamDecryptor:
     def __init__(self, password: str):
         self._password = password
         self._aesgcm = None
+        self._hmac = None
         self._counter = 0
 
     def read_header(self, stream: io.RawIOBase) -> None:
@@ -239,6 +360,8 @@ class StreamDecryptor:
         Raises:
             ValueError: If magic, version, or header size is wrong.
         """
+        import hmac as _hmac
+
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
         hdr = _read_exact(stream, TAR_WBENC_HEADER_SIZE)
@@ -248,10 +371,10 @@ class StreamDecryptor:
             raise ValueError(f"Unsupported .tar.wbenc version: {hdr[4]}")
 
         salt = hdr[5:21]
-        key = bytearray(derive_key(self._password, salt))
-        self._aesgcm = AESGCM(bytes(key))
-        for i in range(len(key)):
-            key[i] = 0
+        enc_key, mac_key = _derive_stream_keys(self._password, salt)
+        self._aesgcm = AESGCM(enc_key)
+        self._hmac = _hmac.new(mac_key, digestmod=hashlib.sha256)
+        self._hmac.update(hdr)
         self._counter = 0
 
     def decrypt_next_chunk(self, stream: io.RawIOBase) -> bytes | None:
@@ -261,18 +384,43 @@ class StreamDecryptor:
             stream: Binary readable stream.
 
         Returns:
-            Decrypted plaintext bytes, or None at EOF.
+            Decrypted plaintext bytes, or None at EOF (after HMAC verify).
 
         Raises:
-            ValueError: On authentication failure or corruption.
+            ValueError: On authentication failure, corruption, or
+                global HMAC mismatch (indicates truncation or tamper).
         """
-        if self._aesgcm is None:
+        if self._aesgcm is None or self._hmac is None:
             raise ValueError("Must call read_header() before decrypting")
 
         length_bytes = _read_exact(stream, 4)
+        self._hmac.update(length_bytes)
         plaintext_len = struct.unpack(">I", length_bytes)[0]
+        # Defend against a forged/corrupted archive whose length prefix
+        # asks for gigabytes of RAM before any authentication check.
+        # Writers never emit a chunk larger than CHUNK_SIZE (1 MB), so a
+        # larger claim means truncation-of-salt / header-collision /
+        # deliberate DoS.
+        if plaintext_len > CHUNK_SIZE:
+            raise ValueError(
+                f"Chunk plaintext length {plaintext_len} exceeds max "
+                f"{CHUNK_SIZE} — archive is corrupt or malicious."
+            )
         if plaintext_len == 0:
-            return None  # EOF sentinel
+            # EOF sentinel — now validate the global HMAC trailer
+            # BEFORE returning None, so a truncated archive is
+            # caught even if every prior chunk's GCM tag checked out.
+            import hmac as _hmac
+
+            expected = self._hmac.digest()
+            trailer = _read_exact(stream, HMAC_TRAILER_SIZE)
+            if not _hmac.compare_digest(trailer, expected):
+                raise ValueError(
+                    "Archive HMAC mismatch — truncation, tamper, or "
+                    "corrupt write. Do not trust any already-extracted "
+                    "data from this archive."
+                )
+            return None
 
         expected_nonce = self._counter.to_bytes(NONCE_SIZE, "big")
         nonce = _read_exact(stream, NONCE_SIZE)
@@ -285,6 +433,7 @@ class StreamDecryptor:
 
         ct_size = plaintext_len + TAG_SIZE
         ciphertext = _read_exact(stream, ct_size)
+        self._hmac.update(nonce + ciphertext)
         return self._aesgcm.decrypt(nonce, ciphertext, None)
 
 
@@ -370,6 +519,7 @@ class DecryptingReader(io.RawIOBase):
         self._source = source
         self._buf = bytearray()
         self._eof = False
+        self._hmac_verified = False
         self._dec.read_header(source)
 
     def read(self, n: int = -1) -> bytes:
@@ -400,9 +550,45 @@ class DecryptingReader(io.RawIOBase):
         """Decrypt one chunk into the internal buffer."""
         chunk = self._dec.decrypt_next_chunk(self._source)
         if chunk is None:
+            # EOF sentinel reached — HMAC was verified inside
+            # ``decrypt_next_chunk`` before returning None.
             self._eof = True
+            self._hmac_verified = True
         else:
             self._buf.extend(chunk)
+
+    def verify_complete(self) -> None:
+        """Force reading to EOF so the HMAC trailer is verified.
+
+        Must be called after the ``tarfile`` (or any other consumer)
+        has finished extracting — otherwise a consumer that exits
+        early (on a tar-level error, or just because it thinks it saw
+        enough members) leaves the HMAC unverified, and a truncated
+        archive would deliver its first N files on disk before anyone
+        notices the tamper. Call this at the end of every restore
+        pipeline; it's a no-op if the stream was already consumed to
+        EOF.
+
+        Raises:
+            ValueError: If the trailing HMAC does not match (truncation
+                or tamper).
+        """
+        if self._hmac_verified:
+            return
+        # Drain any remaining chunks — this will either reach the EOF
+        # sentinel (which verifies the HMAC) or raise on a HMAC
+        # mismatch / corrupt chunk.
+        while not self._eof:
+            self._fill_buffer()
+
+    def close(self) -> None:
+        """Close the reader. Does NOT force HMAC verification —
+        callers must invoke ``verify_complete()`` explicitly before
+        treating extracted data as trustworthy."""
+        import contextlib
+
+        with contextlib.suppress(Exception):
+            super().close()
 
     def readable(self) -> bool:
         return True
@@ -447,8 +633,16 @@ def retrieve_password(stored: str) -> str:
     elif stored.startswith("aes:"):
         return _aes_retrieve(stored)
     else:
-        # Legacy: return as-is (plaintext)
-        return stored
+        # Refuse unprefixed payloads: they were previously returned
+        # as-is (plaintext fallback). That branch made a downgrade
+        # attack trivial — an attacker who could edit the profile
+        # file could strip the ``dpapi:`` / ``aes:`` prefix and plant
+        # any value they liked, which would then be read back as the
+        # "plaintext password". Force a clear failure instead.
+        raise ValueError(
+            "Stored password has no recognised format prefix "
+            "('dpapi:' or 'aes:'). Re-enter the password to re-encrypt it."
+        )
 
 
 def evaluate_password(password: str) -> str:

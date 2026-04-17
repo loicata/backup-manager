@@ -127,7 +127,6 @@ def build_manifest(
         IntegrityManifest with hashes of all files.
     """
     manifest = IntegrityManifest()
-    all_hashes = []
 
     def _hash_file(filepath: Path) -> tuple[str, str, int]:
         h = compute_file_hash(filepath)
@@ -151,13 +150,21 @@ def build_manifest(
                     "hash": file_hash,
                     "size": size,
                 }
-                all_hashes.append(file_hash)
             except Exception as e:
                 logger.warning("Failed to hash file: %s", e)
 
-    # Total checksum: hash of all sorted file hashes
-    if all_hashes:
-        combined = "\n".join(sorted(all_hashes))
+    # Total checksum: sha256 over (path, hash, size) for every file.
+    # Including the path defeats the swap/rename attack where two files
+    # of different content have their data exchanged: hash-only sorting
+    # made the manifest blind to which hash belonged to which file, so
+    # a permutation produced the same checksum. Including sizes adds a
+    # cheap extra invariant that must also survive any manipulation.
+    if manifest.files:
+        parts = []
+        for fp in sorted(manifest.files.keys()):
+            entry = manifest.files[fp]
+            parts.append(f"{fp}\x00{entry.get('hash', '')}\x00{entry.get('size', 0)}")
+        combined = "\n".join(parts)
         manifest.total_checksum = hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
     return manifest

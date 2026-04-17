@@ -5,6 +5,7 @@ All backends must implement: upload, upload_file, list_backups,
 delete_backup, test_connection, get_free_space, get_file_size.
 """
 
+import concurrent.futures
 import functools
 import logging
 import os
@@ -15,6 +16,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
+
+from src.core.exceptions import CancelledError
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,15 @@ def with_retry(max_retries: int = 3, base_delay: float = 2.0):
             for attempt in range(max_retries + 1):
                 try:
                     return func(*args, **kwargs)
+                except (CancelledError, concurrent.futures.CancelledError):
+                    # User-initiated cancellation must propagate immediately
+                    # without backoff — retrying after cancel is both wasteful
+                    # and actively harmful (upload continues post-cancel).
+                    # Both our ``src.core.exceptions.CancelledError`` AND
+                    # ``concurrent.futures.CancelledError`` (raised by boto3's
+                    # s3transfer ThreadPoolExecutor on cancel) must be caught
+                    # — they are unrelated classes with the same name.
+                    raise
                 except Exception as e:
                     last_exception = e
                     if attempt < max_retries:

@@ -34,8 +34,14 @@ _thread_locks_guard = threading.Lock()
 
 
 def _get_thread_lock(lock_path: Path) -> threading.Lock:
-    """Return the per-path ``threading.Lock``, creating it on first use."""
-    key = str(lock_path.resolve() if lock_path.exists() else lock_path.absolute())
+    """Return the per-path ``threading.Lock``, creating it on first use.
+
+    Uses a single ``absolute()`` call so two threads that race on
+    ``exists()`` + ``resolve()`` do not see different keys. A pure
+    ``absolute()`` is deterministic; ``resolve()`` only helped follow
+    symlinks on POSIX, which profile lock files never use.
+    """
+    key = str(lock_path.absolute())
     with _thread_locks_guard:
         lock = _thread_locks.get(key)
         if lock is None:

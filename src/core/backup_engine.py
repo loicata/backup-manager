@@ -230,6 +230,9 @@ class BackupEngine:
             RuntimeError: If backup fails.
         """
         self._cancelled = False
+        # Apply any pending rollback left by a double-crash on the
+        # previous run BEFORE the pipeline examines ``backup_type``.
+        self._apply_pending_rollback(profile)
         ctx = PipelineContext(
             profile=profile,
             config_manager=self._config,
@@ -251,6 +254,13 @@ class BackupEngine:
             self._events.emit(ERROR, exception=e, context="backup")
             raise
 
+        # Remember the user-configured backup_type so we can roll back
+        # if the pipeline crashes after ``_maybe_force_full`` has
+        # temporarily flipped it to FULL. Without the rollback, a
+        # crash during an auto-promoted run would persist
+        # ``backup_type = FULL`` on disk, and the profile would stay
+        # permanently promoted until the user manually edited it.
+        original_backup_type = profile.backup_type
         try:
             # Validate storage configuration before starting the pipeline
             profile.storage.validate()
@@ -277,6 +287,7 @@ class BackupEngine:
             ctx.result.duration_seconds = time.monotonic() - start_time
             self._log("Backup cancelled by user")
             self._emit_status("idle")
+            self._rollback_backup_type_on_failure(ctx, original_backup_type)
             raise
 
         except Exception as e:
@@ -284,9 +295,88 @@ class BackupEngine:
             self._log(f"Backup failed: {e}")
             self._emit_status("error")
             self._events.emit(ERROR, exception=e, context="backup")
+            self._rollback_backup_type_on_failure(ctx, original_backup_type)
             raise
         finally:
             release(lock_path)
+
+    def _rollback_backup_type_on_failure(
+        self,
+        ctx: PipelineContext,
+        original_type: BackupType,
+    ) -> None:
+        """Restore the profile's user-configured backup_type after a failed run.
+
+        When the pipeline auto-promotes a DIFF to FULL (profile
+        changed, cycle reached, etc.) and then crashes, the on-disk
+        profile would otherwise carry the promoted ``FULL`` value
+        permanently — the next ``_maybe_force_full`` call would exit
+        early at line 910 (``if backup_type != DIFFERENTIAL``) and
+        every subsequent run would keep producing FULL backups.
+
+        If the in-place save fails (double-fault: disk full during the
+        rollback itself), a sentinel file ``<config>/<profile>.rollback``
+        is written so the next launch can complete the rollback.
+        Without this sentinel, a one-in-a-million unlucky double-crash
+        would permanently strand the profile in FULL mode.
+        """
+        if not getattr(ctx, "forced_full", False):
+            return
+        if ctx.profile.backup_type == original_type:
+            return
+        ctx.profile.backup_type = original_type
+        try:
+            ctx.config_manager.save_profile(ctx.profile)
+            logger.info(
+                "Rolled back backup_type to %s after pipeline failure",
+                original_type.value,
+            )
+        except Exception as rollback_err:
+            logger.error(
+                "Failed to persist backup_type rollback — writing sentinel: %s",
+                rollback_err,
+            )
+            try:
+                sentinel = self._rollback_sentinel_path(ctx.profile.id)
+                sentinel.parent.mkdir(parents=True, exist_ok=True)
+                sentinel.write_text(original_type.value, encoding="utf-8")
+            except Exception as sentinel_err:
+                logger.warning(
+                    "Sentinel write also failed — profile may stay in FULL "
+                    "mode until manually corrected: %s",
+                    sentinel_err,
+                )
+
+    def _rollback_sentinel_path(self, profile_id: str) -> Path:
+        """Return the path to the rollback-sentinel file for a profile."""
+        manifest_path = self._config.get_manifest_path(profile_id)
+        return manifest_path.parent / f"{profile_id}.rollback"
+
+    def _apply_pending_rollback(self, profile: BackupProfile) -> None:
+        """If a rollback sentinel exists, apply it and delete the sentinel.
+
+        Called at the start of ``run_backup`` so any rollback that
+        failed to persist on the previous run completes before we
+        evaluate ``_maybe_force_full``. A one-time best-effort:
+        reading/writing errors are logged but do not block the run.
+        """
+        sentinel = self._rollback_sentinel_path(profile.id)
+        if not sentinel.exists():
+            return
+        try:
+            target_value = sentinel.read_text(encoding="utf-8").strip()
+            target = BackupType(target_value)
+            if profile.backup_type != target:
+                profile.backup_type = target
+                self._config.save_profile(profile)
+                logger.info(
+                    "Applied pending backup_type rollback: profile '%s' → %s",
+                    profile.name,
+                    target.value,
+                )
+            sentinel.unlink()
+        except Exception as e:
+            logger.warning("Could not apply rollback sentinel for %s: %s", profile.name, e)
 
     def _run_pipeline(self, ctx: PipelineContext) -> None:
         """Execute all pipeline phases sequentially."""
@@ -389,6 +479,10 @@ class BackupEngine:
         ctx.profile.last_backup_completed = True
         ctx.profile.incomplete_backup_name = ""
         ctx.profile.incomplete_backup_was_full = False
+        # A successful run clears the crash-recovery circuit breaker.
+        # Otherwise after e.g. 3 transient NAS outages the counter
+        # would stay at 3 forever, permanently disabling auto-recovery.
+        ctx.profile.crash_recovery_attempts = 0
 
         # Restore profile type if it was temporarily promoted to full
         if getattr(ctx, "forced_full", False):
@@ -970,13 +1064,27 @@ class BackupEngine:
         for i, mirror in enumerate(ctx.profile.mirror_destinations):
             destinations.append((f"Mirror {i + 1}", mirror))
 
+        # Exclude the incomplete-backup name from the has_full check.
+        # On storage backends that cannot delete the partial (S3 Object
+        # Lock mirror in particular), _cleanup_incomplete_backup leaves
+        # the partial FULL in place. Counting it as "has_full" would
+        # make every subsequent DIFF reference a broken FULL and corrupt
+        # the restore chain silently.
+        incomplete = ctx.profile.incomplete_backup_name
+        # Match both the plain directory name and its .tar.wbenc file.
+        excluded = {incomplete, f"{incomplete}.tar.wbenc"} if incomplete else set()
+
         for name, config in destinations:
             try:
                 backend = self._get_backend(config)
                 backups = backend.list_backups()
-                has_full = any("_FULL_" in b["name"] for b in backups)
+                has_full = any("_FULL_" in b["name"] and b["name"] not in excluded for b in backups)
                 if not has_full:
-                    logger.info("Destination %s has no full backup", name)
+                    logger.info(
+                        "Destination %s has no usable full backup " "(excluded incomplete: %s)",
+                        name,
+                        excluded or "none",
+                    )
                     return name
             except Exception as e:
                 logger.warning("Could not check %s: %s", name, e)
@@ -1278,11 +1386,15 @@ class BackupEngine:
         with contextlib.suppress(Exception):
             ctx.result.backups_available = len(ctx.backend.list_backups())
 
-        # Rotate mirrors with the same retention policy
+        # Rotate mirrors with the same retention policy. Each mirror
+        # backend needs its own cancel-check wiring so a user Cancel
+        # aborts the rotation loop promptly instead of waiting for
+        # every mirror's list+delete cycle to finish.
         for i, config in enumerate(ctx.profile.mirror_destinations):
             mirror_name = f"Mirror {i + 1}"
             try:
                 backend = self._get_backend(config)
+                backend.set_cancel_check(self._check_cancel)
                 deleted = rotate_backups(
                     backend,
                     ctx.profile.retention,
@@ -1330,6 +1442,15 @@ class BackupEngine:
             destinations.append((f"Mirror {i + 1}", mirror))
 
         for label, config in destinations:
+            # A destination under S3 Object Lock COMPLIANCE cannot
+            # have its objects deleted until retention expires, so
+            # calling delete_backup would only surface a confusing
+            # error. Skip explicitly and let the provider lifecycle
+            # rule (AbortIncompleteMultipartUpload + Expiration after
+            # lock) reclaim the space at the correct time.
+            if config.storage_type == StorageType.S3 and getattr(config, "s3_object_lock", False):
+                self._log(f"{label}: skipping cleanup (Object Lock prevents deletion)")
+                continue
             try:
                 backend = create_backend(config)
                 # Try both plain directory and encrypted archive names
@@ -1347,7 +1468,21 @@ class BackupEngine:
             except Exception as exc:
                 self._log(f"{label}: cleanup failed — {exc}")
 
+        # Persist the cleared name immediately. If the pipeline crashes
+        # between this point and _mark_completed, a second interruption
+        # could otherwise overwrite ``incomplete_backup_name`` in memory
+        # with the NEW partial's name, leaving the OLD (already-deleted)
+        # name lost from disk — and more importantly leaving the new
+        # partial untracked, so the next run would believe there is
+        # nothing to clean up.
         ctx.profile.incomplete_backup_name = ""
+        try:
+            self._config.save_profile(ctx.profile)
+        except Exception as exc:
+            # save_profile failure here is recoverable: the in-memory
+            # state is consistent, and _mark_completed (or the next
+            # _cleanup call) will try again. Just log it.
+            logger.warning("Failed to persist cleared incomplete_backup_name: %s", exc)
 
     def _apply_bandwidth_throttle(
         self,

@@ -30,6 +30,9 @@ def _setup_mock_paramiko():
     mp.HostKeys = MagicMock
     mp.AuthenticationException = type("AuthenticationException", (Exception,), {})
     mp.SSHException = type("SSHException", (Exception,), {})
+    # Must be a real class — _ensure_remote_dir_sftp puts it in an
+    # ``except`` tuple which requires BaseException subclass.
+    mp.SFTPError = type("SFTPError", (OSError,), {})
     sys.modules["paramiko"] = mp
     sys.modules["paramiko.hostkeys"] = MagicMock()
     return mp
@@ -85,10 +88,23 @@ class TestRemoteNameSecurity:
         result = _validate_remote_name(name)
         assert not result.startswith("/")
 
-    def test_backslash_allowed_not_traversal(self):
-        # Backslash is unusual but not blocked by current validator
-        result = _validate_remote_name("back\\slash")
-        assert result == "back\\slash"
+    def test_backslash_rejected(self):
+        """Backslash is rejected to prevent Windows-style paths leaking to
+        POSIX servers (would create a literal ``back\\slash`` file instead
+        of a directory, invisible to list/rotation)."""
+        with pytest.raises(ValueError, match="dangerous"):
+            _validate_remote_name("back\\slash")
+
+    def test_newline_rejected(self):
+        """Newlines are rejected because remote names end up parsed
+        line-by-line (sha256sum, find -printf)."""
+        with pytest.raises(ValueError, match="dangerous"):
+            _validate_remote_name("name\nwith\nnewlines")
+
+    def test_cr_rejected(self):
+        """Carriage returns rejected for the same line-parsing reason."""
+        with pytest.raises(ValueError, match="dangerous"):
+            _validate_remote_name("name\rwith\rcr")
 
     @pytest.mark.parametrize("char", [";", "|", ">", "<", "&", "!", "`", "$"])
     def test_shell_injection_rejected(self, char):
@@ -111,6 +127,67 @@ class TestLongRemoteName:
         long_name = "a" * 300
         result = _validate_remote_name(long_name)
         assert len(result) == 300
+
+
+# ---------------------------------------------------------------------------
+# 4b  mkdir error surfacing
+# ---------------------------------------------------------------------------
+
+
+class TestMkdirErrorSurfacing:
+    """_ensure_remote_dir_sftp must re-raise genuine mkdir failures.
+
+    Previously a ``contextlib.suppress(OSError)`` masked permission
+    denials and disk-full errors, producing cryptic "No such file"
+    errors at the subsequent upload instead of a clear diagnostic.
+    """
+
+    def test_mkdir_permission_denied_surfaces(self):
+        _setup_mock_paramiko()
+        try:
+            storage = _make_storage()
+            # Simulate server that rejects mkdir with permission denied.
+            # Both stat calls fail: before mkdir (dir missing) and after
+            # mkdir (still missing because mkdir actually failed).
+            sftp = MagicMock()
+            sftp.stat.side_effect = FileNotFoundError("not found")
+            sftp.mkdir.side_effect = PermissionError("denied")
+
+            with pytest.raises((PermissionError, FileNotFoundError, OSError)):
+                storage._ensure_remote_dir_sftp(sftp, "/blocked/dir")
+        finally:
+            _cleanup_paramiko()
+
+    def test_mkdir_race_already_exists_is_benign(self):
+        """If mkdir fails but the dir exists after (race), don't raise."""
+        _setup_mock_paramiko()
+        try:
+            storage = _make_storage()
+            sftp = MagicMock()
+            # Every call to stat succeeds except the first. mkdir
+            # always fails with "exists" — a benign race. This
+            # simulates another client having created each dir just
+            # before us.
+            call_count = [0]
+
+            def stat_side(_path):
+                call_count[0] += 1
+                # First call for each path: say "missing" so we try mkdir.
+                # But our mkdir-races-then-stat flow calls stat twice per
+                # missing dir, so alternate: first says missing, second
+                # says ok.
+                if call_count[0] % 2 == 1:
+                    raise FileNotFoundError("missing")
+                return MagicMock()
+
+            sftp.stat.side_effect = stat_side
+            sftp.mkdir.side_effect = OSError("Already exists (race)")
+
+            # Must NOT raise — the post-mkdir stat succeeds, so the race
+            # is considered benign.
+            storage._ensure_remote_dir_sftp(sftp, "/raced/dir")
+        finally:
+            _cleanup_paramiko()
 
 
 # ---------------------------------------------------------------------------

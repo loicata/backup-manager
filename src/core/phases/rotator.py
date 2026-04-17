@@ -6,7 +6,7 @@ daily, weekly, and monthly backups.
 
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 
 from src.core.config import RetentionConfig
 from src.core.events import EventBus
@@ -103,7 +103,19 @@ def _rotate_gfs(
     their parent FULL to keep the restore chain intact.
     """
     phase_log = PhaseLogger("rotator", events)
-    now = datetime.now()
+    # Everything runs in UTC so that the daylight-saving-time shift
+    # (spring-forward and fall-back) cannot cause two backups to land
+    # in the same hour with ambiguous ordering, nor make a daily
+    # window gain/lose an hour twice a year. Previously both
+    # ``datetime.now()`` and ``datetime.fromtimestamp(mtime)`` were
+    # naïve local time and drifted around the DST cutover.
+    #
+    # Tests frequently monkey-patch ``datetime.now`` with a naive value,
+    # so normalise here: a naive ``now`` is treated as UTC (same as the
+    # normalisation applied to parsed mtimes below).
+    now = datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
     keep = set()
 
     # Always protect the backup created in this run (both plain and encrypted)
@@ -116,7 +128,7 @@ def _rotate_gfs(
     for b in backups:
         mtime = b.get("modified", 0)
         if mtime:
-            dt = datetime.fromtimestamp(mtime)
+            dt = datetime.fromtimestamp(mtime, tz=UTC)
             dated_backups.append((b, dt))
 
     dated_backups.sort(key=lambda x: x[1], reverse=True)
@@ -147,19 +159,29 @@ def _apply_gfs_windows(
     now: datetime,
     keep: set,
 ) -> None:
-    """Apply daily/weekly/monthly GFS windows to the keep set."""
+    """Apply daily/weekly/monthly GFS windows to the keep set.
+
+    - Daily window: inclusive lower-bound on age. A backup taken less
+      than ``gfs_daily`` whole days ago is retained. With a scheduled
+      daily run this yields exactly N backups in the window.
+    - Weekly slots: grouped by ISO-8601 calendar week. Previously used
+      ``strftime("%Y-W%W")`` which is non-ISO and double-counted
+      backups straddling a year boundary (Dec 31 = W52 in year Y;
+      Jan 1 = W00 in year Y+1 — different keys for the same ISO week).
+    """
     # Keep daily backups (last N days) — all backups within the window
     for backup, dt in dated_backups:
         if (now - dt).days < retention.gfs_daily:
             keep.add(backup["name"])
 
-    # Keep weekly backups (last N weeks) — FULL only
-    weekly_dates: set[str] = set()
+    # Keep weekly backups (last N weeks) — FULL only, grouped by ISO week
+    weekly_dates: set[tuple[int, int]] = set()
     for backup, dt in dated_backups:
         if not _is_full_backup(backup["name"]):
             continue
         if (now - dt).days < retention.gfs_weekly * 7:
-            week_key = dt.strftime("%Y-W%W")
+            iso = dt.isocalendar()
+            week_key = (iso.year, iso.week)
             if week_key not in weekly_dates:
                 weekly_dates.add(week_key)
                 keep.add(backup["name"])

@@ -423,3 +423,38 @@ class TestVerifyStopsPipeline:
 
         # Mirror was NOT reached — upload never called
         mock_backend.upload.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 11. Auto-promotion rollback on failure
+# ---------------------------------------------------------------------------
+
+
+class TestBackupTypeRollbackOnFailure:
+    """When the pipeline auto-promotes a DIFF to FULL and then crashes,
+    the on-disk profile must not keep the promoted ``FULL`` value —
+    otherwise the next run would skip the DIFF → FULL evaluation and
+    produce a FULL backup indefinitely."""
+
+    def test_diff_promoted_to_full_rolled_back_on_crash(self, env, profile):
+        profile.backup_type = BackupType.DIFFERENTIAL
+        profile.full_backup_every = 1  # Force promotion on first run
+        env["config_manager"].save_profile(profile)
+
+        engine = _engine(env)
+
+        # Make the write phase crash AFTER _maybe_force_full ran
+        def _boom(_ctx):
+            raise RuntimeError("simulated write failure")
+
+        with (
+            patch.object(BackupEngine, "_phase_write", side_effect=_boom),
+            pytest.raises(RuntimeError, match="simulated"),
+        ):
+            engine.run_backup(profile)
+
+        # Reload profile from disk and confirm backup_type is restored.
+        loaded = next(p for p in env["config_manager"].get_all_profiles() if p.id == profile.id)
+        assert loaded.backup_type == BackupType.DIFFERENTIAL, (
+            "backup_type must be rolled back to DIFFERENTIAL after a " "failed auto-promoted run"
+        )

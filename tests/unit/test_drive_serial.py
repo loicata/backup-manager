@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from src.storage.drive_serial import (
+    _enumerate_drive_serials,
     find_drive_by_serial,
     get_hardware_serial,
     resolve_local_path,
@@ -89,7 +90,7 @@ class TestGetHardwareSerial:
 
 
 class TestFindDriveBySerial:
-    """find_drive_by_serial scans drive letters for a matching serial."""
+    """find_drive_by_serial uses a single enumeration PowerShell call."""
 
     @patch("src.storage.drive_serial.sys")
     def test_returns_none_on_non_windows(self, mock_sys):
@@ -99,32 +100,87 @@ class TestFindDriveBySerial:
     def test_returns_none_for_empty_serial(self):
         assert find_drive_by_serial("") is None
 
-    @patch("src.storage.drive_serial.get_hardware_serial")
-    @patch("src.storage.drive_serial.os.path.isdir")
+    @patch("src.storage.drive_serial._enumerate_drive_serials")
     @patch("src.storage.drive_serial.sys")
-    def test_finds_matching_drive(self, mock_sys, mock_isdir, mock_serial):
+    def test_finds_matching_drive(self, mock_sys, mock_enum):
         mock_sys.platform = "win32"
-        mock_isdir.side_effect = lambda p: p in ("D:\\", "H:\\")
-        mock_serial.side_effect = lambda letter: "TARGET_SERIAL" if letter == "H" else "OTHER"
+        mock_enum.return_value = {"D": "OTHER", "H": "TARGET_SERIAL"}
         assert find_drive_by_serial("TARGET_SERIAL") == "H"
 
-    @patch("src.storage.drive_serial.get_hardware_serial")
-    @patch("src.storage.drive_serial.os.path.isdir")
+    @patch("src.storage.drive_serial._enumerate_drive_serials")
     @patch("src.storage.drive_serial.sys")
-    def test_returns_none_when_not_found(self, mock_sys, mock_isdir, mock_serial):
+    def test_returns_none_when_not_found(self, mock_sys, mock_enum):
         mock_sys.platform = "win32"
-        mock_isdir.side_effect = lambda p: p == "C:\\"
-        mock_serial.return_value = "WRONG_SERIAL"
+        mock_enum.return_value = {"C": "WRONG_SERIAL"}
         assert find_drive_by_serial("TARGET_SERIAL") is None
 
-    @patch("src.storage.drive_serial.get_hardware_serial")
-    @patch("src.storage.drive_serial.os.path.isdir")
+    @patch("src.storage.drive_serial._enumerate_drive_serials")
     @patch("src.storage.drive_serial.sys")
-    def test_case_insensitive_match(self, mock_sys, mock_isdir, mock_serial):
+    def test_case_insensitive_match(self, mock_sys, mock_enum):
         mock_sys.platform = "win32"
-        mock_isdir.side_effect = lambda p: p == "E:\\"
-        mock_serial.return_value = "abc123"
+        mock_enum.return_value = {"E": "abc123"}
         assert find_drive_by_serial("ABC123") == "E"
+
+    @patch("src.storage.drive_serial._enumerate_drive_serials")
+    @patch("src.storage.drive_serial.sys")
+    def test_single_subprocess_call(self, mock_sys, mock_enum):
+        """Enumeration is done in a single call, not one per letter.
+
+        Before the fix, find_drive_by_serial ran PowerShell up to 24
+        times in sequence, each with a 5s timeout. The new implementation
+        uses ``_enumerate_drive_serials`` exactly once.
+        """
+        mock_sys.platform = "win32"
+        mock_enum.return_value = {"H": "X"}
+        find_drive_by_serial("X")
+        assert mock_enum.call_count == 1
+
+
+class TestEnumerateDriveSerials:
+    """_enumerate_drive_serials parses the PowerShell output."""
+
+    @patch("src.storage.drive_serial.sys")
+    def test_returns_empty_dict_on_non_windows(self, mock_sys):
+        mock_sys.platform = "linux"
+        assert _enumerate_drive_serials() == {}
+
+    @patch("src.storage.drive_serial.subprocess.run")
+    @patch("src.storage.drive_serial.sys")
+    def test_parses_tab_separated_output(self, mock_sys, mock_run):
+        mock_sys.platform = "win32"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="C\tSERIAL_C\nG\tSERIAL_G\n",
+        )
+        result = _enumerate_drive_serials()
+        assert result == {"C": "SERIAL_C", "G": "SERIAL_G"}
+
+    @patch("src.storage.drive_serial.subprocess.run")
+    @patch("src.storage.drive_serial.sys")
+    def test_skips_lines_without_serial(self, mock_sys, mock_run):
+        mock_sys.platform = "win32"
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="C\tSERIAL_C\nD\t\nmalformed\n",
+        )
+        result = _enumerate_drive_serials()
+        assert result == {"C": "SERIAL_C"}
+
+    @patch("src.storage.drive_serial.subprocess.run")
+    @patch("src.storage.drive_serial.sys")
+    def test_returns_empty_on_timeout(self, mock_sys, mock_run):
+        import subprocess
+
+        mock_sys.platform = "win32"
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ps", timeout=5)
+        assert _enumerate_drive_serials() == {}
+
+    @patch("src.storage.drive_serial.subprocess.run")
+    @patch("src.storage.drive_serial.sys")
+    def test_returns_empty_on_nonzero_exit(self, mock_sys, mock_run):
+        mock_sys.platform = "win32"
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        assert _enumerate_drive_serials() == {}
 
 
 class TestResolveLocalPath:

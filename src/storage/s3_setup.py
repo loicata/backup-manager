@@ -614,6 +614,14 @@ class S3ObjectLockSetup:
                             "Expiration": {
                                 "Days": expiration_days,
                             },
+                            # Abort multipart uploads that never completed
+                            # (network drop, cancel, crash). Without this,
+                            # parts linger on the provider indefinitely and
+                            # are billed even though they are invisible to
+                            # list_objects_v2.
+                            "AbortIncompleteMultipartUpload": {
+                                "DaysAfterInitiation": 7,
+                            },
                         },
                     ],
                 },
@@ -662,6 +670,11 @@ class S3ObjectLockSetup:
                             "Status": "Enabled",
                             "Filter": {"Prefix": ""},
                             "Expiration": {"Days": 1},
+                            # Also abort orphan multiparts from cancelled
+                            # bandwidth probes.
+                            "AbortIncompleteMultipartUpload": {
+                                "DaysAfterInitiation": 1,
+                            },
                         },
                     ],
                 },

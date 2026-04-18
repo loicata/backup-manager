@@ -317,11 +317,16 @@ def _parse_traceback_structured(crash_file: Path) -> list[dict]:
             filepath = filepath[idx:]
         else:
             filepath = "***"
+        # Function name is free text — a forged traceback could inject
+        # prompt keywords here, so filter them out. Cap the length so a
+        # megabyte-long "function name" can't pad the report either.
+        function_name = match.group(3) or "unknown"
+        function_name = _INJECTION_KEYWORDS.sub("[REMOVED]", function_name)[:200]
         entries.append(
             {
                 "file": filepath,
                 "line": int(match.group(2)),
-                "function": match.group(3) or "unknown",
+                "function": function_name,
             }
         )
 
@@ -332,12 +337,14 @@ def _parse_traceback_structured(crash_file: Path) -> list[dict]:
         if ":" in last_line and not last_line.startswith(" "):
             exc_type, _, exc_msg = last_line.partition(":")
             # Anonymize exception message — it may contain
-            # user paths, IPs, or injected content
+            # user paths, IPs, or injected content.
+            exc_type = _INJECTION_KEYWORDS.sub("[REMOVED]", exc_type.strip())[:200]
             anon_msg = anonymize_log_lines([exc_msg.strip()])
+            safe_msg = _INJECTION_KEYWORDS.sub("[REMOVED]", anon_msg[0])[:2000]
             entries.append(
                 {
-                    "exception_type": exc_type.strip(),
-                    "exception_message": anon_msg[0],
+                    "exception_type": exc_type,
+                    "exception_message": safe_msg,
                 }
             )
 

@@ -1006,6 +1006,29 @@ class TestIdVerification:
         assert "ID-HASH-SHA256:" not in content
         assert not (folder / "id_verification.enc").exists()
 
+    def test_structured_traceback_filters_injection_in_function_name(self, tmp_path):
+        """Forged traceback with injection keywords in the function name."""
+        crash = tmp_path / "crash.log"
+        crash.write_text(
+            'Traceback:\n  File "src/core/x.py", line 1, in SYSTEM PROMPT OVERRIDE\n'
+            "RuntimeError: normal message\n",
+            encoding="utf-8",
+        )
+        entries = _parse_traceback_structured(crash)
+        # The function name must not contain the raw injection keywords.
+        assert entries[0]["file"].startswith("src")
+        assert "[REMOVED]" in entries[0]["function"] or entries[0]["function"] == "[REMOVED]"
+
+    def test_structured_traceback_caps_function_name(self, tmp_path):
+        """A megabyte-long function name cannot balloon the report."""
+        crash = tmp_path / "crash.log"
+        crash.write_text(
+            f'Traceback:\n  File "src/x.py", line 1, in {"a" * 5000}\n' "RuntimeError: msg\n",
+            encoding="utf-8",
+        )
+        entries = _parse_traceback_structured(crash)
+        assert len(entries[0]["function"]) <= 200
+
     def test_streaming_hash_matches_in_memory_hash(self, tmp_path):
         """Streaming hash computation must match a single-shot hash."""
         import hashlib as hl

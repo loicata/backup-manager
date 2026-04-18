@@ -7,13 +7,14 @@
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
-## Backups that even ransomware cannot delete.
+## 🛡️ Backups a ransomware cannot erase.
 
-- 🛡️ **Ransomware-proof** — backups locked on Amazon S3 for **4 months to 7 years**. Undeletable. By anyone.
-- 🖱️ **For non-technicians** — 3-step wizard, zero AWS knowledge, bucket created and locked for you.
-- ⚡ **Complete out of the box** — AES-256 encryption, scheduling, 3 parallel destinations, integrity checks, email alerts.
+✅ **Undeletable** — locked on AWS S3 for 4 months to 7 years. Not even you.
+✅ **No AWS knowledge needed** — the 3-step wizard creates your bucket and locks it.
+✅ **100 % automatic** — daily backups, email alerts, integrity checks, auto-cleanup.
+✅ **Free and open-source** — no subscription, no account, no data sold.
 
-### ➡️ **[Download for Windows 10 / 11](https://github.com/loicata/backup-manager/releases/latest)**
+### ⬇️ **[Download for Windows 10 / 11](https://github.com/loicata/backup-manager/releases/latest)**
 
 | | |
 |:---:|:---:|
@@ -24,20 +25,20 @@
 
 ## Two modes
 
-| | Classic | Full Auto (anti-ransomware) |
+| | **Classic** | **Full Auto** (anti-ransomware) |
 |---|---|---|
-| **Destination** | USB / network share / SFTP / S3 | Amazon AWS S3 with Object Lock |
-| **Setup** | 3 steps | 11 guided steps — AWS signup & bucket done for you |
-| **Protection** | Encryption + integrity checks | Classic + backups that **cannot be deleted** before their retention date |
-| **For whom** | You already have a drive or NAS | You want to survive a full ransomware attack |
+| Destination | USB / network share / SFTP / S3 | Amazon AWS S3 with Object Lock |
+| Setup | 3 steps | 11 guided steps — AWS signup and bucket done for you |
+| Protection | Encryption + integrity checks | Classic + backups that **cannot be deleted** before their retention date |
+| For whom | You already have a drive or NAS | You want to survive a full ransomware attack |
 
 ## What Full Auto does once the wizard finishes
 
-- 📅 Monthly full + daily differential (only changed files).
-- 🔒 Each backup **locked on S3** for your chosen duration — even you cannot delete it.
-- ✅ SHA-256 integrity check after every upload.
-- 📧 Optional email on success / failure.
-- 🧹 Old backups past their lock date auto-deleted by S3 Lifecycle.
+- 📅 Monthly full + daily differential (only changed files)
+- 🔒 Each backup **locked on S3** for your chosen duration — even you cannot delete it
+- ✅ SHA-256 integrity check after every upload
+- 📧 Optional email on success / failure
+- 🧹 Old backups past their lock date auto-deleted by S3 Lifecycle
 - 🔁 Missed a run? Catches up on next startup. Retries on failure.
 
 ## Retention
@@ -64,54 +65,120 @@ Cost shown in the wizard before you commit (10 GB → 800 GB, based on AWS S3 Gl
 | **DPAPI password storage** | Windows user-bound |
 | **Adaptive bandwidth** | Throttling for slow links (Starlink-tested) |
 
+## Storage backends
+
+| Destination | Description |
+|---|---|
+| **Local / USB** | Any local drive, external HDD, or removable USB. Auto-detection by hardware serial so drive-letter changes do not break the profile. |
+| **Network (UNC)** | Windows shared folder (`\\server\share`) with username / password. Credentials go through Windows Credential Manager. |
+| **SFTP (SSH)** | Password or private key (Ed25519, ECDSA, RSA). Server-side tar-stream when the remote allows an exec channel. |
+| **Amazon AWS S3** | With optional Object Lock for the Full Auto mode. |
+| **S3-compatible** | Scaleway, Wasabi, OVH, DigitalOcean, Cloudflare R2, Backblaze B2, MinIO. |
+
+## Main interface
+
+| Tab | Description |
+|---|---|
+| **Run** | Launch a backup, watch progress and logs |
+| **General** | Mode, profile name, source folders, exclusions, bandwidth |
+| **Storage / Mirror 1 / Mirror 2** | Primary and up to 2 mirror destinations |
+| **Encryption** | AES-256-GCM toggle per destination |
+| **Schedule** | Frequency, time, auto-retry, periodic verification |
+| **Protection** | Object Lock status, retention, bucket (Full Auto) |
+| **Retention** | GFS policy (classic mode) |
+| **Email** | SMTP with provider presets and test button |
+| **Recovery** | Restore from local or remote (SFTP, S3, network) |
+| **Verify** | On-demand integrity verification |
+| **History** | Past backup logs with status column |
+
 ---
 
-<details>
-<summary><b>Security architecture (for developers)</b></summary>
+## Security architecture
+
+Defense in depth — independent layers, each designed to fail safely.
 
 ### S3 Object Lock (Full Auto mode)
+
 | Layer | Mechanism |
 |---|---|
-| Deletion resistance | S3 Object Lock Compliance — bucket rejects delete and overwrite until the object's retention date |
-| Full backups | Locked for retention + 30 days (so they outlive dependent diffs) |
-| Differential backups | Locked for retention period |
-| Cleanup | S3 Lifecycle after lock expires |
-| No app-side delete | App never issues a delete against a locked bucket |
+| **Deletion resistance** | S3 Object Lock Compliance — the bucket rejects delete and overwrite requests until the per-object retention date |
+| **Full backups** | Locked for retention + 30 days so the last full outlives its dependent differentials |
+| **Differential backups** | Locked for the retention period |
+| **Cleanup** | S3 Lifecycle removes objects after the lock expires |
+| **No app-side delete** | Backup Manager never issues a delete against a locked bucket |
 
-### `.tar.wbenc` streaming format — no plaintext on disk
+### Encryption at rest — `.tar.wbenc` streaming format
+
+No plaintext data is ever written to disk:
+
 ```
-Header (37 B):  ["WBEC" 4B] [ver 1B] [salt 16B] [reserved 16B]
-Body chunks:    [len 4B] [nonce 12B] [ciphertext + GCM tag 16B]
-EOF:            [0x00000000]
+Header (37 B):
+  [4B magic "WBEC"] [1B version] [16B salt] [16B reserved]
+
+Body (repeating chunks):
+  [4B plaintext length] [12B nonce] [ciphertext + 16B GCM tag]
+
+EOF sentinel:
+  [4B zeros]
 ```
 
-### Cipher / KDF
-| Parameter | Value |
-|---|---|
-| Cipher | AES-256-GCM |
-| Nonce | 12 B sequential counter, never reused |
-| Auth tag | 16 B (128 bit) |
-| KDF | PBKDF2-HMAC-SHA256 |
-| Iterations | 600 000 (OWASP 2024) |
-| Salt | 16 B `os.urandom()` |
+### Cipher and key derivation
+
+| Parameter | Value | Rationale |
+|---|---|---|
+| Cipher | AES-256-GCM | NIST-approved authenticated encryption |
+| Key size | 256 bits | Largest AES key length |
+| Nonce | 12 B sequential counter | Unique per chunk, never reused |
+| Auth tag | 16 B (128 bit) | Detects tampering and corruption |
+| KDF | PBKDF2-HMAC-SHA256 | Standard password-based KDF |
+| Iterations | 600 000 | OWASP 2024 guidance |
+| Salt | 16 B `os.urandom()` | Per-backup, prevents rainbow tables |
+
+### Password storage
+
+| Platform | Method | Details |
+|---|---|---|
+| Windows | DPAPI (`CryptProtectData`) | Tied to the current Windows user account |
+| Fallback | AES-256-GCM with a DPAPI-wrapped 32-byte machine key | Used if DPAPI is unavailable |
 
 ### Summary
+
 | Layer | Mechanism |
 |---|---|
-| Ransomware | S3 Object Lock Compliance |
+| Ransomware resistance | S3 Object Lock Compliance (Full Auto mode) |
 | Data at rest | AES-256-GCM streaming (`.tar.wbenc`) |
-| Password | DPAPI + AES-256-GCM fallback |
-| Integrity | SHA-256 manifest + GCM tag + post-write verify |
+| Key derivation | PBKDF2-HMAC-SHA256, 600 000 iterations, random salt |
+| Password storage | Windows DPAPI + AES-256-GCM fallback |
+| Integrity | SHA-256 manifest + post-write verify + GCM auth tag |
 | Transport | SSH / HTTPS / SMB |
+| Memory | Explicit buffer zeroing on sensitive paths |
 | Path safety | Traversal-proof remote path validation |
-| Bug reports | Dual HMAC + Ed25519 signed, injection-proof |
+| Logging | No secrets in any log output |
+| Bug reports | Dual HMAC + Ed25519 signed diagnostics, injection-proof |
 | Build | Nuitka native C compilation (no extractable bytecode) |
 
-</details>
+---
 
-<details>
-<summary><b>Build from source</b></summary>
+## Testing
 
+```bash
+pytest                                      # full suite
+pytest --cov=src --cov-report=term-missing  # with coverage
+```
+
+**Current status:** 1407 tests, 85 % coverage, 0 failures.
+
+CI (GitHub Actions, every push): Black formatting, Ruff linting (Ubuntu), full pytest with coverage enforcement (Windows, Python 3.12 + 3.13).
+
+## Build from source
+
+### Prerequisites
+- Python 3.11+ (tested on 3.12 and 3.13)
+- [Nuitka](https://nuitka.net/) (Python → C compiler)
+- MSVC Build Tools
+- [WiX Toolset v3.14](https://wixtoolset.org/) (MSI only)
+
+### Commands
 ```bash
 git clone https://github.com/loicata/backup-manager.git
 cd backup-manager
@@ -121,21 +188,57 @@ python build_nuitka.py        # -> dist/BackupManager/BackupManager.exe
 python build_msi.py           # -> dist/BackupManager-x.y.z.msi
 ```
 
-Prerequisites: Python 3.11+, Nuitka, MSVC Build Tools, [WiX Toolset v3.14](https://wixtoolset.org/) (MSI only).
+## Project structure
 
-</details>
-
-<details>
-<summary><b>Testing</b></summary>
-
-```bash
-pytest                                      # 1407 tests, 85 % coverage
-pytest --cov=src --cov-report=term-missing
+```
+backup-manager/
+├── src/
+│   ├── core/                    # Backup engine, scheduler, config, pipeline
+│   │   ├── backup_engine.py     # Main orchestrator (11-phase pipeline)
+│   │   ├── config.py            # Profile dataclasses + JSON persistence
+│   │   ├── events.py            # Thread-safe event bus for UI updates
+│   │   ├── bandwidth_tester.py  # Adaptive bandwidth measurement
+│   │   ├── integrity_verifier.py # Periodic integrity verification
+│   │   ├── scheduler.py         # In-app scheduler + auto-start
+│   │   └── phases/              # Pipeline phases
+│   │       ├── collector.py     # File collection + exclusion filtering
+│   │       ├── filter.py        # Differential change detection
+│   │       ├── encryptor.py     # Streaming tar encryption
+│   │       ├── writer.py        # Write dispatcher (local / remote)
+│   │       ├── verifier.py      # Post-write integrity verification
+│   │       ├── mirror.py        # Mirror replication orchestrator
+│   │       └── rotator.py       # GFS retention rotation
+│   ├── storage/                 # Storage backends
+│   │   ├── local.py             # Local / USB with drive-serial detection
+│   │   ├── network.py           # SMB / CIFS network shares
+│   │   ├── sftp.py              # SSH with tar-stream
+│   │   ├── s3.py                # S3 + Object Lock
+│   │   ├── s3_setup.py          # Bucket provisioning + cost simulation
+│   │   └── base.py              # Abstract backend + retry + throttling
+│   ├── security/                # Encryption, DPAPI, secure memory
+│   ├── notifications/           # SMTP email with HTML reports
+│   └── ui/                      # Tkinter GUI (Sun Valley theme)
+│       ├── wizard.py            # Classic (3 steps) + Pro (11 steps) wizard
+│       ├── app.py               # Main window with mode selector
+│       └── tabs/                # Tab implementations
+├── tests/                       # 1407 tests (unit + integration)
+├── CHANGELOG.md
+├── requirements.txt
+└── pyproject.toml
 ```
 
-CI runs Black + Ruff + full pytest on Windows (Python 3.12 + 3.13).
+## Requirements
 
-</details>
+| Requirement | Version |
+|---|---|
+| OS | Windows 10 / 11 |
+| Python | 3.11+ (dev only — end users install the MSI) |
+| cryptography | >= 43.0.0 |
+| paramiko | >= 3.0.0 |
+| boto3 | >= 1.35.0 |
+| Pillow | >= 10.0.0 |
+| pystray | >= 0.19.0 |
+| sv_ttk | >= 2.6.0 |
 
 ---
 

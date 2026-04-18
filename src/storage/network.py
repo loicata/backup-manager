@@ -44,6 +44,19 @@ def _extract_share_root(unc_path: str) -> str:
     return f"\\\\{parts[0]}\\{parts[1]}"
 
 
+def _extract_host(unc_path: str) -> str:
+    r"""Return just the server component from a UNC path.
+
+    Args:
+        unc_path: UNC path, e.g. ``\\server\share`` or ``\\192.168.1.1\backups``.
+
+    Returns:
+        The server / host portion, e.g. ``server`` or ``192.168.1.1``.
+    """
+    cleaned = unc_path.replace("/", "\\").lstrip("\\")
+    return cleaned.split("\\", 1)[0]
+
+
 class NetworkStorage(LocalStorage):
     """Storage backend for network UNC paths with optional SMB credentials."""
 
@@ -70,16 +83,31 @@ class NetworkStorage(LocalStorage):
     # ------------------------------------------------------------------
 
     def _connect(self) -> tuple[bool, str]:
-        r"""Mount the network share via ``net use``.
+        r"""Mount the network share via ``net use``, auth'd through Credential Manager.
 
-        The password is passed via the ``*`` placeholder so ``net.exe``
-        prompts for it on stdin — we then pipe the password in. The
-        previous implementation inlined the password on the command
-        line, which makes it visible to any process with
-        ``SeDebugPrivilege`` (most antivirus and admin tools) and
-        writes it verbatim to Windows Event 4688 when command-line
-        auditing is enabled via GPO. Piping via stdin removes both
-        exposures.
+        Two-step authentication to dodge the classic pipe-stdin race:
+
+        1. ``cmdkey /add:<host> /user: /pass:`` stores the credential
+           scoped to this specific host in the current user's Windows
+           Credential Manager vault.
+        2. ``net use \\<host>\<share> /persistent:no`` consumes the
+           cached credential silently — no prompt, no stdin timing
+           issues, no timeout when Samba rejects the first packet and
+           Windows wants to retry.
+        3. ``cmdkey /delete:<host>`` drops the cached credential so it
+           does not linger between runs.
+
+        Security compared to the previous ``net use path * /user:... +
+        stdin pipe`` approach:
+        - Password is still NEVER on the ``net use`` argv line, so the
+          share mount event (4688) and any tasklist snapshot around
+          the share usage stay clean.
+        - Password IS briefly visible on the ``cmdkey`` argv line for
+          the millisecond of the ``cmdkey /add`` invocation. That is a
+          narrower window than the old inline ``net use`` approach
+          (which held the password in argv for the entire mount
+          duration — seconds on a slow LAN) and the credential is
+          immediately torn down after use.
 
         Returns:
             Tuple ``(success, message)``.
@@ -88,20 +116,37 @@ class NetworkStorage(LocalStorage):
             return False, "Username and password are required for network storage"
 
         share_root = _extract_share_root(str(self._dest))
+        host = _extract_host(share_root)
 
-        cmd = [
-            "net",
-            "use",
-            share_root,
-            "*",
+        # --- Step 1: stash the credential in Credential Manager ---
+        cmdkey_add = [
+            "cmdkey",
+            f"/add:{host}",
             f"/user:{self._username}",
-            "/persistent:no",
+            f"/pass:{self._password}",
         ]
+        try:
+            add_result = subprocess.run(
+                cmdkey_add,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "cmdkey /add timed out"
+        except FileNotFoundError:
+            return False, "cmdkey command not available — not a Windows system?"
 
+        if add_result.returncode != 0:
+            detail = (add_result.stderr or add_result.stdout).strip()
+            return False, f"Could not cache credentials: {detail or 'unknown error'}"
+
+        # --- Step 2: ``net use`` consumes the cached credential ---
+        use_cmd = ["net", "use", share_root, "/persistent:no"]
         try:
             result = subprocess.run(
-                cmd,
-                input=self._password + "\n",
+                use_cmd,
                 capture_output=True,
                 text=True,
                 timeout=NET_USE_TIMEOUT,
@@ -109,10 +154,15 @@ class NetworkStorage(LocalStorage):
             )
         except subprocess.TimeoutExpired:
             logger.error("net use timed out after %ds for %s", NET_USE_TIMEOUT, share_root)
+            self._cmdkey_delete(host)
             return False, f"Connection timeout after {NET_USE_TIMEOUT}s"
         except FileNotFoundError:
+            self._cmdkey_delete(host)
             logger.error("net use command not found — not a Windows system?")
             return False, "net use command not available"
+
+        # --- Step 3: always drop the cached credential ---
+        self._cmdkey_delete(host)
 
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
@@ -132,6 +182,26 @@ class NetworkStorage(LocalStorage):
         msg = stderr or stdout or f"net use failed (exit {result.returncode})"
         logger.error("Failed to mount %s: %s", share_root, msg)
         return False, msg
+
+    @staticmethod
+    def _cmdkey_delete(host: str) -> None:
+        """Best-effort removal of a cached credential for ``host``.
+
+        Called after every connection attempt so the password never
+        lingers in the Windows Credential Manager between backup runs.
+        Swallows every failure — we cannot do better than log and
+        carry on, and a surviving cached credential is benign.
+        """
+        try:
+            subprocess.run(
+                ["cmdkey", f"/delete:{host}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.debug("cmdkey /delete best-effort failed for %s: %s", host, exc)
 
     def _disconnect(self) -> None:
         r"""Unmount the network share if we mounted it ourselves."""
@@ -223,3 +293,66 @@ class NetworkStorage(LocalStorage):
         if not ok:
             raise OSError(f"Cannot connect to network share: {msg}")
         return super().upload_file(fileobj, remote_path, size, progress_callback)
+
+    def list_backups(self) -> list[dict]:
+        """List backups after mounting the share.
+
+        Skips the recursive size walk that LocalStorage.list_backups
+        performs — that walk does one ``stat()`` per file, which on an
+        SMB share costs a round-trip each and turns a 37 k-file listing
+        into a 1-minute hang. Directories report ``size=0`` in the UI
+        until the user actually restores, at which point the download
+        counter shows real progress.
+        """
+        import os
+        import stat as stat_module
+
+        from src.storage.local import SYSTEM_FOLDERS
+
+        ok, msg = self._connect()
+        if not ok:
+            raise OSError(f"Cannot connect to network share: {msg}")
+
+        if not self._dest.exists():
+            return []
+
+        backups = []
+        try:
+            entries = list(os.scandir(self._dest))
+        except OSError:
+            return []
+
+        for entry in entries:
+            if entry.name.startswith((".", "$")):
+                continue
+            if entry.name.endswith((".wbverify", ".partial")):
+                continue
+            if entry.name in SYSTEM_FOLDERS:
+                continue
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            is_dir = stat_module.S_ISDIR(st.st_mode)
+            # Directories: advertise 0 rather than the inode block
+            # size — truthful ("we don't know") beats the old 4 KB lie.
+            size = 0 if is_dir else st.st_size
+            backups.append(
+                {
+                    "name": entry.name,
+                    "size": size,
+                    "modified": st.st_mtime,
+                    "is_dir": is_dir,
+                }
+            )
+        return sorted(backups, key=lambda b: b["modified"], reverse=True)
+
+    def download_backup(self, remote_name, local_dir, progress_callback=None):
+        """Download (copy) a backup from the mounted share to ``local_dir``."""
+        ok, msg = self._connect()
+        if not ok:
+            raise OSError(f"Cannot connect to network share: {msg}")
+        # LocalStorage.download_backup ignores progress_callback so we
+        # accept and drop it for signature parity with the SFTP/S3
+        # callers — the recovery tab never inspects the return value.
+        return super().download_backup(remote_name, local_dir)

@@ -70,33 +70,52 @@ class TestConnect:
 
     @patch("src.storage.network.subprocess.run")
     def test_successful_connection(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="The command completed successfully.", stderr=""
-        )
+        """cmdkey /add + net use + cmdkey /delete sequence, all green."""
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),  # cmdkey /add
+            MagicMock(
+                returncode=0, stdout="The command completed successfully.", stderr=""
+            ),  # net use
+            MagicMock(returncode=0, stdout="", stderr=""),  # cmdkey /delete
+        ]
         ns = NetworkStorage(r"\\server\share\backups", username="admin", password="secret")
         ok, msg = ns._connect()
 
         assert ok is True
         assert ns._connected is True
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "net"
-        assert cmd[1] == "use"
-        assert cmd[2] == r"\\server\share"
-        assert "/user:admin" in cmd
-        # Password must NOT appear on the command line — it's piped
-        # via stdin to avoid leaking to Process Explorer / Event 4688.
-        assert "secret" not in cmd
-        assert "*" in cmd  # placeholder that triggers the stdin prompt
-        # ... and it's sent via the ``input`` kwarg.
-        passed_input = mock_run.call_args.kwargs.get("input", "")
-        assert "secret" in passed_input
+
+        # Three subprocess.run calls: cmdkey /add, net use, cmdkey /delete
+        assert mock_run.call_count == 3
+
+        add_cmd = mock_run.call_args_list[0][0][0]
+        net_cmd = mock_run.call_args_list[1][0][0]
+        del_cmd = mock_run.call_args_list[2][0][0]
+
+        # Step 1: cmdkey /add carries the password in argv ONLY for this
+        # single invocation. That is the narrow window we accepted in
+        # exchange for fixing the stdin-pipe timeout.
+        assert add_cmd[0] == "cmdkey"
+        assert "/add:server" in add_cmd
+        assert "/user:admin" in add_cmd
+        assert "/pass:secret" in add_cmd
+
+        # Step 2: net use has NO password and NO /user — Credential
+        # Manager provides the identity silently.
+        assert net_cmd[:3] == ["net", "use", r"\\server\share"]
+        assert "secret" not in net_cmd
+        assert not any(arg.startswith("/user:") for arg in net_cmd)
+        assert "*" not in net_cmd
+
+        # Step 3: always clean up the cached credential.
+        assert del_cmd == ["cmdkey", "/delete:server"]
 
     @patch("src.storage.network.subprocess.run")
     def test_already_connected_error_1219(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=2, stdout="", stderr="System error 1219 has occurred."
-        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),  # cmdkey /add
+            MagicMock(returncode=2, stdout="", stderr="System error 1219 has occurred."),  # net use
+            MagicMock(returncode=0, stdout="", stderr=""),  # cmdkey /delete
+        ]
         ns = NetworkStorage(r"\\server\share", username="user", password="pass")
         ok, msg = ns._connect()
 
@@ -106,7 +125,11 @@ class TestConnect:
 
     @patch("src.storage.network.subprocess.run")
     def test_access_denied(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Access is denied.")
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),  # cmdkey /add
+            MagicMock(returncode=1, stdout="", stderr="Access is denied."),  # net use
+            MagicMock(returncode=0, stdout="", stderr=""),  # cmdkey /delete
+        ]
         ns = NetworkStorage(r"\\server\share", username="user", password="wrong")
         ok, msg = ns._connect()
 
@@ -115,7 +138,11 @@ class TestConnect:
 
     @patch("src.storage.network.subprocess.run")
     def test_timeout(self, mock_run):
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="net use", timeout=15)
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="", stderr=""),  # cmdkey /add succeeds
+            subprocess.TimeoutExpired(cmd="net use", timeout=15),  # net use hangs
+            MagicMock(returncode=0, stdout="", stderr=""),  # cmdkey /delete cleanup
+        ]
         ns = NetworkStorage(r"\\server\share", username="user", password="pass")
         ok, msg = ns._connect()
 
@@ -124,12 +151,13 @@ class TestConnect:
 
     @patch("src.storage.network.subprocess.run")
     def test_command_not_found(self, mock_run):
-        mock_run.side_effect = FileNotFoundError("net not found")
+        # cmdkey missing = not a Windows system; fail fast before net use.
+        mock_run.side_effect = FileNotFoundError("cmdkey not found")
         ns = NetworkStorage(r"\\server\share", username="user", password="pass")
         ok, msg = ns._connect()
 
         assert ok is False
-        assert "not available" in msg
+        assert "not available" in msg or "not a Windows system" in msg.lower()
 
 
 class TestDisconnect:

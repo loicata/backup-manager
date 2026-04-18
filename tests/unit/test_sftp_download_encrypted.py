@@ -42,6 +42,18 @@ def sftp_backend(tmp_path, monkeypatch):
     fake_sftp = MagicMock()
     fake_transport = MagicMock()
 
+    # Default channel behaviour: a failed tar-stream (exit != 0) so the
+    # directory case falls back to per-file _sftp_download_dir without
+    # hanging in an infinite recv() loop (MagicMock recv returns truthy
+    # MagicMocks by default — tests that want the tar path must override).
+    def _make_failing_channel():
+        ch = MagicMock()
+        ch.recv = MagicMock(return_value=b"")
+        ch.recv_exit_status = MagicMock(return_value=1)
+        return ch
+
+    fake_transport.open_session.side_effect = _make_failing_channel
+
     def _get_transport(self):
         return fake_transport
 

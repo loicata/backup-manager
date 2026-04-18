@@ -534,8 +534,17 @@ class RecoveryTab(ScrollableTab):
         if frame:
             frame.pack(fill="x", pady=(Spacing.SMALL, 0))
 
-        # Show list/scan button for remote types
-        is_remote = stype in (StorageType.SFTP.value, StorageType.S3.value)
+        # Show list/scan button for remote types. NETWORK is treated as
+        # a remote here so the user picks a specific backup from a list
+        # instead of typing a UNC path that points at the share root —
+        # the root path made ``Path.resolve`` trip over its empty name
+        # and the download code path was never built for "list all" on
+        # a share.
+        is_remote = stype in (
+            StorageType.SFTP.value,
+            StorageType.S3.value,
+            StorageType.NETWORK.value,
+        )
         if is_remote:
             btn_text = (
                 "Scan for backups" if stype == StorageType.S3.value else "List available backups"
@@ -564,7 +573,7 @@ class RecoveryTab(ScrollableTab):
         has_source = False
         has_encrypted = False
 
-        if stype in (StorageType.LOCAL.value, StorageType.NETWORK.value):
+        if stype == StorageType.LOCAL.value:
             path = self._get_local_path().strip()
             if path:
                 has_source = True
@@ -574,6 +583,7 @@ class RecoveryTab(ScrollableTab):
                         src.is_dir() and any(src.rglob("*.wbenc"))
                     )
         else:
+            # NETWORK / SFTP / S3 all use the list + selection flow.
             has_source = len(self._selected_backups) > 0
             has_encrypted = any(
                 b.get("encrypted", False)
@@ -1362,9 +1372,10 @@ class RecoveryTab(ScrollableTab):
             messagebox.showwarning("Recovery", "Please select a destination.")
             return
 
-        if stype in (StorageType.LOCAL.value, StorageType.NETWORK.value):
+        if stype == StorageType.LOCAL.value:
             self._execute_local(dest_path)
         else:
+            # NETWORK/SFTP/S3 share the list-and-download pipeline.
             self._execute_remote(dest_path)
 
     def _execute_local(self, dest_path: str) -> None:
@@ -1562,7 +1573,33 @@ class RecoveryTab(ScrollableTab):
                     # SFTP or unknown size: animated dots
                     self._start_download_animation(f"Downloading {idx}/{total}... {name}")
 
-                local_path = backend.download_backup(name, dest)
+                # SFTP download emits live progress from a background
+                # worker thread — hop onto the Tk main thread before
+                # touching the status label.
+                sftp_progress = None
+                if not is_s3:
+
+                    def sftp_progress(
+                        current: int, total_units: int, label: str, n=name, i=idx
+                    ) -> None:
+                        self.after(
+                            0,
+                            lambda c=current, t=total_units, lbl=label, nm=n, ii=i: (
+                                self.status_label.config(
+                                    text=(f"Downloading {ii}/{total}... {nm}  ({lbl})"),
+                                    foreground=Colors.WARNING,
+                                )
+                            ),
+                        )
+
+                # Newer backends accept the progress callback; older ones
+                # (or the S3 backend) ignore the kwarg via **_ignored.
+                try:
+                    local_path = backend.download_backup(
+                        name, dest, progress_callback=sftp_progress
+                    )
+                except TypeError:
+                    local_path = backend.download_backup(name, dest)
                 # Clear the progress callback so a lingering reference
                 # from this iteration cannot fire later (boto3
                 # s3transfer can dispatch a final callback after the

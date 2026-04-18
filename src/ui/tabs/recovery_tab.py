@@ -84,14 +84,19 @@ def _is_encrypted_name(name: str) -> bool:
 def _human_size(size_bytes: int) -> str:
     """Format byte count as human-readable string.
 
+    A negative size is treated as "not computed yet" — returned as
+    an ellipsis so the UI can display a placeholder while a
+    background walk finishes. Zero stays zero because it really
+    means "empty".
+
     Args:
-        size_bytes: Size in bytes.
+        size_bytes: Size in bytes, or negative for "unknown".
 
     Returns:
-        Formatted string, e.g. '2.1 GB', '340 MB'.
+        Formatted string, e.g. '2.1 GB', '340 MB', '…'.
     """
     if size_bytes < 0:
-        return "?"
+        return "\u2026"  # horizontal ellipsis
     value = float(size_bytes)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if abs(value) < 1024:
@@ -1057,6 +1062,62 @@ class RecoveryTab(ScrollableTab):
         # Defer by 1 event loop tick so geometry managers finish laying
         # out the newly packed frame before we ask for coordinates.
         self.after_idle(lambda: self.scroll_to_widget(self._list_frame))
+
+        # Network listings return size=-1 for directories to avoid the
+        # SMB round-trip per file that used to freeze the UI for ~60 s.
+        # Kick the actual size walk in the background and patch the tree
+        # rows as each number lands.
+        self._kick_async_size_compute(backups)
+
+    def _kick_async_size_compute(self, backups: list[dict]) -> None:
+        """Start a background walk that fills in missing directory sizes.
+
+        Only fires for NETWORK sources where ``list_backups`` cheaply
+        returned ``size=-1`` for each directory. Each row is updated on
+        the Tk main thread as soon as its size is computed, so the user
+        sees values fill in progressively without any blocking wait.
+        """
+        if self.source_type_var.get() != StorageType.NETWORK.value:
+            return
+        pending = [b for b in backups if b.get("is_dir") and b.get("size", 0) < 0]
+        if not pending:
+            return
+
+        def _worker() -> None:
+            try:
+                config = self._build_storage_config()
+                backend = self._create_backend(config)
+            except Exception:
+                logger.debug("async size: could not build backend", exc_info=True)
+                return
+            for b in pending:
+                name = b.get("name", "")
+                if not name:
+                    continue
+                try:
+                    size = backend.compute_dir_size(name)
+                except Exception:
+                    logger.debug("async size: compute_dir_size failed for %s", name, exc_info=True)
+                    continue
+                # Update the in-memory record AND the visible row on
+                # the main thread. The tree's iid is the backup name
+                # (set by _populate_tree), so _apply_size_update can
+                # find the row instantly.
+                b["size"] = size
+                self.after(0, self._apply_size_update, name, size)
+
+        threading.Thread(target=_worker, daemon=True, name="NetworkSizeWalk").start()
+
+    def _apply_size_update(self, name: str, size: int) -> None:
+        """Refresh the size column for a single backup row (Tk main thread)."""
+        if not self._tree.exists(name):
+            return
+        values = list(self._tree.item(name, "values"))
+        if len(values) < 3:
+            return
+        values[2] = _human_size(size)
+        self._tree.item(name, values=values)
+        self._update_selection_summary()
 
     def _on_list_error(self, error: str) -> None:
         """Handle listing error.

@@ -334,9 +334,10 @@ class NetworkStorage(LocalStorage):
             except OSError:
                 continue
             is_dir = stat_module.S_ISDIR(st.st_mode)
-            # Directories: advertise 0 rather than the inode block
-            # size — truthful ("we don't know") beats the old 4 KB lie.
-            size = 0 if is_dir else st.st_size
+            # Directories: advertise -1 as "unknown — compute async".
+            # The UI renders that as a placeholder and launches a
+            # background size walk that updates the row when done.
+            size = -1 if is_dir else st.st_size
             backups.append(
                 {
                     "name": entry.name,
@@ -346,6 +347,29 @@ class NetworkStorage(LocalStorage):
                 }
             )
         return sorted(backups, key=lambda b: b["modified"], reverse=True)
+
+    def compute_dir_size(self, name: str) -> int:
+        """Recursively compute the byte count of a backup directory.
+
+        Expensive on a network share (one ``stat`` round-trip per file),
+        which is exactly why ``list_backups`` skips it and returns -1.
+        Callers run this in a background thread and update the UI row
+        when the number lands.
+        """
+        target = self._dest / name
+        if not target.exists() or not target.is_dir():
+            return 0
+        total = 0
+        try:
+            for f in target.rglob("*"):
+                try:
+                    if f.is_file():
+                        total += f.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            return total
+        return total
 
     def download_backup(self, remote_name, local_dir, progress_callback=None):
         """Download (copy) a backup from the mounted share to ``local_dir``."""

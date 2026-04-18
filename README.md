@@ -7,7 +7,7 @@
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
-**A Windows backup application you do not need to be a technician to use.**
+**A simple Windows backup application — with a Full Auto mode that adds top-tier security against ransomware.**
 
 Designed for families, freelancers, and small businesses. You install the MSI, the wizard asks you a few questions in plain language, and backups run on their own from that point. No scripts, no command line, no server to configure.
 

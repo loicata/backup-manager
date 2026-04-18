@@ -329,11 +329,13 @@ def _build_verify_html(
     for bvr in results:
         s_color = status_colors.get(bvr.status, "#666")
         s_label = _esc(bvr.status.upper())
+        dest_html = _esc(bvr.destination)
+        name_html = _esc(bvr.backup_name)
         table_rows += f"""
             <tr>
-                <td style="padding: 8px; border-bottom: 1px solid #eee;">{_esc(bvr.destination)}</td>
+                <td style="padding: 8px; border-bottom: 1px solid #eee;">{dest_html}</td>
                 <td style="padding: 8px; border-bottom: 1px solid #eee;
-                           font-family: monospace; font-size: 12px;">{_esc(bvr.backup_name)}</td>
+                           font-family: monospace; font-size: 12px;">{name_html}</td>
                 <td style="padding: 8px; border-bottom: 1px solid #eee;
                            color: {s_color}; font-weight: bold;">{s_label}</td>
                 <td style="padding: 8px; border-bottom: 1px solid #eee;

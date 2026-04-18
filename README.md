@@ -7,59 +7,59 @@
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
-**A simple Windows backup application — with a Full Auto mode that adds top-tier security against ransomware.**
+## Backups that even ransomware cannot delete.
 
-- 🖱️ **3-step wizard.** No command line, no server to configure.
-- 🛡️ **Full Auto mode** locks your backups on Amazon AWS S3 Object Lock — undeletable by ransomware, attackers, or even you, for 4 months to 7 years.
-- 🔐 AES-256-GCM encryption, integrity-checked, runs in the background.
+- 🛡️ **Ransomware-proof** — backups locked on Amazon S3 for **4 months to 7 years**. Undeletable. By anyone.
+- 🖱️ **For non-technicians** — 3-step wizard, zero AWS knowledge, bucket created and locked for you.
+- ⚡ **Complete out of the box** — AES-256 encryption, scheduling, 3 parallel destinations, integrity checks, email alerts.
 
-## Download
-
-**[Download the MSI →](https://github.com/loicata/backup-manager/releases/latest)** — install, open, done.
+### ➡️ **[Download for Windows 10 / 11](https://github.com/loicata/backup-manager/releases/latest)**
 
 | | |
 |:---:|:---:|
 | <img src="assets/screenshots/wizard_mode_choice.png" width="450"> | <img src="assets/screenshots/run_backup.png" width="450"> |
 | <img src="assets/screenshots/general_tab.png" width="450"> | <img src="assets/screenshots/mirror_tab.png" width="450"> |
 
-## Two modes, picked in the wizard
+---
+
+## Two modes
 
 | | Classic | Full Auto (anti-ransomware) |
 |---|---|---|
 | **Destination** | USB / network share / SFTP / S3 | Amazon AWS S3 with Object Lock |
-| **Setup** | 3 steps | 11 guided steps, AWS account created for you |
-| **Protection** | Encryption + integrity checks | All of Classic + backups that **cannot be deleted** before their retention date |
-| **For whom** | You already have a backup drive or NAS | You want to survive a ransomware attack on the whole machine |
+| **Setup** | 3 steps | 11 guided steps — AWS signup & bucket done for you |
+| **Protection** | Encryption + integrity checks | Classic + backups that **cannot be deleted** before their retention date |
+| **For whom** | You already have a drive or NAS | You want to survive a full ransomware attack |
 
 ## What Full Auto does once the wizard finishes
 
-- 📅 **Monthly full backup** + **daily differentials** (only changed files).
-- 🔒 Each backup is **locked on S3** for the retention you picked — even you cannot delete it.
-- ✅ **SHA-256 integrity check** after every upload. You know immediately if something went wrong.
-- 📧 Optional **email on success or failure**.
-- 🧹 Old backups past their lock date are **auto-deleted by S3 Lifecycle**. No wasted storage.
-- 🔁 Missed a run (PC off, offline)? Catches up on next startup, retries on failure.
+- 📅 Monthly full + daily differential (only changed files).
+- 🔒 Each backup **locked on S3** for your chosen duration — even you cannot delete it.
+- ✅ SHA-256 integrity check after every upload.
+- 📧 Optional email on success / failure.
+- 🧹 Old backups past their lock date auto-deleted by S3 Lifecycle.
+- 🔁 Missed a run? Catches up on next startup. Retries on failure.
 
-## Retention options
+## Retention
 
 | Duration | Use |
 |---|---|
-| **4 months** (default) | Survive dwell-time ransomware (~3 months) with margin. |
+| **4 months** (default) | Ransomware dwell time is ~3 months — this covers it with margin. |
 | **13 months** | Rolling one-year protection. |
 | **7 years** | Regulatory archives. |
 | **Custom** | 2 to 20 years. |
 
-Cost shown in the wizard before you commit, from 10 GB to 800 GB, based on Amazon AWS S3 Glacier IR pricing. Indicative — AWS bills you directly.
+Cost shown in the wizard before you commit (10 GB → 800 GB, based on AWS S3 Glacier IR pricing). AWS bills you directly.
 
 ## Key features
 
 | | |
 |---|---|
-| **S3 Object Lock Compliance** | Ransomware-proof backups, Full Auto mode |
+| **S3 Object Lock Compliance** | Ransomware-proof, Full Auto mode |
 | **4 storage backends** | Local / USB, network share, SFTP, S3 |
 | **+2 mirror copies** | Independent, per-destination encryption |
 | **AES-256-GCM streaming** | Nothing written in plaintext |
-| **GFS rotation** (classic) | Daily / weekly / monthly |
+| **GFS rotation** (classic mode) | Daily / weekly / monthly |
 | **SHA-256 integrity** | Pre, post, and periodic checks |
 | **DPAPI password storage** | Windows user-bound |
 | **Adaptive bandwidth** | Throttling for slow links (Starlink-tested) |

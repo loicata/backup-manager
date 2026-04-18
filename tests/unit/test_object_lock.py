@@ -612,7 +612,7 @@ class TestWizardProProfile:
             "pro_aws_secret": "SECRET_TEST",
             "pro_region": "eu-west-1",
             "pro_bucket": "test-bucket",
-            "pro_retention_idx": 2,  # 13 months
+            "pro_retention_idx": 1,  # 13 months
             "pro_encrypt": False,
             "pro_encrypt_password": "",
             "pro_mirror_local": False,
@@ -648,7 +648,7 @@ class TestWizardProProfile:
             "pro_aws_secret": "SECRET",
             "pro_region": "us-east-1",
             "pro_bucket": "enc-bucket",
-            "pro_retention_idx": 0,  # 1 month
+            "pro_retention_idx": 0,  # 4 months
             "pro_encrypt": True,
             "pro_encrypt_password": "strongpass123",
             "pro_mirror_local": False,
@@ -675,7 +675,7 @@ class TestWizardProProfile:
             "pro_aws_secret": "SECRET",
             "pro_region": "eu-west-1",
             "pro_bucket": "mirror-bucket",
-            "pro_retention_idx": 1,  # 4 months
+            "pro_retention_idx": 0,  # 4 months
             "pro_encrypt": False,
             "pro_encrypt_password": "",
             "pro_mirror_local": True,

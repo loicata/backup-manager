@@ -9,7 +9,6 @@ the backups actually live. The helper
 starting directory based on three signals, in order of preference.
 """
 
-
 import pytest
 
 from src.core.config import (

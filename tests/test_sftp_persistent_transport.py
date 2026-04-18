@@ -8,7 +8,7 @@ the shared transport and forcing a reconnect on the next operation.
 
 import stat as stat_module
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from src.core.phases.collector import FileInfo
 
@@ -160,11 +160,20 @@ class TestPersistentTransportPreserved:
             _attach_persistent(storage, mock_transport)
 
             mock_sftp = MagicMock()
+            # Post-v3.3.6: stat() is probed first to choose file vs dir
+            # download path. Simulate a directory layout here.
+            mock_sftp.stat.return_value = MagicMock(st_mode=stat_module.S_IFDIR | 0o755)
             mock_sftp.listdir_attr.return_value = []
             mock_sftp.get.side_effect = FileNotFoundError("no manifest")
             _install_sftp(storage, mock_sftp)
 
-            storage.download_backup("Backup_FULL_2026-04-16_120000", tmp_path)
+            # Skip the tar-stream fast path so the test exercises the
+            # plain sftp.listdir_attr flow that existed before.
+            with (
+                patch.object(storage, "_tar_stream_download", return_value=False),
+                patch.object(storage, "_remote_file_count", return_value=0),
+            ):
+                storage.download_backup("Backup_FULL_2026-04-16_120000", tmp_path)
             mock_transport.close.assert_not_called()
         finally:
             _cleanup_paramiko()

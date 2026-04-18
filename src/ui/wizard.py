@@ -58,7 +58,7 @@ def _resolve_retention(data: dict) -> tuple[str, int, int]:
     Returns:
         (label, months, days) tuple.
     """
-    idx = data.get("pro_retention_idx", 2)
+    idx = data.get("pro_retention_idx", 0)
     if idx < len(RETENTION_OPTIONS):
         return RETENTION_OPTIONS[idx]
     # Custom duration
@@ -93,7 +93,7 @@ class SetupWizard:
             "pro_aws_secret": "",
             "pro_region": "eu-west-1",
             "pro_bucket": "",
-            "pro_retention_idx": 2,  # Default: 13 months
+            "pro_retention_idx": 0,  # Default: 4 months
             "pro_encrypt": False,
             "pro_encrypt_password": "",
             "pro_mirror_local": False,
@@ -430,8 +430,7 @@ class SetupWizard:
         ).pack()
         ttk.Label(
             personal,
-            text="Backup to external drive,\nnetwork share, SSH server\nor S3 cloud storage.\n\n"
-            "Simple and fast setup.",
+            text="Backup to external drive,\nnetwork share, SSH server\nor S3 cloud storage.",
             justify="center",
         ).pack(pady=Spacing.MEDIUM)
         ttk.Button(
@@ -441,7 +440,10 @@ class SetupWizard:
             command=lambda: self._select_mode(MODE_PERSONAL),
         ).pack(pady=Spacing.MEDIUM)
 
-        # Anti-Ransomware card
+        # "Full Auto / High Security" card — the underlying tech is still
+        # S3 with Object Lock, but the card speaks to the benefits a
+        # non-technical user actually values: nothing to plug in and
+        # nothing an attacker (or a mistake) can erase.
         pro = ttk.LabelFrame(cards, text="", padding=Spacing.XLARGE)
         pro.grid(row=0, column=1, padx=Spacing.MEDIUM, sticky="nsew")
 
@@ -453,7 +455,7 @@ class SetupWizard:
         ).pack(pady=(0, Spacing.MEDIUM), fill="x")
         ttk.Label(
             pro,
-            text="Anti-Ransomware",
+            text="Full Auto",
             font=Fonts.title(),
         ).pack()
         ttk.Label(
@@ -463,15 +465,21 @@ class SetupWizard:
         ).pack()
         ttk.Label(
             pro,
-            text="Backup to Amazon AWS S3\nserver with Object Lock.\n\n"
-            "Your data is IMMUTABLE\nand impossible to delete.",
+            text=(
+                "Automatic backup to Amazon AWS\n"
+                "in the background. Nothing to plug\n"
+                "in, nothing to manage.\n\n"
+                "Your data is locked — impossible\n"
+                "to delete or modify, even during\n"
+                "an attack, a virus or ransomware."
+            ),
             justify="center",
         ).pack(pady=Spacing.MEDIUM)
 
         s3_available = FEAT_S3 in self._features
         pro_btn = ttk.Button(
             pro,
-            text="Choose Anti-Ransomware",
+            text="Choose Full Auto",
             style="Accent.TButton",
             command=lambda: self._select_mode(MODE_PROFESSIONAL),
             state="normal" if s3_available else "disabled",
@@ -1169,7 +1177,7 @@ class SetupWizard:
 
     def _step_pro_protection_info(self) -> None:
         """Step 1 (pro): Explain what we will do and why."""
-        self._set_header("Anti-Ransomware Protection")
+        self._set_header("High Security \u2014 Setup")
 
         # Introduction
         ttk.Label(
@@ -1189,12 +1197,12 @@ class SetupWizard:
                 "backup, thereby contaminating your backups as well.",
             ),
             (
-                "The solution: immutable cloud backups",
-                "We will store your backups on Amazon AWS S3 with Object Lock "
-                "technology. Once uploaded, your data becomes INDESTRUCTIBLE "
-                "for the duration you choose (from 1 month to 13 years).\n\n"
-                "No one can delete or modify your data during this period \u2014 "
-                "not you, not a hacker, not even Amazon.",
+                "The solution: locked cloud backups",
+                "Your backups are stored on Amazon AWS with Object Lock enabled. "
+                "It is Object Lock that protects your data \u2014 once uploaded, "
+                "it cannot be deleted or modified for the duration you choose.\n\n"
+                "Not you, not a hacker, not even Amazon can destroy your "
+                "data during the period you have chosen.",
             ),
             (
                 "What this wizard will do",
@@ -1208,11 +1216,8 @@ class SetupWizard:
             ),
             (
                 "Why this is the best method",
-                "This is the same technology used by banks, hospitals, and "
-                "governments to protect critical data. Object Lock Compliance "
-                "mode is the highest level of data protection available "
-                "in the cloud. Your data is guaranteed to survive any attack "
-                "during the entire retention period.",
+                "This is the same protection used by banks, hospitals and "
+                "governments to shelter critical data.",
             ),
         ]
 
@@ -1329,7 +1334,7 @@ class SetupWizard:
             foreground=Colors.DANGER,
         ).pack(fill="x", pady=(0, Spacing.MEDIUM))
 
-        ret_var = tk.IntVar(value=self._data.get("pro_retention_idx", 2))
+        ret_var = tk.IntVar(value=self._data.get("pro_retention_idx", 0))
         custom_idx = len(RETENTION_OPTIONS)  # Index for "Custom" option
 
         for i, (label, _months, _days) in enumerate(RETENTION_OPTIONS):
@@ -1447,44 +1452,52 @@ class SetupWizard:
             wraplength=900,
         ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
 
-        # Full table: all durations × all sizes (total cost only)
+        # Full table: sizes (rows) × durations (columns)
         table = ttk.Frame(self._content)
         table.pack(fill="x", pady=Spacing.MEDIUM)
 
-        sizes = [10, 50, 100, 200]
+        # Sizes shown as rows. Each entry is (value_gb, display_label).
+        sizes: list[tuple[int, str]] = [
+            (10, "10 GB"),
+            (50, "50 GB"),
+            (100, "100 GB"),
+            (200, "200 GB"),
+            (400, "400 GB"),
+            (800, "800 GB"),
+        ]
 
-        # Header row
-        ttk.Label(table, text="Retention", font=Fonts.bold()).grid(
+        # Column list: predefined durations + custom if selected
+        all_options = list(RETENTION_OPTIONS)
+        selected = _resolve_retention(self._data)
+        if self._data.get("pro_retention_idx", 0) >= len(RETENTION_OPTIONS):
+            all_options.append(selected)
+
+        # Header row: "Size" + one column per duration
+        ttk.Label(table, text="Size", font=Fonts.bold()).grid(
             row=0,
             column=0,
             padx=Spacing.MEDIUM,
             pady=Spacing.SMALL,
             sticky="w",
         )
-        for col, size_gb in enumerate(sizes, start=1):
-            ttk.Label(table, text=f"{size_gb} GB", font=Fonts.bold()).grid(
+        for col, (label, _months, _days) in enumerate(all_options, start=1):
+            ttk.Label(table, text=label, font=Fonts.bold()).grid(
                 row=0,
                 column=col,
                 padx=Spacing.MEDIUM,
                 pady=Spacing.SMALL,
             )
 
-        # Data rows — predefined options + custom if selected
-        all_options = list(RETENTION_OPTIONS)
-        selected = _resolve_retention(self._data)
-        # Add custom row if not a predefined option
-        if self._data.get("pro_retention_idx", 0) >= len(RETENTION_OPTIONS):
-            all_options.append(selected)
-
-        for row, (label, months, _days) in enumerate(all_options, start=1):
-            ttk.Label(table, text=label).grid(
+        # Data rows — one per size
+        for row, (size_gb, size_label) in enumerate(sizes, start=1):
+            ttk.Label(table, text=size_label).grid(
                 row=row,
                 column=0,
                 padx=Spacing.MEDIUM,
                 pady=2,
                 sticky="w",
             )
-            for col, size_gb in enumerate(sizes, start=1):
+            for col, (_label, months, _days) in enumerate(all_options, start=1):
                 total = estimate_total_cost(size_gb, region, months)
                 cost_text = format_cost(total, cur_symbol, cur_rate)
                 ttk.Label(table, text=cost_text).grid(

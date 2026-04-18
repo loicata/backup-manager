@@ -191,7 +191,10 @@ class TestHumanSize:
         assert "GB" in _human_size(2 * 1024 * 1024 * 1024)
 
     def test_negative(self):
-        assert _human_size(-1) == "?"
+        # Negative size is the "not computed yet" sentinel used by the
+        # NETWORK async size compute. The UI shows a horizontal ellipsis
+        # as a placeholder until the background walk returns the real size.
+        assert _human_size(-1) == "\u2026"
 
     def test_zero(self):
         assert _human_size(0) == "0 B"
@@ -242,10 +245,13 @@ class TestSourceTypeSwitching:
         recovery_tab.winfo_toplevel().update_idletasks()
         assert not recovery_tab._list_btn.winfo_ismapped()
 
-    def test_switch_to_network_hides_list_button(self, recovery_tab):
+    def test_switch_to_network_shows_list_button(self, recovery_tab):
+        # NETWORK now flows through the unified list+select restore path
+        # (same as SFTP / S3), so the list button must be visible. Before
+        # v3.3.6 NETWORK used the LOCAL path directly and hid the button.
         recovery_tab.source_type_var.set(StorageType.NETWORK.value)
         recovery_tab.winfo_toplevel().update_idletasks()
-        assert not recovery_tab._list_btn.winfo_ismapped()
+        assert recovery_tab._list_btn.winfo_ismapped()
 
     def test_switch_type_clears_listing(self, recovery_tab):
         recovery_tab._listed_backups = [{"name": "test", "size": 1, "modified": 1}]

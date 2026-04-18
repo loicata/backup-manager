@@ -75,11 +75,9 @@ GLACIER_IR_PRICE_PER_GB: dict[str, float] = {
 # Retention durations offered in the wizard.
 # (label, months, days)
 RETENTION_OPTIONS: list[tuple[str, int, int]] = [
-    ("1 month", 1, 30),
     ("4 months", 4, 120),
     ("13 months", 13, 395),
     ("7 years", 84, 2555),
-    ("13 years", 156, 4745),
 ]
 
 

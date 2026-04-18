@@ -556,6 +556,8 @@ class TestSFTPDownloadManifest:
 
     def test_download_includes_wbverify(self, tmp_path):
         """download_backup attempts to download .wbverify via SFTP."""
+        import stat as stat_module
+
         from src.storage.sftp import SFTPStorage
 
         storage = SFTPStorage(
@@ -566,7 +568,12 @@ class TestSFTPDownloadManifest:
             remote_path="/backups",
         )
 
+        # Stat result = directory (S_IFDIR). The post-v3.3.6 flow probes
+        # the remote first to decide between file-download (encrypted
+        # archive) and dir-download (tar-stream / per-file). The mock
+        # must supply a valid integer st_mode.
         mock_sftp = MagicMock()
+        mock_sftp.stat.return_value = MagicMock(st_mode=stat_module.S_IFDIR | 0o755)
         mock_sftp.listdir_attr.return_value = []
         mock_sftp.get.return_value = None
 
@@ -576,6 +583,10 @@ class TestSFTPDownloadManifest:
         with (
             patch.object(storage, "_get_transport", return_value=mock_transport),
             patch.object(storage, "_get_sftp", return_value=mock_sftp),
+            # Disable tar-stream fast path so we stay on the sftp.get
+            # code path the test is asserting on.
+            patch.object(storage, "_tar_stream_download", return_value=False),
+            patch.object(storage, "_remote_file_count", return_value=0),
         ):
             storage.download_backup("bk_01", tmp_path)
 
@@ -586,6 +597,8 @@ class TestSFTPDownloadManifest:
 
     def test_missing_wbverify_no_error(self, tmp_path):
         """Missing .wbverify on SFTP does not raise an error."""
+        import stat as stat_module
+
         from src.storage.sftp import SFTPStorage
 
         storage = SFTPStorage(
@@ -597,6 +610,7 @@ class TestSFTPDownloadManifest:
         )
 
         mock_sftp = MagicMock()
+        mock_sftp.stat.return_value = MagicMock(st_mode=stat_module.S_IFDIR | 0o755)
         mock_sftp.listdir_attr.return_value = []
         mock_sftp.get.side_effect = FileNotFoundError("not found")
 
@@ -606,12 +620,16 @@ class TestSFTPDownloadManifest:
         with (
             patch.object(storage, "_get_transport", return_value=mock_transport),
             patch.object(storage, "_get_sftp", return_value=mock_sftp),
+            patch.object(storage, "_tar_stream_download", return_value=False),
+            patch.object(storage, "_remote_file_count", return_value=0),
         ):
             # Should not raise
             storage.download_backup("bk_01", tmp_path)
 
     def test_download_raises_when_existing_dst_cannot_be_cleared(self, tmp_path):
         """Unclearable existing destination must fail loudly, not silently."""
+        import stat as stat_module
+
         from src.storage.sftp import SFTPStorage
 
         storage = SFTPStorage(
@@ -626,10 +644,17 @@ class TestSFTPDownloadManifest:
         (tmp_path / "bk_01").mkdir()
         (tmp_path / "bk_01" / "stale.txt").write_bytes(b"old")
 
+        mock_sftp = MagicMock()
+        mock_sftp.stat.return_value = MagicMock(st_mode=stat_module.S_IFDIR | 0o755)
+        mock_transport = MagicMock()
+        mock_transport.is_active.return_value = True
+
         def _fail(*a, **kw):
             raise PermissionError("file locked")
 
         with (
+            patch.object(storage, "_get_transport", return_value=mock_transport),
+            patch.object(storage, "_get_sftp", return_value=mock_sftp),
             patch("shutil.rmtree", side_effect=_fail),
             pytest.raises(OSError, match="Cannot clear existing download"),
         ):

@@ -94,6 +94,28 @@ _INJECTION_KEYWORDS = re.compile(
 _MAX_DESCRIPTION_LEN = 2000
 
 
+def _is_packaged_build() -> bool:
+    """Return True for both PyInstaller and Nuitka packaged builds.
+
+    PyInstaller sets ``sys.frozen = True`` at runtime. Nuitka does
+    NOT — it exposes ``__compiled__`` on the main module instead.
+    Relying on ``sys.frozen`` alone treats Nuitka binaries as dev
+    builds, which makes the bug report attempt git lookups and
+    source-file reads that will not work next to a compiled .exe.
+
+    Returns:
+        True if running from a packaged binary (PyInstaller or Nuitka).
+    """
+    if getattr(sys, "frozen", False):
+        return True
+    try:
+        from src.__main__ import _is_nuitka
+
+        return _is_nuitka()
+    except ImportError:
+        return False
+
+
 def _normalize_unicode(text: str) -> str:
     """Normalize Unicode lookalike characters to ASCII equivalents.
 
@@ -202,7 +224,10 @@ def _extract_recent_errors(log_file: Path, count: int = 3) -> str | None:
     if not log_file.exists():
         return None
     try:
-        raw_lines = log_file.read_text(encoding="utf-8").splitlines()
+        # ``errors="replace"`` tolerates mixed encodings (UTF-8 + CP1252)
+        # that can occur in Windows log tails. Without it, a single bad
+        # byte would crash the whole report generation.
+        raw_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
 
@@ -239,7 +264,7 @@ def _extract_traceback_info(crash_file: Path) -> str | None:
     if not crash_file.exists():
         return None
     try:
-        raw_lines = crash_file.read_text(encoding="utf-8").splitlines()
+        raw_lines = crash_file.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
     if not raw_lines:
@@ -248,8 +273,8 @@ def _extract_traceback_info(crash_file: Path) -> str | None:
 
 
 def _get_git_commit() -> str:
-    """Get the current git commit hash, or 'unknown' in frozen builds."""
-    if getattr(sys, "frozen", False):
+    """Get the current git commit hash, or 'frozen_build' in packaged builds."""
+    if _is_packaged_build():
         return "frozen_build"
     try:
         import subprocess
@@ -278,7 +303,7 @@ def _parse_traceback_structured(crash_file: Path) -> list[dict]:
     if not crash_file.exists():
         return []
     try:
-        raw = crash_file.read_text(encoding="utf-8")
+        raw = crash_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
 
@@ -338,7 +363,7 @@ def _build_machine_readable(diagnostic: str, include_logs: bool = False) -> dict
         "python_version": platform.python_version(),
         "os": f"{platform.system()} {platform.release()}",
         "os_build": platform.version(),
-        "frozen": getattr(sys, "frozen", False),
+        "frozen": _is_packaged_build(),
         "generated_at": datetime.now().isoformat(),
     }
 
@@ -410,7 +435,7 @@ def _build_machine_readable(diagnostic: str, include_logs: bool = False) -> dict
     # Recent log tail (anonymized, last 50 lines)
     if log_file.exists():
         try:
-            raw_lines = log_file.read_text(encoding="utf-8").splitlines()
+            raw_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
             tail = raw_lines[-50:] if len(raw_lines) > 50 else raw_lines
             anon = anonymize_log_lines(tail)
             safe_log = []
@@ -432,8 +457,9 @@ def _compute_source_hashes() -> dict[str, str]:
     Returns:
         Dictionary mapping relative file paths to their SHA-256 hashes.
     """
-    # Determine source root
-    if getattr(sys, "frozen", False):
+    # Determine source root. Packaged builds (PyInstaller + Nuitka)
+    # do not ship source files next to the binary, so skip hashing.
+    if _is_packaged_build():
         return {"note": "frozen build — source hashes not available"}
 
     src_root = Path(__file__).resolve().parent.parent
@@ -1515,12 +1541,53 @@ class BackupManagerApp:
                 self._finalize_profile_deletion(profile)
 
     def _finalize_profile_deletion(self, profile: BackupProfile) -> None:
-        """Remove profile config and refresh the UI."""
+        """Remove profile config and refresh the UI.
+
+        When the deleted profile was the last one on disk, relaunch the
+        setup wizard exactly the way the cold start does — an empty app
+        with no way to create a profile is a dead end for the user.
+        """
         self.config_manager.delete_profile(profile.id)
         self._current_profile = None
         self._load_profiles()
         if self._current_profile is None:
             self._clear_tabs()
+
+        if not self.config_manager.get_all_profiles():
+            self._relaunch_wizard_after_delete()
+
+    def _relaunch_wizard_after_delete(self) -> None:
+        """Launch the setup wizard modal when no profiles remain.
+
+        Mirrors the cold-start path in ``__main__.py``: hide the main
+        window, let the user pick Personal vs Professional, then reload
+        the sidebar with whatever came out. On cancel, nothing happens —
+        the main window reappears empty and the sidebar ``New profile``
+        button stays reachable.
+        """
+        from src.ui.wizard import SetupWizard
+
+        self.root.withdraw()
+        try:
+            wizard = SetupWizard(self.root, standalone=True)
+            profile = wizard.run()
+        finally:
+            self.root.deiconify()
+
+        if profile is None:
+            return
+        self.config_manager.save_profile(profile)
+        # Sync the app's mode to the profile we just created so the
+        # sidebar and General tab reflect it.
+        self._current_mode = "anti-ransomware" if profile.object_lock_enabled else "classic"
+        self.tab_general.mode_var.set(self._current_mode)
+        self._load_profiles()
+        # Prevent the scheduler from auto-firing the brand new profile
+        # on the very next tick — the user probably wants a review pass
+        # first, exactly like after the first-launch wizard.
+        from datetime import datetime
+
+        self.scheduler.mark_triggered_now(profile.id, datetime.now())
 
     def _delete_profile_backups_async(self, profile: BackupProfile) -> None:
         """Delete all backups for a profile in background, then remove config."""
@@ -2612,7 +2679,7 @@ class BackupManagerApp:
             f"- OS: {platform.system()} {platform.release()} " f"Build {platform.version()}"
         )
         lines.append(f"- Python: {platform.python_version()}")
-        lines.append(f"- Frozen: {getattr(sys, 'frozen', False)}")
+        lines.append(f"- Frozen: {_is_packaged_build()}")
         lines.append(f"- Install ID: {self.config_manager.get_install_id()}")
         lines.append(f"- Architecture: {platform.machine()} " f"({platform.architecture()[0]})")
 
@@ -2832,17 +2899,40 @@ class BackupManagerApp:
             id_path = Path(id_file_path)
             if id_path.exists():
                 try:
-                    raw = id_path.read_bytes()
-                    id_hash = hashlib.sha256(raw).hexdigest()
-                    file_size = len(raw)
+                    # Cap at 20 MB: a passport scan is typically 2-5 MB;
+                    # anything above likely means the user picked the
+                    # wrong file (video, backup archive, etc.). Reading
+                    # the whole file into RAM could cause an OOM.
+                    file_size = id_path.stat().st_size
+                    max_id_size = 20 * 1024 * 1024
+                    if file_size > max_id_size:
+                        logger.warning(
+                            "ID file too large (%d bytes > 20 MB limit), skipping",
+                            file_size,
+                        )
+                    else:
+                        # Streaming hash — avoids loading the whole file
+                        # into memory.
+                        h = hashlib.sha256()
+                        chunk_size = 1024 * 1024  # 1 MB
+                        with id_path.open("rb") as f:
+                            while chunk := f.read(chunk_size):
+                                h.update(chunk)
+                        id_hash = h.hexdigest()
 
-                    # Write hash to diagnostic (append)
-                    with open(folder / "diagnostic.txt", "a", encoding="utf-8") as f:
-                        f.write(f"ID-HASH-SHA256: {id_hash}\n")
+                        # Write hash to diagnostic (append)
+                        with open(folder / "diagnostic.txt", "a", encoding="utf-8") as f:
+                            f.write(f"ID-HASH-SHA256: {id_hash}\n")
 
-                    # Create decoy file with random bytes of same size
-                    decoy = folder / "id_verification.enc"
-                    decoy.write_bytes(os.urandom(file_size))
+                        # Decoy file of the same size — streaming write so
+                        # we never hold a multi-MB random buffer in RAM.
+                        decoy = folder / "id_verification.enc"
+                        remaining = file_size
+                        with decoy.open("wb") as f:
+                            while remaining > 0:
+                                n = min(remaining, chunk_size)
+                                f.write(os.urandom(n))
+                                remaining -= n
                 except OSError:
                     logger.warning("Could not process ID file", exc_info=True)
 
@@ -3096,12 +3186,22 @@ class BackupManagerApp:
                 )
                 return
 
-            folder = self._generate_bug_report(
-                description,
-                diagnostic,
-                advanced=is_advanced,
-                id_file_path=id_file if is_advanced else "",
-            )
+            try:
+                folder = self._generate_bug_report(
+                    description,
+                    diagnostic,
+                    advanced=is_advanced,
+                    id_file_path=id_file if is_advanced else "",
+                )
+            except Exception:
+                logger.error("Failed to generate bug report", exc_info=True)
+                messagebox.showerror(
+                    "Report generation failed",
+                    "Could not create the bug report folder.\n"
+                    "Check the log file for details and try again.",
+                    parent=self.root,
+                )
+                return
             try:
                 os.startfile(str(folder))
             except OSError:

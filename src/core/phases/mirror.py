@@ -219,6 +219,14 @@ def _upload_existing_archive(
     """
     remote_path = f"{backup_name}.tar.wbenc"
     size = archive_path.stat().st_size
+    size_mb = size / (1024 * 1024)
+
+    # Emit a phase-start line so the log stays coherent with the rest
+    # of the pipeline convention (``...`` means "in progress"). Without
+    # it the user stares at a blank 2-5 minutes between the bandwidth
+    # measurement and the final "Uploaded" result and wonders if the
+    # app is stuck.
+    phase_log.info(f"Uploading encrypted archive: {remote_path} ({size_mb:.1f} MB)...")
 
     # For S3: use path-based upload for reliable multipart
     if hasattr(backend, "_get_client"):

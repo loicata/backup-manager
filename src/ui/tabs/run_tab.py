@@ -386,9 +386,7 @@ class RunTab(ttk.Frame):
         if self._profile_info_baseline is None:
             return
         name, _configured_type, last, last_full = self._profile_info_baseline
-        type_display = (
-            "full (auto-promoted)" if forced_full else backup_type or _configured_type
-        )
+        type_display = "full (auto-promoted)" if forced_full else backup_type or _configured_type
         with contextlib.suppress(tk.TclError):
             self.profile_label.config(
                 text=f"Profile: {name} | Type: {type_display} | Last backup: {last}"

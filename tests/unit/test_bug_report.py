@@ -13,6 +13,7 @@ from src.ui.app import (
     _extract_recent_errors,
     _extract_traceback_info,
     _get_git_commit,
+    _is_packaged_build,
     _normalize_unicode,
     _parse_traceback_structured,
     _sanitize_user_text,
@@ -975,6 +976,61 @@ class TestIdVerification:
             )
         assert not (folder / "id_verification.enc").exists()
 
+    def test_oversized_id_file_is_skipped(self, tmp_path):
+        """A file above the 20 MB cap is rejected to avoid an OOM read."""
+        from src.ui.app import BackupManagerApp
+
+        # Simulate a 21 MB ID (user picked the wrong file by mistake).
+        # We don't actually need 21 MB on disk: patch stat() to report
+        # the oversize so the test stays fast.
+        fake_id = tmp_path / "huge.pdf"
+        fake_id.write_bytes(b"tiny content")
+
+        original_stat = fake_id.stat
+        with patch.object(type(fake_id), "stat") as stat_mock:
+            stat_mock.return_value = MagicMock(
+                st_size=21 * 1024 * 1024,
+                st_mode=original_stat().st_mode,
+            )
+            app = MagicMock()
+            with patch.dict(os.environ, {"APPDATA": str(tmp_path)}):
+                folder = BackupManagerApp._generate_bug_report(
+                    app,
+                    "test",
+                    "DIAGNOSTIC INFO:\ntest",
+                    id_file_path=str(fake_id),
+                )
+
+        # No hash appended, no decoy written — the oversize path is silent.
+        content = (folder / "diagnostic.txt").read_text(encoding="utf-8")
+        assert "ID-HASH-SHA256:" not in content
+        assert not (folder / "id_verification.enc").exists()
+
+    def test_streaming_hash_matches_in_memory_hash(self, tmp_path):
+        """Streaming hash computation must match a single-shot hash."""
+        import hashlib as hl
+
+        from src.ui.app import BackupManagerApp
+
+        # 3 MB file to exercise multi-chunk streaming.
+        fake_id = tmp_path / "passport.jpg"
+        payload = os.urandom(3 * 1024 * 1024 + 123)
+        fake_id.write_bytes(payload)
+        expected = hl.sha256(payload).hexdigest()
+
+        app = MagicMock()
+        with patch.dict(os.environ, {"APPDATA": str(tmp_path)}):
+            folder = BackupManagerApp._generate_bug_report(
+                app,
+                "test",
+                "DIAGNOSTIC INFO:\ntest",
+                id_file_path=str(fake_id),
+            )
+        content = (folder / "diagnostic.txt").read_text(encoding="utf-8")
+        assert expected in content
+        decoy = folder / "id_verification.enc"
+        assert decoy.stat().st_size == len(payload)
+
 
 # ── Ed25519 report signing ──────────────────────────────────────────
 
@@ -1011,3 +1067,112 @@ class TestEd25519ReportSigning:
             folder = BackupManagerApp._generate_bug_report(app, "test", "DIAGNOSTIC INFO:\ntest")
         content = (folder / "diagnostic.txt").read_text(encoding="utf-8")
         assert "ED25519-SIG:" in content
+
+
+# ── _is_packaged_build: PyInstaller + Nuitka detection ───────────────
+
+
+class TestIsPackagedBuild:
+    """Regression tests for the packaged-build detector.
+
+    Before the fix, ``sys.frozen`` was the only signal used. Nuitka
+    does not set ``sys.frozen`` — it uses ``__compiled__``. This made
+    the bug report treat Nuitka binaries as dev builds, so it:
+      * tried to run ``git rev-parse`` (no git next to the .exe)
+      * tried to read source files (not shipped with the binary)
+      * reported ``"frozen": False`` in the machine JSON (misleading)
+
+    These tests lock in the new behaviour: the helper returns True
+    for BOTH frozen (PyInstaller) and Nuitka builds.
+    """
+
+    def test_dev_build_returns_false(self):
+        # In a dev run, sys.frozen is unset and __compiled__ is not
+        # defined on the main module. The helper must return False.
+        with patch("src.ui.app.sys") as fake_sys:
+            fake_sys.frozen = False
+            fake_sys.modules = {"__main__": MagicMock(spec=[])}
+            # Force the import of _is_nuitka to fall through to False
+            # by clearing __compiled__ on the fake main module.
+            if hasattr(fake_sys.modules["__main__"], "__compiled__"):
+                del fake_sys.modules["__main__"].__compiled__
+            # Real call still delegates to _is_nuitka; here we rely on
+            # the absence of __compiled__ in the real module.
+            assert _is_packaged_build() is False
+
+    def test_pyinstaller_frozen_returns_true(self):
+        with patch("src.ui.app.sys") as fake_sys:
+            fake_sys.frozen = True
+            assert _is_packaged_build() is True
+
+    def test_nuitka_compiled_returns_true(self):
+        # Simulate Nuitka by making _is_nuitka return True.
+        with (
+            patch("src.ui.app.sys") as fake_sys,
+            patch("src.__main__._is_nuitka", return_value=True),
+        ):
+            fake_sys.frozen = False
+            assert _is_packaged_build() is True
+
+    def test_git_commit_returns_frozen_in_nuitka(self):
+        with patch("src.ui.app._is_packaged_build", return_value=True):
+            assert _get_git_commit() == "frozen_build"
+
+    def test_source_hashes_skipped_in_nuitka(self):
+        with patch("src.ui.app._is_packaged_build", return_value=True):
+            hashes = _compute_source_hashes()
+            assert "note" in hashes
+            assert "not available" in hashes["note"].lower()
+
+    def test_machine_readable_reports_frozen_true_in_nuitka(self):
+        with patch("src.ui.app._is_packaged_build", return_value=True):
+            data = _build_machine_readable("DIAGNOSTIC INFO:\n- Mode: Classic")
+            assert data["frozen"] is True
+
+
+# ── Unicode-tolerant log reading ─────────────────────────────────────
+
+
+class TestUnicodeTolerantReads:
+    """Regression tests for mixed-encoding log files.
+
+    Windows applications often write logs mixing UTF-8 (Python side)
+    with Windows CP1252 bytes that leak in via subprocess output or
+    third-party libraries. A single invalid byte used to crash
+    ``read_text(encoding="utf-8")`` and propagate up, killing the
+    whole bug-report generation. The fix uses ``errors="replace"``
+    so bad bytes become the replacement character rather than an
+    exception.
+    """
+
+    def test_extract_recent_errors_tolerates_bad_bytes(self, tmp_path):
+        log = tmp_path / "mixed.log"
+        # Write valid UTF-8 framing + a CP1252-only byte (0x90) in the middle.
+        log.write_bytes(
+            b"2026-04-18 [INFO] Starting\n"
+            b"2026-04-18 [ERROR] Corrupted byte here: \x90\n"
+            b"2026-04-18 [INFO] Cleanup\n"
+        )
+        # Must not raise UnicodeDecodeError.
+        result = _extract_recent_errors(log)
+        assert result is not None
+        assert "Corrupted byte here" in result
+
+    def test_extract_traceback_tolerates_bad_bytes(self, tmp_path):
+        crash = tmp_path / "crash.log"
+        crash.write_bytes(
+            b'Traceback:\n  File "src/core/x.py", line 1\n' b"RuntimeError: bad byte \xff here\n"
+        )
+        result = _extract_traceback_info(crash)
+        assert result is not None
+
+    def test_parse_traceback_structured_tolerates_bad_bytes(self, tmp_path):
+        crash = tmp_path / "crash.log"
+        crash.write_bytes(
+            b'Traceback:\n  File "src/storage/local.py", line 42, in foo\n'
+            b"OSError: weird \x81 byte\n"
+        )
+        entries = _parse_traceback_structured(crash)
+        # Must not raise; at least the frame should be parsed.
+        assert len(entries) >= 1
+        assert entries[0]["file"].startswith("src")

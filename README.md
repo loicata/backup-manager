@@ -3,16 +3,19 @@
 [![CI](https://github.com/loicata/backup-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/loicata/backup-manager/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-1407%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1429%20passed-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
-## 🛡️ Backups a ransomware cannot erase.
+## 🛡️ Backup Manager
 
-✅ **Undeletable** — locked on AWS S3 for 4 months to 7 years. Not even you.
-✅ **No AWS knowledge needed** — the 3-step wizard creates your bucket and locks it.
-✅ **100 % automatic** — daily backups, email alerts, integrity checks, auto-cleanup.
-✅ **Free and open-source** — no subscription, no account, no data sold.
+**📦 Classic profiles** — backup to external drive, network share, SSH server, or S3 cloud storage.
+**🔒 Anti-Ransomware profiles** — backup to Amazon AWS S3 with Object Lock, **the technology used in banking**. Your data becomes **impossible to delete**, even by ransomware.
+
+✅ **100 % automatic** — daily backups, email alerts, integrity checks
+✅ **No AWS knowledge needed** — the wizard creates and locks everything
+✅ **Free and open-source** — no subscription, no account
+✅ **Windows 10 / 11** — one-click MSI installer
 
 ### ⬇️ **[Download for Windows 10 / 11](https://github.com/loicata/backup-manager/releases/latest)**
 
@@ -80,7 +83,7 @@ Cost shown in the wizard before you commit (10 GB → 800 GB, based on AWS S3 Gl
 | Tab | Description |
 |---|---|
 | **Run** | Launch a backup, watch progress and logs |
-| **General** | Mode, profile name, source folders, exclusions, bandwidth |
+| **General** | Profile name, type badge (Classic / Anti-Ransomware), source folders, exclusions, bandwidth |
 | **Storage / Mirror 1 / Mirror 2** | Primary and up to 2 mirror destinations |
 | **Encryption** | AES-256-GCM toggle per destination |
 | **Schedule** | Frequency, time, auto-retry, periodic verification |
@@ -166,7 +169,7 @@ pytest                                      # full suite
 pytest --cov=src --cov-report=term-missing  # with coverage
 ```
 
-**Current status:** 1407 tests, 85 % coverage, 0 failures.
+**Current status:** 1429 tests, 85 % coverage, 0 failures.
 
 CI (GitHub Actions, every push): Black formatting, Ruff linting (Ubuntu), full pytest with coverage enforcement (Windows, Python 3.12 + 3.13).
 
@@ -219,9 +222,9 @@ backup-manager/
 │   ├── notifications/           # SMTP email with HTML reports
 │   └── ui/                      # Tkinter GUI (Sun Valley theme)
 │       ├── wizard.py            # Classic (3 steps) + Pro (11 steps) wizard
-│       ├── app.py               # Main window with mode selector
+│       ├── app.py               # Main window with sidebar (mode per profile)
 │       └── tabs/                # Tab implementations
-├── tests/                       # 1407 tests (unit + integration)
+├── tests/                       # 1429 tests (unit + integration)
 ├── CHANGELOG.md
 ├── requirements.txt
 └── pyproject.toml

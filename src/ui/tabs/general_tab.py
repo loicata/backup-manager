@@ -523,14 +523,15 @@ class GeneralTab(ScrollableTab):
             self.type_var.set(profile.backup_type.value)
 
             # Swap the interactive and read-only widgets based on mode.
-            # Always pack_forget + pack unconditionally: winfo_ismapped()
-            # returns False during the very first load_profile (the Tk
-            # root has not rendered yet), which caused the "Backup type"
-            # LabelFrame to appear empty on Anti-Ransomware profiles at
-            # startup. pack_forget on an unpacked widget is a no-op, so
-            # the unconditional version is safe.
+            # To guarantee the Full/Diff choice always renders ABOVE the
+            # dependent "Full backup frequency" block, unpack everything
+            # first (including _diff_info_frame) then re-pack in the
+            # desired order. pack() without before= appends to the end
+            # of the parent's pack order, so the final visible order is
+            # just the sequence of pack() calls here.
             self._type_radio_frame.pack_forget()
             self._type_readonly_label.pack_forget()
+            self._diff_info_frame.pack_forget()
             self._full_sched_frame.pack_forget()
             self._full_sched_readonly.pack_forget()
 
@@ -542,6 +543,14 @@ class GeneralTab(ScrollableTab):
                 self.profile_type_var.set("\U0001f4e6 Classic")
                 self._type_radio_frame.pack(fill="x")
                 self._full_sched_frame.pack(fill="x", pady=(Spacing.SMALL, 0))
+
+            # Re-pack _diff_info_frame below the choice widget. When
+            # backup_type is FULL the frame stays hidden (toggle_diff_info
+            # never re-packs it because is_diff is False) — that is the
+            # desired behaviour, no editable differential options above
+            # a Full run.
+            if self.type_var.get() == BackupType.DIFFERENTIAL.value:
+                self._diff_info_frame.pack(fill="x", pady=(4, 0))
 
             self.full_sched_mode_var.set(profile.full_schedule_mode)
             self.full_day_of_week_var.set(self._int_to_day_name(profile.full_day_of_week))

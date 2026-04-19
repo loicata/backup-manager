@@ -1,5 +1,6 @@
 """Retention tab: GFS backup rotation policy configuration."""
 
+import contextlib
 import tkinter as tk
 from tkinter import ttk
 
@@ -13,7 +14,36 @@ class RetentionTab(ttk.Frame):
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self._schedule_freq: ScheduleFrequency = ScheduleFrequency.DAILY
+        self._schedule_tab = None  # Set by set_schedule_tab() from the app
         self._build_ui()
+
+    def set_schedule_tab(self, tab) -> None:
+        """Wire the Schedule tab so the retention rows react to live edits.
+
+        Without this link, Retention only re-reads the schedule frequency
+        when a profile is loaded. A user who switches backup_type to
+        Differential — which auto-flips the schedule combobox to Daily —
+        would not see the Daily row reappear until they saved the
+        profile. Registering a trace on the frequency var keeps Retention
+        in sync with whatever the user is editing in Schedule right now.
+        """
+        self._schedule_tab = tab
+        with contextlib.suppress(AttributeError, tk.TclError):
+            tab.get_frequency_var().trace_add("write", lambda *_: self._on_schedule_freq_changed())
+
+    def _on_schedule_freq_changed(self) -> None:
+        """React to a live edit of the Schedule frequency combobox."""
+        if self._schedule_tab is None:
+            return
+        try:
+            label = self._schedule_tab.get_frequency_var().get()
+        except (AttributeError, tk.TclError):
+            return
+        try:
+            freq = ScheduleFrequency(label.lower())
+        except ValueError:
+            return
+        self._apply_frequency_visibility(freq)
 
     def _build_ui(self):
         frame = ttk.LabelFrame(
@@ -132,11 +162,24 @@ class RetentionTab(ttk.Frame):
             internal_val = getattr(r, key, var.get() + 1)
             var.set(max(internal_val - 1, 0))
 
-        # Store frequency for summary updates
+        # Prefer the live Schedule combobox (if wired) over the saved
+        # profile field: the auto-config that runs on Full→Differential
+        # can switch the combobox to Daily without the profile being
+        # saved yet, and Retention needs to reflect that immediately.
         freq = profile.schedule.frequency
+        if self._schedule_tab is not None:
+            try:
+                label = self._schedule_tab.get_frequency_var().get()
+                freq = ScheduleFrequency(label.lower())
+            except (AttributeError, ValueError, tk.TclError):
+                pass
+
+        self._apply_frequency_visibility(freq)
+
+    def _apply_frequency_visibility(self, freq: ScheduleFrequency) -> None:
+        """Show/hide retention rows based on the given schedule frequency."""
         self._schedule_freq = freq
 
-        # Hide rows irrelevant to the schedule frequency
         daily_row = self._gfs_rows.get("gfs_daily")
         weekly_row = self._gfs_rows.get("gfs_weekly")
         monthly_row = self._gfs_rows.get("gfs_monthly")

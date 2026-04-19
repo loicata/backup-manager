@@ -921,6 +921,7 @@ class BackupManagerApp:
         # autoconfig (first Full->Diff per profile) can set both.
         self.tab_general.set_retention_tab(self.tab_retention)
         self.tab_general.set_schedule_tab(self.tab_schedule)
+        self.tab_retention.set_schedule_tab(self.tab_schedule)
 
         # Connect run tab buttons
         self.tab_run.start_btn.config(command=self._run_backup)

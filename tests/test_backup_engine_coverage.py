@@ -207,25 +207,30 @@ class TestMaybeForceFullPromotion:
         assert result.actual_backup_type == "FULL"
         assert result.files_processed == 2
 
-    def test_promote_when_cycle_reached(self, env, profile):
-        """Differential auto-promotes to full when cycle threshold reached."""
+    def test_promote_when_calendar_schedule_due(self, env, profile):
+        """Differential auto-promotes to full when the calendar window
+        for the configured full_schedule_mode has rolled over."""
         profile.backup_type = BackupType.FULL
         engine = _engine(env)
         engine.run_backup(profile)
 
+        # Backdate the last full to a previous month to trigger the
+        # calendar promotion under the default monthly mode.
+        profile.last_full_backup = "2020-01-01T00:00:00"
         profile.backup_type = BackupType.DIFFERENTIAL
-        profile.differential_count = profile.full_backup_every  # At threshold
         result = engine.run_backup(profile)
         assert result.actual_backup_type == "FULL"
 
     def test_no_promote_when_differential_normal(self, env, profile):
-        """Differential stays differential when conditions are normal."""
+        """Differential stays differential when the calendar schedule
+        still has the current period covered by the previous full."""
         profile.backup_type = BackupType.FULL
         engine = _engine(env)
         engine.run_backup(profile)
 
         profile.backup_type = BackupType.DIFFERENTIAL
-        profile.differential_count = 0
+        # last_full_backup was just written by the engine to "now" — the
+        # monthly window is already covered, so no forced full.
         result = engine.run_backup(profile)
         assert result.actual_backup_type == "DIFFERENTIAL"
 

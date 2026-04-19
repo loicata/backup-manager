@@ -18,7 +18,13 @@ from tkinter import messagebox, ttk
 
 from src import __version__
 from src.core.backup_engine import BackupEngine, CancelledError
-from src.core.config import BackupProfile, BackupType, ConfigManager, StorageConfig
+from src.core.config import (
+    BackupProfile,
+    BackupType,
+    ConfigManager,
+    ScheduleFrequency,
+    StorageConfig,
+)
 from src.core.events import STATUS, EventBus
 from src.core.health_checker import check_destinations_async
 from src.core.scheduler import AutoStart, InAppScheduler
@@ -666,6 +672,11 @@ class BackupManagerApp:
         # profile_hash, retention reference) and corrupt pipeline decisions
         # like _phase_update_delta's FULL/DIFF branch.
         self._backup_running: bool = False
+        # Profiles scheduled to run sequentially after the current one
+        # completes (populated by _run_backup when the user clicks the
+        # Start button — the button now runs every active profile in
+        # sidebar order, not just the currently selected one).
+        self._backup_queue: list[BackupProfile] = []
 
         # Setup theme
         self.style = setup_theme(root)
@@ -685,18 +696,11 @@ class BackupManagerApp:
             quit_callback=self._quit_app,
         )
 
-        # Load active mode from settings
-        app_settings = self.config_manager.load_app_settings()
-        self._current_mode = app_settings.get("mode", "classic")
-
         # Build UI
         self._build_ui()
 
-        # Connect mode change callback
-        self.tab_general.mode_var.set(self._current_mode)
-        self.tab_general.mode_var.trace_add("write", self._on_mode_changed)
-
         self._load_profiles()
+        app_settings = self.config_manager.load_app_settings()
         if "last_verify" in app_settings:
             self.tab_verify.update_last_verify(app_settings["last_verify"])
 
@@ -949,68 +953,6 @@ class BackupManagerApp:
         }
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-    def _on_mode_changed(self, *_args: object) -> None:
-        """Handle mode switch between Classic and Anti-Ransomware.
-
-        Saves the new mode, reloads profiles filtered by mode,
-        and launches the wizard if no profiles exist in the new mode.
-        """
-        new_mode = self.tab_general.mode_var.get()
-        if new_mode == self._current_mode:
-            return
-
-        old_mode = self._current_mode
-        self._current_mode = new_mode
-
-        # Persist mode to app settings
-        settings = self.config_manager.load_app_settings()
-        settings["mode"] = new_mode
-        self.config_manager.save_app_settings(settings)
-
-        # Reload profiles filtered by new mode
-        self._load_profiles()
-
-        # If no profiles in this mode, launch the wizard
-        if not self._profiles:
-            from src.ui.wizard import MODE_PERSONAL, MODE_PROFESSIONAL, SetupWizard
-
-            self.root.withdraw()
-            wizard = SetupWizard(self.root, standalone=True)
-            if new_mode == "anti-ransomware":
-                wizard._select_mode(MODE_PROFESSIONAL)
-            else:
-                wizard._select_mode(MODE_PERSONAL)
-            profile = wizard.run()
-            self.root.deiconify()
-
-            if profile:
-                self.config_manager.save_profile(profile)
-                self._load_profiles()
-
-                # Switch to Run tab and prevent auto-backup
-                self.notebook.select(self.tab_run)
-                from datetime import datetime
-
-                # Use the public scheduler API rather than poking at
-                # the private ``_state`` attribute (SLF001 and fragile).
-                self.scheduler.mark_triggered_now(profile.id, datetime.now())
-            else:
-                # Wizard cancelled — revert to previous mode
-                self._current_mode = old_mode
-                self.tab_general.mode_var.set(old_mode)
-                settings["mode"] = old_mode
-                self.config_manager.save_app_settings(settings)
-                self._load_profiles()
-                return
-
-        # Select the first profile in the new mode
-        for i, (_idx, p) in enumerate(self._listbox_profile_map):
-            if p is not None:
-                self.profile_listbox.selection_clear(0, "end")
-                self.profile_listbox.selection_set(i)
-                self._on_profile_selected(None)
-                break
-
     def _on_tab_changed(self, event=None):
         """Show or hide the Save button depending on the active tab."""
         current = self.notebook.select()
@@ -1022,21 +964,26 @@ class BackupManagerApp:
     # --- Profile management ---
 
     def _load_profiles(self):
-        """Load profiles into the sidebar, filtered by the active mode."""
+        """Load profiles into the sidebar.
+
+        Classic and Anti-Ransomware profiles share the same ACTIVE /
+        INACTIVE sections. Anti-Ransomware profiles are highlighted in
+        red (active) or a desaturated red (inactive) so the mode remains
+        visible without splitting the list into two sub-lists.
+        """
         self.profile_listbox.delete(0, "end")
         all_profiles = self.config_manager.get_all_profiles()
-        self._all_profiles = all_profiles  # Keep unfiltered for mode switching
-
-        # Filter by current mode
-        is_anti_ran = self._current_mode == "anti-ransomware"
-        self._profiles = [p for p in all_profiles if p.object_lock_enabled == is_anti_ran]
+        self._profiles = all_profiles
         self._header_indices = set()
         self._listbox_profile_map = []
 
-        active = [p for p in self._profiles if p.active]
-        inactive = [p for p in self._profiles if not p.active]
+        active = [p for p in all_profiles if p.active]
+        inactive = [p for p in all_profiles if not p.active]
 
         idx = 0
+        first_active_idx: int | None = None
+        first_active_profile: BackupProfile | None = None
+
         # Active header
         self.profile_listbox.insert("end", "ACTIVE PROFILES")
         self.profile_listbox.itemconfig(
@@ -1051,7 +998,19 @@ class BackupManagerApp:
 
         for p in active:
             self.profile_listbox.insert("end", f"  {p.name}")
+            if p.object_lock_enabled:
+                # selectforeground must be set too — Tk otherwise
+                # falls back to the widget default (white), wiping out
+                # the red tint when the profile is highlighted.
+                self.profile_listbox.itemconfig(
+                    idx,
+                    fg=Colors.DANGER,
+                    selectforeground=Colors.DANGER,
+                )
             self._listbox_profile_map.append((idx, p))
+            if first_active_profile is None:
+                first_active_profile = p
+                first_active_idx = idx
             idx += 1
 
         # Spacer + Inactive header
@@ -1076,15 +1035,21 @@ class BackupManagerApp:
 
         for p in inactive:
             self.profile_listbox.insert("end", f"  {p.name}")
-            self.profile_listbox.itemconfig(idx, fg="#888888")
+            # Anti-Ransomware stays red even when inactive so the mode
+            # remains visible at a glance. The INACTIVE PROFILES header
+            # is enough to signal the inactive state, no extra graying.
+            if p.object_lock_enabled:
+                self.profile_listbox.itemconfig(
+                    idx,
+                    fg=Colors.DANGER,
+                    selectforeground=Colors.DANGER,
+                )
             self._listbox_profile_map.append((idx, p))
             idx += 1
 
-        # Select first active profile
-        if active:
-            first_active_idx = 1  # index 0 is header
+        if first_active_profile is not None and first_active_idx is not None:
             self.profile_listbox.select_set(first_active_idx)
-            self._load_profile(active[0])
+            self._load_profile(first_active_profile)
 
     def _on_profile_selected(self, event=None):
         sel = self.profile_listbox.curselection()
@@ -1114,9 +1079,26 @@ class BackupManagerApp:
         if self._current_profile and self._current_profile.id == new_profile.id:
             return
 
-        # Save current profile before switching to a different one
+        # Save current profile before switching to a different one.
+        # _save_profile ends with _load_profiles() which rewrites the
+        # listbox, sets the visual selection back to the first active
+        # profile, and can shift indices. After that we must re-locate
+        # ``new_profile`` by id AND restore the visual selection
+        # ourselves, otherwise the tabs show the new profile while the
+        # blue highlight stays on the previous one.
         if self._current_profile:
             self._save_profile(silent=True)
+            refreshed = None
+            refreshed_idx = None
+            for map_idx, p in self._listbox_profile_map:
+                if p is not None and p.id == new_profile.id:
+                    refreshed = p
+                    refreshed_idx = map_idx
+                    break
+            if refreshed is not None and refreshed_idx is not None:
+                self.profile_listbox.selection_clear(0, "end")
+                self.profile_listbox.select_set(refreshed_idx)
+                new_profile = refreshed
 
         self._load_profile(new_profile)
 
@@ -1158,29 +1140,31 @@ class BackupManagerApp:
         Object Lock profiles show the Protection tab (read-only).
         Standard profiles show the normal Retention tab with GFS config.
 
+        Uses ``forget`` + ``insert`` rather than ``hide`` + ``insert`` so
+        the swap is idempotent across repeated profile switches. ``hide``
+        keeps the tab in the notebook (just invisible), which made
+        ``notebook.index(tab)`` succeed on the second call and skipped
+        the re-insert — leaving both tabs hidden forever. ``forget``
+        removes the tab entirely; ``insert`` then places it at the
+        correct position every time.
+
         Args:
             profile: Currently loaded profile.
         """
-        try:
-            if profile.object_lock_enabled:
-                self.notebook.hide(self.tab_retention)
-                # Add Protection tab at the position where Retention was
-                try:
-                    self.notebook.index(self.tab_protection)
-                except tk.TclError:
-                    # Not yet added — insert after Schedule
-                    schedule_idx = self.notebook.index(self.tab_schedule)
-                    self.notebook.insert(schedule_idx + 1, self.tab_protection, text=" Protection ")
-            else:
-                import contextlib
+        import contextlib
 
-                with contextlib.suppress(tk.TclError):
-                    self.notebook.hide(self.tab_protection)
-                try:
-                    self.notebook.index(self.tab_retention)
-                except tk.TclError:
-                    schedule_idx = self.notebook.index(self.tab_schedule)
-                    self.notebook.insert(schedule_idx + 1, self.tab_retention, text=" Retention ")
+        hidden_tab = self.tab_retention if profile.object_lock_enabled else self.tab_protection
+        shown_tab = self.tab_protection if profile.object_lock_enabled else self.tab_retention
+        shown_label = " Protection " if profile.object_lock_enabled else " Retention "
+
+        try:
+            with contextlib.suppress(tk.TclError):
+                self.notebook.forget(hidden_tab)
+            with contextlib.suppress(tk.TclError):
+                self.notebook.forget(shown_tab)
+
+            schedule_idx = self.notebook.index(self.tab_schedule)
+            self.notebook.insert(schedule_idx + 1, shown_tab, text=shown_label)
         except tk.TclError:
             pass  # Tab manipulation during window setup
 
@@ -1376,10 +1360,18 @@ class BackupManagerApp:
 
         profile.name = new_name
         profile.backup_type = general["backup_type"]
-        profile.full_backup_every = general["full_backup_every"]
         profile.source_paths = general["source_paths"]
         profile.exclude_patterns = general["exclude_patterns"]
         profile.bandwidth_percent = general["bandwidth_percent"]
+
+        # Calendar-based full backup schedule. Anti-Ransomware profiles keep
+        # their locked schedule (monthly on day 1) so the collected UI values
+        # are ignored — the widgets stay hidden and only show the read-only
+        # label to the user.
+        if not profile.object_lock_enabled:
+            profile.full_schedule_mode = general["full_schedule_mode"]
+            profile.full_day_of_week = general["full_day_of_week"]
+            profile.full_day_of_month = general["full_day_of_month"]
 
         storage = self.tab_storage.collect_config()
         profile.storage = storage["storage"]
@@ -1401,23 +1393,6 @@ class BackupManagerApp:
         retention = self.tab_retention.collect_config()
         profile.retention = retention["retention"]
 
-        # Validate differential full-backup cycle (skip for Object Lock profiles
-        # where GFS rotation is disabled — S3 Lifecycle handles cleanup)
-        if general["backup_type"] == BackupType.DIFFERENTIAL and profile.retention.gfs_enabled:
-            cycle = general["full_backup_every"]
-            gfs_d = profile.retention.gfs_daily
-
-            if cycle > gfs_d:
-                self.notebook.select(self.tab_general)
-                messagebox.showwarning(
-                    "Validation",
-                    f"Full backup cycle ({cycle}) must not exceed "
-                    f"daily retention ({gfs_d}).\n\n"
-                    f"Otherwise the daily rotation could delete the "
-                    f"full backup before the next one is created.",
-                )
-                return False
-
         encryption = self.tab_encryption.collect_config()
         profile.encrypt_primary = encryption["encrypt_primary"]
         profile.encrypt_mirror1 = encryption["encrypt_mirror1"]
@@ -1429,6 +1404,20 @@ class BackupManagerApp:
         # Retry enabled comes from general tab
         sched_cfg.retry_enabled = general["retry_enabled"]
         profile.schedule = sched_cfg
+
+        # Validate that the full-backup schedule is compatible with the
+        # run schedule. A profile that runs weekly cannot have a "daily"
+        # full, and a profile that runs monthly cannot have a "daily" or
+        # "weekly" full — there simply are not enough runs. Anti-Ransomware
+        # profiles are locked to the monthly rule so they never hit this.
+        if general["backup_type"] == BackupType.DIFFERENTIAL and not profile.object_lock_enabled:
+            invalid_msg = self._validate_full_schedule_combination(
+                sched_cfg.frequency, profile.full_schedule_mode
+            )
+            if invalid_msg:
+                self.notebook.select(self.tab_general)
+                messagebox.showwarning("Validation", invalid_msg)
+                return False
 
         email = self.tab_email.collect_config()
         profile.email = email["email"]
@@ -1456,6 +1445,29 @@ class BackupManagerApp:
         # stale alert rather than leaving it visible over the tabs.
         self._hide_target_alert()
         return True
+
+    @staticmethod
+    def _validate_full_schedule_combination(
+        run_frequency: ScheduleFrequency, full_mode: str
+    ) -> str:
+        """Return an error message when the full-backup schedule cannot
+        fit inside the run schedule, or empty string when the combination
+        is valid. Monthly schedules cannot host daily or weekly fulls;
+        weekly schedules cannot host daily fulls."""
+        freq = run_frequency.value if hasattr(run_frequency, "value") else str(run_frequency)
+        if freq == "monthly" and full_mode in ("daily", "weekly"):
+            return (
+                f"A '{freq}' run schedule cannot host a '{full_mode}' full-backup "
+                f"rule: there are not enough runs. Choose 'monthly' or switch the "
+                f"run schedule to a more frequent one."
+            )
+        if freq == "weekly" and full_mode == "daily":
+            return (
+                "A 'weekly' run schedule cannot host a 'daily' full-backup rule: "
+                "there is only one run per week. Choose 'weekly' or 'monthly', "
+                "or switch the run schedule to 'daily' or 'hourly'."
+            )
+        return ""
 
     @staticmethod
     def _check_duplicate_destinations(storage, mirrors) -> str:
@@ -1503,10 +1515,38 @@ class BackupManagerApp:
         return ""
 
     def _new_profile(self):
-        profile = BackupProfile()
+        """Launch the setup wizard from step 0 (mode choice) to create a
+        new profile. The wizard writes ``object_lock_enabled`` based on the
+        user's choice, so the new profile lands in the correct sidebar
+        section automatically.
+        """
+        if self._backup_running:
+            messagebox.showwarning(
+                "Backup in progress",
+                "A backup is currently running. Please wait for it to "
+                "complete before creating a new profile.",
+            )
+            return
+
+        from src.ui.wizard import SetupWizard
+
+        self.root.withdraw()
+        try:
+            wizard = SetupWizard(self.root, standalone=True)
+            profile = wizard.run()
+        finally:
+            self.root.deiconify()
+
+        if profile is None:
+            return
+
         self.config_manager.save_profile(profile)
         self._load_profiles()
-        # Select only the new profile
+        from datetime import datetime
+
+        self.scheduler.mark_triggered_now(profile.id, datetime.now())
+
+        # Select the newly created profile in the sidebar
         self.profile_listbox.selection_clear(0, "end")
         for map_idx, p in self._listbox_profile_map:
             if p is not None and p.id == profile.id:
@@ -1584,10 +1624,6 @@ class BackupManagerApp:
         if profile is None:
             return
         self.config_manager.save_profile(profile)
-        # Sync the app's mode to the profile we just created so the
-        # sidebar and General tab reflect it.
-        self._current_mode = "anti-ransomware" if profile.object_lock_enabled else "classic"
-        self.tab_general.mode_var.set(self._current_mode)
         self._load_profiles()
         # Prevent the scheduler from auto-firing the brand new profile
         # on the very next tick — the user probably wants a review pass
@@ -1667,6 +1703,25 @@ class BackupManagerApp:
                 return profile, idx
         return None, None
 
+    def _renumber_sort_orders(
+        self,
+        active_profiles: list[BackupProfile],
+        inactive_profiles: list[BackupProfile],
+    ) -> None:
+        """Assign distinct, sequential sort_order values to every profile.
+
+        New profiles default to sort_order=0 so a naive Python swap leaves
+        both profiles with the same value and no visible reordering. This
+        helper normalizes the values once so subsequent swaps always move
+        things around. Persists the changes so the numbering survives
+        across sessions.
+        """
+        all_profiles = list(active_profiles) + list(inactive_profiles)
+        for i, p in enumerate(all_profiles):
+            if p.sort_order != i:
+                p.sort_order = i
+                self.config_manager.save_profile(p)
+
     def _move_profile_up(self):
         """Move selected profile up, or from inactive to active."""
         profile, idx = self._get_selected_profile()
@@ -1675,6 +1730,7 @@ class BackupManagerApp:
 
         active_profiles = [p for p in self._profiles if p.active]
         inactive_profiles = [p for p in self._profiles if not p.active]
+        self._renumber_sort_orders(active_profiles, inactive_profiles)
 
         if profile.active:
             # Already active — move up within active list
@@ -1715,6 +1771,7 @@ class BackupManagerApp:
 
         active_profiles = [p for p in self._profiles if p.active]
         inactive_profiles = [p for p in self._profiles if not p.active]
+        self._renumber_sort_orders(active_profiles, inactive_profiles)
 
         if profile.active:
             pos = active_profiles.index(profile)
@@ -1757,37 +1814,64 @@ class BackupManagerApp:
     # --- Backup execution ---
 
     def _run_backup(self):
-        if not self._current_profile:
-            messagebox.showwarning("Backup", "No profile selected.")
+        """Run every active profile in sidebar order, sequentially.
+
+        The previous behaviour was "run the currently selected profile",
+        which was fragile because the selection is not always what the
+        user expects (a silent _load_profiles() during a save can
+        change which profile ``_current_profile`` points to). Running
+        every active profile in the visual order matches the priority
+        the user set with the Up/Down buttons and makes the button a
+        single action: "do what Active Profiles says to do, from top
+        to bottom".
+        """
+        # Save whatever the user typed in the tabs before kicking the
+        # queue off — the first profile to run still benefits from any
+        # last-minute edits, and the other profiles are unaffected
+        # because the save path only writes ``self._current_profile``.
+        if self._current_profile and not self._save_profile(silent=True):
             return
 
-        # Save current UI state before running (validates config)
-        if not self._save_profile(silent=True):
+        active_profiles = [p for p in self._profiles if p.active]
+        if not active_profiles:
+            messagebox.showwarning("Backup", "No active profile to run.")
             return
 
-        profile = self._current_profile
-
-        # Validate config before attempting connectivity check
-        try:
-            profile.storage.validate()
-        except ValueError as e:
-            self.notebook.select(self.tab_storage)
-            messagebox.showwarning("Backup", f"Invalid configuration: {e}")
-            return
-
+        # Validate each profile's storage config up-front so we fail fast
+        # if one of them is misconfigured, rather than half-way through
+        # the queue.
         mirror_tabs = [self.tab_mirror1, self.tab_mirror2]
-        for i, mirror in enumerate(profile.mirror_destinations):
+        for profile in active_profiles:
             try:
-                mirror.validate()
+                profile.storage.validate()
             except ValueError as e:
-                self.notebook.select(mirror_tabs[i])
-                messagebox.showwarning("Backup", f"Invalid configuration: {e}")
+                self.notebook.select(self.tab_storage)
+                messagebox.showwarning(
+                    "Backup",
+                    f"Invalid configuration on '{profile.name}': {e}",
+                )
                 return
+            for i, mirror in enumerate(profile.mirror_destinations):
+                try:
+                    mirror.validate()
+                except ValueError as e:
+                    self.notebook.select(mirror_tabs[i])
+                    messagebox.showwarning(
+                        "Backup",
+                        f"Invalid configuration on '{profile.name}' " f"(mirror {i + 1}): {e}",
+                    )
+                    return
 
         self.engine = BackupEngine(self.config_manager, events=self.events)
 
-        # Pre-check targets in background, then start backup if all OK
-        self._precheck_and_run(profile)
+        # Queue everything after the first profile; _backup_thread picks
+        # the next one off the queue when it finishes. Clear first in
+        # case a previous run left something behind.
+        self._backup_queue = list(active_profiles[1:])
+        # Move the sidebar selection to the first profile so the user
+        # sees tabs updated for the profile actually being run.
+        self._select_profile_in_sidebar(active_profiles[0])
+        self._precheck_and_run(active_profiles[0])
 
     def _precheck_and_run(self, profile: BackupProfile, _retry_attempt: int = 0) -> None:
         """Run target pre-check in background thread, then start backup.
@@ -1907,6 +1991,11 @@ class BackupManagerApp:
         # the flag and skips. Reset in the thread's finally block.
         self._backup_running = True
 
+        # Outcome of the current run — populated in the try/except branches
+        # below and read from the finally block to decide whether to
+        # prompt the user before chaining the next queued profile.
+        run_failed = [False]
+
         def _backup_thread():
             from datetime import datetime
 
@@ -1966,6 +2055,7 @@ class BackupManagerApp:
                     )
 
             except CancelledError:
+                run_failed[0] = True
                 self.tray.set_state(TrayState.IDLE)
                 self.tray.notify(
                     "Backup cancelled",
@@ -1985,6 +2075,7 @@ class BackupManagerApp:
                         cancelled=True,
                     )
             except Exception as e:
+                run_failed[0] = True
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 self.tray.notify("Backup failed", str(e))
                 result = self.engine._current_result if self.engine else None
@@ -2011,8 +2102,62 @@ class BackupManagerApp:
                 # is replaced by the canonical profile-derived label
                 # (even on cancel/error paths).
                 self.root.after(0, self._refresh_run_header, profile)
+                # Chain the next queued profile. On success we go
+                # straight to it; on failure or cancellation we ask the
+                # user whether to continue so a broken config doesn't
+                # silently skip all remaining profiles.
+                self.root.after(
+                    0,
+                    self._dequeue_next_backup,
+                    run_failed[0],
+                    profile.name,
+                )
 
         threading.Thread(target=_backup_thread, daemon=True, name="Backup").start()
+
+    def _dequeue_next_backup(self, previous_failed: bool, previous_name: str) -> None:
+        """Pop the next profile off ``_backup_queue`` and start it.
+
+        Called on the Tk main thread from the ``finally`` block of
+        ``_backup_thread`` once the current backup has released
+        ``_backup_running``. If the queue is empty the chain is done.
+
+        When ``previous_failed`` is True the user is prompted before the
+        next profile runs — skipping silently through every remaining
+        profile after a failure would hide a broken configuration.
+        """
+        if not self._backup_queue:
+            return
+        next_profile = self._backup_queue[0]
+        if previous_failed:
+            proceed = messagebox.askyesno(
+                "Backup failed",
+                f"'{previous_name}' did not finish successfully.\n\n"
+                f"Run the next active profile ('{next_profile.name}') anyway?",
+            )
+            if not proceed:
+                self._backup_queue.clear()
+                return
+        self._backup_queue.pop(0)
+        # Track the active profile visually so the sidebar and tabs
+        # reflect which backup is running right now.
+        self._select_profile_in_sidebar(next_profile)
+        self._precheck_and_run(next_profile)
+
+    def _select_profile_in_sidebar(self, profile: BackupProfile) -> None:
+        """Highlight a profile in the sidebar and load its tabs.
+
+        Used by the sequential-backup chain so the user always sees
+        which profile is currently running. A silent no-op when the
+        profile is not in the listbox (e.g. already deleted).
+        """
+        for map_idx, p in self._listbox_profile_map:
+            if p is not None and p.id == profile.id:
+                self.profile_listbox.selection_clear(0, "end")
+                self.profile_listbox.select_set(map_idx)
+                self.profile_listbox.see(map_idx)
+                self._load_profile(p)
+                return
 
     def _cancel_backup(self):
         if self.engine:
@@ -2721,10 +2866,6 @@ class BackupManagerApp:
             pass
 
         # --- App config ---
-        app_settings = self.config_manager.load_app_settings()
-        mode = app_settings.get("mode", "classic")
-        lines.append(f"- Mode: {mode.replace('-', ' ').title()}")
-
         # Active tab
         try:
             active_tab_id = self.notebook.select()

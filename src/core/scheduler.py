@@ -794,8 +794,10 @@ class AutoStart:
         """
         import sys
 
-        if not getattr(sys, "frozen", False):
-            return  # Only for frozen exe
+        from src.__main__ import _is_nuitka
+
+        if not (getattr(sys, "frozen", False) or _is_nuitka()):
+            return
 
         exe_path = Path(sys.executable)
         args = "" if show_window else " --minimized"

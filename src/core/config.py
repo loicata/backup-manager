@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from src.security.encryption import retrieve_password, store_password
 
@@ -228,8 +229,14 @@ class BackupProfile:
     encrypt_primary: bool = False
     encrypt_mirror1: bool = False
     encrypt_mirror2: bool = False
-    full_backup_every: int = 7  # Force a full backup every N backups (differential)
-    differential_count: int = 0  # Backups since last full (auto-managed)
+    # Calendar-based full backup schedule (replaces the legacy counter approach).
+    # - "daily": one full per day, other runs are diff (only applies when schedule is HOURLY)
+    # - "weekly": one full per week on ``full_day_of_week``, other runs are diff
+    # - "monthly": one full per month on ``full_day_of_month``, other runs are diff
+    # Anti-Ransomware profiles are locked to "monthly" with day 1.
+    full_schedule_mode: Literal["daily", "weekly", "monthly"] = "monthly"
+    full_day_of_week: int = 0  # 0=Monday..6=Sunday, used when mode=weekly
+    full_day_of_month: int = 1  # 1-31 (capped to month length), used when mode=monthly
     destinations_hash: str = ""  # Deprecated — kept for JSON compat
     sources_hash: str = ""  # Deprecated — kept for JSON compat
     encryption_hash: str = ""  # Deprecated — kept for JSON compat
@@ -296,7 +303,9 @@ def compute_profile_hash(profile: BackupProfile) -> str:
 
     # Profile identity (excludes backup_type — it toggles between runs)
     parts.append(f"name={profile.name}")
-    parts.append(f"full_backup_every={profile.full_backup_every}")
+    parts.append(f"full_schedule_mode={profile.full_schedule_mode}")
+    parts.append(f"full_day_of_week={profile.full_day_of_week}")
+    parts.append(f"full_day_of_month={profile.full_day_of_month}")
     parts.append(f"bandwidth_percent={profile.bandwidth_percent}")
 
     # Sources

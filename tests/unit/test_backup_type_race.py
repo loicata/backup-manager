@@ -86,13 +86,10 @@ class TestPhaseUpdateDeltaForcedFullSource:
         ctx, engine = self._build_ctx(
             tmp_path, backup_type=BackupType.DIFFERENTIAL, forced_full=True
         )
-        # differential_count starts non-zero — the FULL branch resets it to 0
-        ctx.profile.differential_count = 5
 
         engine._phase_update_delta(ctx)
 
-        # FULL branch ran: counter reset, last_full_backup set, hash refreshed
-        assert ctx.profile.differential_count == 0
+        # FULL branch ran: last_full_backup set, hash refreshed
         assert ctx.profile.last_full_backup is not None
         assert ctx.profile.profile_hash == compute_profile_hash(ctx.profile)
 
@@ -100,25 +97,21 @@ class TestPhaseUpdateDeltaForcedFullSource:
         """Sanity: a normal (non-promoted) FULL — no forced_full flag,
         backup_type=FULL — still runs the FULL branch."""
         ctx, engine = self._build_ctx(tmp_path, backup_type=BackupType.FULL, forced_full=False)
-        ctx.profile.differential_count = 5
 
         engine._phase_update_delta(ctx)
 
-        assert ctx.profile.differential_count == 0
         assert ctx.profile.last_full_backup is not None
 
     def test_real_diff_still_takes_diff_branch(self, tmp_path):
         """A real DIFF — backup_type=DIFFERENTIAL, no forced_full —
-        must increment the counter, not reset it."""
+        must NOT touch last_full_backup."""
         ctx, engine = self._build_ctx(
             tmp_path, backup_type=BackupType.DIFFERENTIAL, forced_full=False
         )
-        ctx.profile.differential_count = 3
         ctx.profile.last_full_backup = "before"
 
         engine._phase_update_delta(ctx)
 
-        assert ctx.profile.differential_count == 4
         assert ctx.profile.last_full_backup == "before"  # untouched
 
 

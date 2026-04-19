@@ -295,26 +295,32 @@ def setup_theme(root: tk.Tk) -> ttk.Style:
     # Patch ttk input widgets to always use our font for text content.
     # style.configure only affects the ttk layout, not the internal text,
     # and nametofont may not stick on all Windows drive configurations.
-    _input_font = Fonts.normal()
-    _orig_entry_init = ttk.Entry.__init__
-    _orig_combo_init = ttk.Combobox.__init__
-    _orig_spin_init = ttk.Spinbox.__init__
+    # Guarded by a class attribute so setup_theme() is idempotent — the
+    # wizard triggers one call from __main__.py, the main app triggers
+    # another; without the guard the patch stacks and the "font" kwarg
+    # setdefault recurses needlessly on every widget creation.
+    if not getattr(ttk.Entry, "_bmv3_font_patched", False):
+        _input_font = Fonts.normal()
+        _orig_entry_init = ttk.Entry.__init__
+        _orig_combo_init = ttk.Combobox.__init__
+        _orig_spin_init = ttk.Spinbox.__init__
 
-    def _entry_init(self, *args, **kwargs):
-        kwargs.setdefault("font", _input_font)
-        _orig_entry_init(self, *args, **kwargs)
+        def _entry_init(self, *args, **kwargs):
+            kwargs.setdefault("font", _input_font)
+            _orig_entry_init(self, *args, **kwargs)
 
-    def _combo_init(self, *args, **kwargs):
-        kwargs.setdefault("font", _input_font)
-        _orig_combo_init(self, *args, **kwargs)
+        def _combo_init(self, *args, **kwargs):
+            kwargs.setdefault("font", _input_font)
+            _orig_combo_init(self, *args, **kwargs)
 
-    def _spin_init(self, *args, **kwargs):
-        kwargs.setdefault("font", _input_font)
-        _orig_spin_init(self, *args, **kwargs)
+        def _spin_init(self, *args, **kwargs):
+            kwargs.setdefault("font", _input_font)
+            _orig_spin_init(self, *args, **kwargs)
 
-    ttk.Entry.__init__ = _entry_init
-    ttk.Combobox.__init__ = _combo_init
-    ttk.Spinbox.__init__ = _spin_init
+        ttk.Entry.__init__ = _entry_init
+        ttk.Combobox.__init__ = _combo_init
+        ttk.Spinbox.__init__ = _spin_init
+        ttk.Entry._bmv3_font_patched = True
 
     # Treeview must keep its own size (option_add makes it too large)
     style.configure("Treeview", font=Fonts.normal(), rowheight=28)

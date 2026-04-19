@@ -6,6 +6,7 @@ a new full only if the interrupted backup was a full.
 """
 
 import json
+from datetime import datetime
 
 from src.core.backup_result import BackupResult
 from src.core.config import BackupProfile, BackupType, ConfigManager
@@ -249,7 +250,7 @@ class TestForceFullAfterInterrupt:
             last_backup_completed=False,
             incomplete_backup_was_full=False,
             incomplete_backup_name="test_DIFF_123",
-            differential_count=0,
+            last_full_backup=datetime.now().isoformat(),
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(backups_dir),
@@ -284,7 +285,7 @@ class TestForceFullAfterInterrupt:
             name="Test",
             backup_type=BackupType.DIFFERENTIAL,
             last_backup_completed=True,
-            differential_count=0,
+            last_full_backup=datetime.now().isoformat(),
             profile_hash="",
         )
         mgr = ConfigManager(config_dir=tmp_config_dir)
@@ -382,7 +383,7 @@ class TestMarkCompletedPersistence:
             last_backup_completed=False,
             incomplete_backup_name="E2E_FULL_old",
             incomplete_backup_was_full=True,
-            differential_count=0,
+            last_full_backup=datetime.now().isoformat(),
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(backups_dir),

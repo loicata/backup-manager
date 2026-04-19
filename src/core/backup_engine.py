@@ -57,6 +57,45 @@ from src.core.profile_lock import ProfileLockError, acquire, release
 from src.security.secure_memory import SecurePassword
 from src.storage.base import StorageBackend
 
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    """Parse an ISO-formatted datetime string, returning None on failure."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _is_full_due_by_schedule(profile: BackupProfile, now: datetime) -> bool:
+    """Return True if the calendar schedule requires a FULL run now.
+
+    Compares the last recorded FULL backup against the current time using
+    the profile's ``full_schedule_mode``. Returns True when:
+
+    - monthly: the last FULL was in a different calendar month
+    - weekly: the last FULL was in a different ISO week
+    - daily: the last FULL was on a different calendar date
+    - no previous FULL has ever been recorded
+
+    Missed windows are caught automatically on the next run after the
+    target date passes — there is no "skip" mode.
+    """
+    last_full = _parse_iso_datetime(profile.last_full_backup)
+    if last_full is None:
+        return True
+
+    mode = profile.full_schedule_mode
+    if mode == "monthly":
+        return (last_full.year, last_full.month) != (now.year, now.month)
+    if mode == "weekly":
+        return last_full.isocalendar()[:2] != now.isocalendar()[:2]
+    if mode == "daily":
+        return last_full.date() != now.date()
+    return False
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -1035,14 +1074,14 @@ class BackupEngine:
 
         manifest_path = ctx.config_manager.get_manifest_path(ctx.profile.id)
         no_manifest = not manifest_path.exists()
-        cycle_reached = ctx.profile.differential_count >= ctx.profile.full_backup_every
+        schedule_due = _is_full_due_by_schedule(ctx.profile, datetime.now())
 
         current_hash = compute_profile_hash(ctx.profile)
         profile_changed = ctx.profile.profile_hash != current_hash
 
         dest_missing_full = self._any_destination_missing_full(ctx)
 
-        if no_manifest or cycle_reached or profile_changed or dest_missing_full:
+        if no_manifest or schedule_due or profile_changed or dest_missing_full:
             ctx.forced_full = True
             ctx.profile.backup_type = BackupType.FULL
             if profile_changed:
@@ -1052,7 +1091,7 @@ class BackupEngine:
             elif dest_missing_full:
                 reason = f"no full backup on {dest_missing_full}"
             else:
-                reason = "cycle reached"
+                reason = f"calendar schedule due ({ctx.profile.full_schedule_mode})"
             self._log(f"Forcing full backup ({reason})")
 
     def _any_destination_missing_full(self, ctx: PipelineContext) -> str:
@@ -1127,12 +1166,9 @@ class BackupEngine:
                 "created_at": datetime.now().isoformat(),
             }
             save_manifest(full_manifest, manifest_path)
-            ctx.profile.differential_count = 0
             ctx.profile.profile_hash = compute_profile_hash(ctx.profile)
             ctx.profile.last_full_backup = datetime.now().isoformat()
             ctx.profile.last_full_files_count = ctx.result.files_processed
-        else:
-            ctx.profile.differential_count += 1
 
     def _phase_mirror(self, ctx: PipelineContext) -> None:
         """Phase 9: Mirror upload to secondary destinations."""

@@ -438,7 +438,7 @@ class TestBackupTypeRollbackOnFailure:
 
     def test_diff_promoted_to_full_rolled_back_on_crash(self, env, profile):
         profile.backup_type = BackupType.DIFFERENTIAL
-        profile.full_backup_every = 1  # Force promotion on first run
+        profile.last_full_backup = None  # No prior full forces promotion on first run
         env["config_manager"].save_profile(profile)
 
         engine = _engine(env)

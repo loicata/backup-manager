@@ -82,16 +82,41 @@ class TestAutoStartRegistry:
         assert str(fake_exe) in command
 
     def test_not_frozen_skips_registry(self):
-        """ensure_startup should do nothing when not running as frozen exe."""
+        """ensure_startup should do nothing when running as a dev build."""
         mock_winreg = MagicMock()
 
         with (
             patch.object(sys, "frozen", False, create=True),
+            patch("src.__main__._is_nuitka", return_value=False),
             patch.dict("sys.modules", {"winreg": mock_winreg}),
         ):
             AutoStart.ensure_startup(show_window=False)
 
         mock_winreg.OpenKey.assert_not_called()
+
+    def test_nuitka_writes_registry_even_without_sys_frozen(self, tmp_path):
+        """ensure_startup must write the registry on Nuitka builds too."""
+        fake_exe = tmp_path / "BackupManager.exe"
+        fake_exe.touch()
+
+        mock_winreg = MagicMock()
+        mock_key = MagicMock()
+        mock_winreg.OpenKey.return_value.__enter__ = MagicMock(return_value=mock_key)
+        mock_winreg.OpenKey.return_value.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch.object(sys, "frozen", False, create=True),
+            patch.object(sys, "executable", str(fake_exe)),
+            patch("src.__main__._is_nuitka", return_value=True),
+            patch.dict("sys.modules", {"winreg": mock_winreg}),
+        ):
+            AutoStart.ensure_startup(show_window=False)
+
+        set_calls = mock_winreg.SetValueEx.call_args_list
+        assert len(set_calls) == 1
+        command = set_calls[0][0][4]
+        assert "--minimized" in command
+        assert str(fake_exe) in command
 
     def test_is_show_window_detects_minimized(self):
         """is_show_window() should return False when --minimized is in registry."""

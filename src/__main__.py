@@ -38,6 +38,10 @@ def _is_nuitka() -> bool:
     return "__compiled__" in globals() or hasattr(sys.modules.get("__main__"), "__compiled__")
 
 
+def _should_auto_enable_autostart() -> bool:
+    return getattr(sys, "frozen", False) or _is_nuitka()
+
+
 def _get_base_dir() -> "Path":
     """Resolve the application base directory.
 
@@ -210,12 +214,19 @@ def main():
         from src.core.config import ConfigManager
         from src.security.integrity_check import verify_integrity
         from src.ui.app import BackupManagerApp
+        from src.ui.theme import setup_theme
         from src.ui.wizard import SetupWizard
 
         # Create root window (hidden until app is ready)
         logger.info("Creating root window...")
         root = tk.Tk()
         root.withdraw()
+
+        # Apply the theme early — named-font overrides and DPI scaling
+        # must be in place BEFORE any Toplevel (including the wizard) is
+        # built, otherwise widgets fall back to the OS default font size
+        # which looks oversized on HiDPI displays.
+        setup_theme(root)
 
         # Set window icon for taskbar
         _set_window_icon(root)
@@ -228,19 +239,6 @@ def main():
 
         from_wizard = False
 
-        # Auto-detect mode from existing profiles if settings don't match
-        if profiles:
-            app_settings = config_mgr.load_app_settings()
-            saved_mode = app_settings.get("mode", "classic")
-            is_anti_ran = saved_mode == "anti-ransomware"
-            mode_profiles = [p for p in profiles if p.object_lock_enabled == is_anti_ran]
-            if not mode_profiles:
-                # No profiles in saved mode — switch to the other mode
-                new_mode = "anti-ransomware" if not is_anti_ran else "classic"
-                app_settings["mode"] = new_mode
-                config_mgr.save_app_settings(app_settings)
-                logger.info("Auto-switched mode to %s (no profiles in %s)", new_mode, saved_mode)
-
         if not profiles:
             # Show setup wizard — keep root hidden but move it
             # off-screen so the transient wizard Toplevel is visible.
@@ -251,19 +249,13 @@ def main():
             if profile:
                 config_mgr.save_profile(profile)
                 logger.info("Wizard completed — profile saved")
-                # Set app mode to match the profile type
-                mode = "anti-ransomware" if profile.object_lock_enabled else "classic"
-                settings = config_mgr.load_app_settings()
-                settings["mode"] = mode
-                config_mgr.save_app_settings(settings)
                 from_wizard = True
             else:
                 logger.info("Wizard cancelled — exiting")
                 root.destroy()
                 return
 
-        # Enable auto-start on first frozen launch if not already configured
-        if getattr(sys, "frozen", False):
+        if _should_auto_enable_autostart():
             from src.core.scheduler import AutoStart
 
             if not AutoStart.is_enabled():

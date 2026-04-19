@@ -21,6 +21,16 @@ class GeneralTab(ScrollableTab):
     """Profile name, backup type, sources, exclusion patterns,
     bandwidth usage, auto-start, and retry settings."""
 
+    _DAY_NAMES = (
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    )
+
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
         self._size_cancel = threading.Event()
@@ -39,27 +49,9 @@ class GeneralTab(ScrollableTab):
         self._build_ui()
 
     def _build_ui(self):
-        # Mode selector
-        mode_frame = ttk.LabelFrame(self.inner, text="Mode", padding=Spacing.PAD)
-        mode_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.LARGE, Spacing.MEDIUM))
-
-        self.mode_var = tk.StringVar(value="classic")
-        ttk.Radiobutton(
-            mode_frame,
-            text="Classic",
-            value="classic",
-            variable=self.mode_var,
-        ).pack(anchor="w", pady=2)
-        ttk.Radiobutton(
-            mode_frame,
-            text="Anti-Ransomware",
-            value="anti-ransomware",
-            variable=self.mode_var,
-        ).pack(anchor="w", pady=2)
-
-        # Profile name
+        # Profile identity (name + immutable type badge)
         name_frame = ttk.LabelFrame(self.inner, text="Profile", padding=Spacing.PAD)
-        name_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.MEDIUM))
+        name_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.LARGE, Spacing.MEDIUM))
 
         ttk.Label(name_frame, text="Profile name:").pack(anchor="w")
         self.name_var = tk.StringVar(value="New profile")
@@ -67,36 +59,95 @@ class GeneralTab(ScrollableTab):
             fill="x", pady=(Spacing.SMALL, 0)
         )
 
+        type_row = ttk.Frame(name_frame)
+        type_row.pack(fill="x", pady=(Spacing.MEDIUM, 0))
+        ttk.Label(type_row, text="Profile type:").pack(side="left")
+        self.profile_type_var = tk.StringVar(value="")
+        ttk.Label(
+            type_row,
+            textvariable=self.profile_type_var,
+        ).pack(side="left", padx=(Spacing.MEDIUM, 0))
+
         # Backup type
         self._type_frame = ttk.LabelFrame(self.inner, text="Backup type", padding=Spacing.PAD)
         self._type_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.MEDIUM)
         type_frame = self._type_frame
 
+        # Interactive radios for Classic profiles
+        self._type_radio_frame = ttk.Frame(type_frame)
+        self._type_radio_frame.pack(fill="x")
         self.type_var = tk.StringVar(value=BackupType.FULL.value)
         for bt in BackupType:
             label = bt.value.capitalize()
-            ttk.Radiobutton(type_frame, text=label, value=bt.value, variable=self.type_var).pack(
-                anchor="w", pady=2
-            )
+            ttk.Radiobutton(
+                self._type_radio_frame,
+                text=label,
+                value=bt.value,
+                variable=self.type_var,
+            ).pack(anchor="w", pady=2)
+
+        # Read-only label for Anti-Ransomware (type is locked to Differential)
+        self._type_readonly_label = ttk.Label(
+            type_frame,
+            text="Differential every day",
+        )
 
         # Differential info (shown only for differential)
         self._diff_info_frame = ttk.Frame(type_frame)
         self._diff_info_frame.pack(fill="x", pady=(4, 0))
 
-        # Full backup cycle
-        self._full_every_frame = ttk.Frame(self._diff_info_frame)
-        self._full_every_frame.pack(fill="x", pady=(4, 0))
-        ttk.Label(self._full_every_frame, text="Full backup every").pack(side="left")
-        self.full_every_var = tk.IntVar(value=7)
-        full_spin = ttk.Spinbox(
-            self._full_every_frame,
+        # Editable full-backup schedule selector (Classic profiles)
+        self._full_sched_frame = ttk.Frame(self._diff_info_frame)
+        self._full_sched_frame.pack(fill="x", pady=(Spacing.SMALL, 0))
+        ttk.Label(self._full_sched_frame, text="Full backup frequency:").pack(anchor="w")
+
+        mode_row = ttk.Frame(self._full_sched_frame)
+        mode_row.pack(anchor="w", pady=(2, 0))
+        self.full_sched_mode_var = tk.StringVar(value="monthly")
+        for mode_value, mode_label in (
+            ("daily", "Daily"),
+            ("weekly", "Weekly"),
+            ("monthly", "Monthly"),
+        ):
+            ttk.Radiobutton(
+                mode_row,
+                text=mode_label,
+                value=mode_value,
+                variable=self.full_sched_mode_var,
+            ).pack(side="left", padx=(0, Spacing.MEDIUM))
+
+        self._full_dow_frame = ttk.Frame(self._full_sched_frame)
+        ttk.Label(self._full_dow_frame, text="Day of week:").pack(side="left")
+        self.full_day_of_week_var = tk.StringVar(value="Monday")
+        ttk.Combobox(
+            self._full_dow_frame,
+            textvariable=self.full_day_of_week_var,
+            values=self._DAY_NAMES,
+            state="readonly",
+            width=12,
+        ).pack(side="left", padx=(Spacing.SMALL, 0))
+
+        self._full_dom_frame = ttk.Frame(self._full_sched_frame)
+        ttk.Label(self._full_dom_frame, text="Day of month:").pack(side="left")
+        self.full_day_of_month_var = tk.IntVar(value=1)
+        ttk.Spinbox(
+            self._full_dom_frame,
             from_=1,
-            to=7,
+            to=31,
             width=4,
-            textvariable=self.full_every_var,
+            textvariable=self.full_day_of_month_var,
+        ).pack(side="left", padx=(Spacing.SMALL, 0))
+
+        # Read-only label for Anti-Ransomware (mode is fixed)
+        self._full_sched_readonly = ttk.Label(
+            self._diff_info_frame,
+            text="Full backup: Automatic on the 1st of each month",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
         )
-        full_spin.pack(side="left", padx=4)
-        ttk.Label(self._full_every_frame, text="backups").pack(side="left")
+
+        self.full_sched_mode_var.trace_add("write", lambda *a: self._toggle_full_sched_selectors())
+        self._toggle_full_sched_selectors()
 
         # Info label: shows current daily retention while DIFF is selected.
         # Updated reactively when retention_tab is wired via set_retention_tab().
@@ -111,8 +162,9 @@ class GeneralTab(ScrollableTab):
         self._toggle_diff_info()
 
         # Source paths
-        src_frame = ttk.LabelFrame(self.inner, text="Source paths", padding=Spacing.PAD)
-        src_frame.pack(fill="both", expand=True, padx=Spacing.LARGE, pady=Spacing.MEDIUM)
+        self._src_frame = ttk.LabelFrame(self.inner, text="Source paths", padding=Spacing.PAD)
+        self._src_frame.pack(fill="both", expand=True, padx=Spacing.LARGE, pady=Spacing.MEDIUM)
+        src_frame = self._src_frame
 
         # Treeview for sources
         tree_frame = ttk.Frame(src_frame)
@@ -383,93 +435,56 @@ class GeneralTab(ScrollableTab):
     def _apply_autoconfig_if_needed(self) -> None:
         """One-shot autoconfig for the first Full->Differential transition.
 
-        Gated by profile.differential_auto_configured so the autoconfig
-        runs at most once per profile (persistent across sessions). When
-        no current profile is available (tab not yet wired to one), the
-        autoconfig is skipped rather than silently mutating unrelated state.
+        Switches the schedule to DAILY if it is something else, so that a
+        profile originally scheduled WEEKLY/MONTHLY does not silently
+        skip differential runs. Runs at most once per profile
+        (persistent across sessions via ``differential_auto_configured``).
         """
         if self._current_profile is None:
             return
         if self._current_profile.differential_auto_configured:
             return
-        if self._retention_tab is None or self._schedule_tab is None:
+        if self._schedule_tab is None:
             return
 
         try:
             freq_var = self._schedule_tab.get_frequency_var()
-            retention_var = self._retention_tab.get_gfs_daily_var()
             current_freq = freq_var.get()
-            current_retention_ui = retention_var.get()
-            cycle = self.full_every_var.get()
         except (tk.TclError, ValueError, AttributeError):
             return
 
         changed_schedule = current_freq.lower() != ScheduleFrequency.DAILY.value
-        changed_retention = (current_retention_ui + 1) < cycle
 
-        # Flip the gate regardless of whether anything concrete changed:
-        # the "first transition" event has happened and we never want to
-        # re-trigger on later bascules even if the user undoes our writes.
+        # Flip the gate regardless of whether anything concrete changed.
         self._current_profile.differential_auto_configured = True
 
-        if not (changed_schedule or changed_retention):
+        if not changed_schedule:
             return
 
-        # Apply the writes BEFORE registering the traces so our own
-        # programmatic sets do not immediately hide the block.
-        if changed_schedule:
-            target_freq = ScheduleFrequency.DAILY.value.capitalize()
-            freq_var.set(target_freq)
-            self._autoconfig_expected_schedule = target_freq
-            tid = freq_var.trace_add(
-                "write", lambda *_: self._on_autoconfig_var_changed("schedule")
-            )
-            self._autoconfig_traces.append((freq_var, tid))
+        target_freq = ScheduleFrequency.DAILY.value.capitalize()
+        freq_var.set(target_freq)
+        self._autoconfig_expected_schedule = target_freq
+        tid = freq_var.trace_add("write", lambda *_: self._on_autoconfig_var_changed("schedule"))
+        self._autoconfig_traces.append((freq_var, tid))
 
-        if changed_retention:
-            target_retention_ui = cycle - 1
-            retention_var.set(target_retention_ui)
-            self._autoconfig_expected_retention_ui = target_retention_ui
-            tid = retention_var.trace_add(
-                "write", lambda *_: self._on_autoconfig_var_changed("retention")
-            )
-            self._autoconfig_traces.append((retention_var, tid))
-
-        # Build the snapshot label with only the lines that reflect an
-        # actual change. The text is frozen: no reactive update.
-        lines = ["Auto configuration for first differential (you can change):"]
-        if changed_schedule:
-            lines.append("    \u2022 Schedule: daily")
-        if changed_retention:
-            lines.append(f"    \u2022 Retention: {cycle} days")
-        self._retention_info_label.config(text="\n".join(lines))
+        self._retention_info_label.config(
+            text="Auto configuration for first differential (you can change):"
+            "\n    \u2022 Schedule: daily"
+        )
         self._retention_info_label.pack(anchor="w", pady=(4, 0))
 
     def _on_autoconfig_var_changed(self, which: str) -> None:
-        """Hide the snapshot block when the user writes a different value.
-
-        Matches only a real value change: writing the same value back is
-        a no-op (the Tk trace still fires but we compare against the
-        expected snapshot and find equality).
-        """
-        if which == "schedule":
-            if self._schedule_tab is None or self._autoconfig_expected_schedule is None:
-                return
-            try:
-                current = self._schedule_tab.get_frequency_var().get()
-            except (tk.TclError, ValueError, AttributeError):
-                return
-            if current != self._autoconfig_expected_schedule:
-                self._hide_autoconfig_block()
-        elif which == "retention":
-            if self._retention_tab is None or self._autoconfig_expected_retention_ui is None:
-                return
-            try:
-                current = self._retention_tab.get_gfs_daily_var().get()
-            except (tk.TclError, ValueError, AttributeError):
-                return
-            if current != self._autoconfig_expected_retention_ui:
-                self._hide_autoconfig_block()
+        """Hide the snapshot block when the user writes a different value."""
+        if which != "schedule":
+            return
+        if self._schedule_tab is None or self._autoconfig_expected_schedule is None:
+            return
+        try:
+            current = self._schedule_tab.get_frequency_var().get()
+        except (tk.TclError, ValueError, AttributeError):
+            return
+        if current != self._autoconfig_expected_schedule:
+            self._hide_autoconfig_block()
 
     def _hide_autoconfig_block(self) -> None:
         """Hide the snapshot label and detach any registered traces."""
@@ -507,12 +522,30 @@ class GeneralTab(ScrollableTab):
             self.name_var.set(profile.name)
             self.type_var.set(profile.backup_type.value)
 
-            # Set mode based on profile
+            # Swap the interactive and read-only widgets based on mode.
+            # Always pack_forget + pack unconditionally: winfo_ismapped()
+            # returns False during the very first load_profile (the Tk
+            # root has not rendered yet), which caused the "Backup type"
+            # LabelFrame to appear empty on Anti-Ransomware profiles at
+            # startup. pack_forget on an unpacked widget is a no-op, so
+            # the unconditional version is safe.
+            self._type_radio_frame.pack_forget()
+            self._type_readonly_label.pack_forget()
+            self._full_sched_frame.pack_forget()
+            self._full_sched_readonly.pack_forget()
+
             if profile.object_lock_enabled:
-                self.mode_var.set("anti-ransomware")
-                self._type_frame.pack_forget()
+                self.profile_type_var.set("\U0001f512 Anti-Ransomware")
+                self._type_readonly_label.pack(anchor="w", pady=2)
+                self._full_sched_readonly.pack(anchor="w", pady=(Spacing.SMALL, 0))
             else:
-                self.mode_var.set("classic")
+                self.profile_type_var.set("\U0001f4e6 Classic")
+                self._type_radio_frame.pack(fill="x")
+                self._full_sched_frame.pack(fill="x", pady=(Spacing.SMALL, 0))
+
+            self.full_sched_mode_var.set(profile.full_schedule_mode)
+            self.full_day_of_week_var.set(self._int_to_day_name(profile.full_day_of_week))
+            self.full_day_of_month_var.set(profile.full_day_of_month)
 
             # Clear and reload sources
             for item in self.sources_tree.get_children():
@@ -524,7 +557,6 @@ class GeneralTab(ScrollableTab):
 
             self.exclude_var.set(", ".join(profile.exclude_patterns))
             self.bw_percent_var.set(profile.bandwidth_percent)
-            self.full_every_var.set(profile.full_backup_every)
 
             # Retry from schedule config
             self.retry_var.set(profile.schedule.retry_enabled)
@@ -555,11 +587,44 @@ class GeneralTab(ScrollableTab):
         return {
             "name": self.name_var.get().strip() or "Unnamed",
             "backup_type": BackupType(self.type_var.get()),
-            "full_backup_every": self.full_every_var.get(),
             "source_paths": sources,
             "exclude_patterns": excludes,
             "bandwidth_percent": self.bw_percent_var.get(),
             "autostart": self.autostart_var.get(),
             "autostart_minimized": self.minimized_var.get(),
             "retry_enabled": self.retry_var.get(),
+            "full_schedule_mode": self.full_sched_mode_var.get(),
+            "full_day_of_week": self._day_name_to_int(self.full_day_of_week_var.get()),
+            "full_day_of_month": self.full_day_of_month_var.get(),
         }
+
+    def _toggle_full_sched_selectors(self) -> None:
+        """Show the day-of-week or day-of-month selector based on the
+        selected full_schedule_mode. Daily mode hides both."""
+        mode = self.full_sched_mode_var.get()
+        if mode == "weekly":
+            self._full_dom_frame.pack_forget()
+            if not self._full_dow_frame.winfo_ismapped():
+                self._full_dow_frame.pack(anchor="w", pady=(2, 0))
+        elif mode == "monthly":
+            self._full_dow_frame.pack_forget()
+            if not self._full_dom_frame.winfo_ismapped():
+                self._full_dom_frame.pack(anchor="w", pady=(2, 0))
+        else:
+            self._full_dow_frame.pack_forget()
+            self._full_dom_frame.pack_forget()
+
+    @classmethod
+    def _int_to_day_name(cls, value: int) -> str:
+        """Convert a 0-6 weekday index to its English name."""
+        if 0 <= value < len(cls._DAY_NAMES):
+            return cls._DAY_NAMES[value]
+        return cls._DAY_NAMES[0]
+
+    @classmethod
+    def _day_name_to_int(cls, name: str) -> int:
+        """Convert an English weekday name to a 0-6 index."""
+        try:
+            return cls._DAY_NAMES.index(name)
+        except ValueError:
+            return 0

@@ -234,6 +234,20 @@ class SetupWizard:
 
     def run(self) -> BackupProfile | None:
         """Run the wizard and return the created profile, or None if cancelled."""
+        # Force the wizard Toplevel to the foreground. On Nuitka builds the
+        # OS sometimes raises the Toplevel behind its parent (or behind
+        # unrelated windows) which leaves the user staring at a hidden
+        # main window thinking "the button did nothing". A one-shot
+        # topmost pulse guarantees visibility without stealing focus from
+        # later interactions.
+        try:
+            self._win.deiconify()
+            self._win.lift()
+            self._win.attributes("-topmost", True)
+            self._win.after(200, lambda: self._win.attributes("-topmost", False))
+            self._win.focus_force()
+        except tk.TclError:
+            pass
         self._win.wait_window()
         return self.result_profile
 
@@ -420,7 +434,7 @@ class SetupWizard:
 
         tk.Label(
             personal,
-            text="\U0001f3e0",
+            text="\U0001f4e6",
             font=("Segoe UI", 40),
         ).pack(pady=(0, Spacing.MEDIUM))
         ttk.Label(
@@ -440,22 +454,19 @@ class SetupWizard:
             command=lambda: self._select_mode(MODE_PERSONAL),
         ).pack(pady=Spacing.MEDIUM)
 
-        # "Full Auto / High Security" card — the underlying tech is still
-        # S3 with Object Lock, but the card speaks to the benefits a
-        # non-technical user actually values: nothing to plug in and
-        # nothing an attacker (or a mistake) can erase.
+        # Anti-Ransomware card
         pro = ttk.LabelFrame(cards, text="", padding=Spacing.XLARGE)
         pro.grid(row=0, column=1, padx=Spacing.MEDIUM, sticky="nsew")
 
         tk.Label(
             pro,
-            text="\U0001f6e1",
+            text="\U0001f512",
             font=("Segoe UI", 40),
             anchor="center",
         ).pack(pady=(0, Spacing.MEDIUM), fill="x")
         ttk.Label(
             pro,
-            text="Full Auto",
+            text="Anti-Ransomware",
             font=Fonts.title(),
         ).pack()
         ttk.Label(
@@ -465,21 +476,15 @@ class SetupWizard:
         ).pack()
         ttk.Label(
             pro,
-            text=(
-                "Automatic backup to Amazon AWS\n"
-                "in the background. Nothing to plug\n"
-                "in, nothing to manage.\n\n"
-                "Your data is locked — impossible\n"
-                "to delete or modify, even during\n"
-                "an attack, a virus or ransomware."
-            ),
+            text="Backup to Amazon AWS S3\nserver with Object Lock.\n\n"
+            "Your data is IMMUTABLE\nand impossible to delete.",
             justify="center",
         ).pack(pady=Spacing.MEDIUM)
 
         s3_available = FEAT_S3 in self._features
         pro_btn = ttk.Button(
             pro,
-            text="Choose Full Auto",
+            text="Choose Anti-Ransomware",
             style="Accent.TButton",
             command=lambda: self._select_mode(MODE_PROFESSIONAL),
             state="normal" if s3_available else "disabled",
@@ -2006,7 +2011,8 @@ class SetupWizard:
                 policy=RetentionPolicy.GFS,
                 gfs_enabled=False,
             ),
-            full_backup_every=30,
+            full_schedule_mode="monthly",
+            full_day_of_month=1,
             object_lock_enabled=True,
         )
 

@@ -38,7 +38,7 @@ class ScheduleTab(ttk.Frame):
 
         ttk.Label(row1, text="Frequency:").pack(side="left")
         self.freq_var = tk.StringVar(value=ScheduleFrequency.DAILY.value)
-        ttk.Combobox(
+        self._freq_combo = ttk.Combobox(
             row1,
             textvariable=self.freq_var,
             state="readonly",
@@ -48,7 +48,8 @@ class ScheduleTab(ttk.Frame):
                 if f not in (ScheduleFrequency.MANUAL, ScheduleFrequency.HOURLY)
             ],
             width=15,
-        ).pack(side="left", padx=Spacing.MEDIUM)
+        )
+        self._freq_combo.pack(side="left", padx=Spacing.MEDIUM)
 
         ttk.Label(row1, text="Time (HH:MM):").pack(side="left", padx=(Spacing.LARGE, 0))
         self.time_var = tk.StringVar(value="02:00")
@@ -59,8 +60,9 @@ class ScheduleTab(ttk.Frame):
         # like "23:46" matches no branch and is left alone.
         self.time_var.trace_add("write", self._autoformat_time)
 
-        row2 = ttk.Frame(freq_frame)
-        row2.pack(fill="x", pady=(Spacing.MEDIUM, 0))
+        self._row2 = ttk.Frame(freq_frame)
+        self._row2.pack(fill="x", pady=(Spacing.MEDIUM, 0))
+        row2 = self._row2
 
         ttk.Label(row2, text="Day of week:").pack(side="left")
         self.dow_var = tk.StringVar(value="Monday")
@@ -197,7 +199,25 @@ class ScheduleTab(ttk.Frame):
         self.dom_var.set(s.day_of_month)
         self.verify_enabled_var.set(s.verify_enabled)
         self.verify_interval_var.set(s.verify_interval_days)
+
+        # _toggle_enabled() walks every child of _content and rewrites its
+        # state, which would clobber the per-widget overrides applied
+        # below for Anti-Ransomware. Apply the generic toggle FIRST, then
+        # pin the Anti-Ransomware-specific locks last so they stick.
         self._toggle_enabled()
+
+        # pack_forget + pack unconditionally: winfo_ismapped() returns
+        # False on the very first load_profile (Tk has not rendered
+        # anything yet) which would leave the Day of week / Day of month
+        # row visible on Anti-Ransomware profiles at startup.
+        self._row2.pack_forget()
+        if profile.object_lock_enabled:
+            self.freq_var.set("Daily")
+            self._freq_combo.configure(state="disabled")
+        else:
+            self._freq_combo.configure(state="readonly")
+            self._row2.pack(fill="x", pady=(Spacing.MEDIUM, 0))
+
         self._refresh_journal()
 
     def _autoformat_time(self, *_args) -> None:

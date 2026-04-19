@@ -371,15 +371,6 @@ class TestCollectDiagnostic:
         assert "Windows" in result or "Linux" in result or "Darwin" in result
 
     @patch.dict(os.environ, {"APPDATA": ""})
-    def test_diagnostic_contains_mode(self, tmp_path):
-        from src.ui.app import BackupManagerApp
-
-        app = self._make_app(tmp_path, mode="anti-ransomware")
-        with patch.dict(os.environ, {"APPDATA": str(tmp_path)}):
-            result = BackupManagerApp._collect_diagnostic(app)
-        assert "Anti Ransomware" in result
-
-    @patch.dict(os.environ, {"APPDATA": ""})
     def test_diagnostic_contains_dependencies(self, tmp_path):
         from src.ui.app import BackupManagerApp
 

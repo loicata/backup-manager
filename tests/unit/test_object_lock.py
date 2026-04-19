@@ -633,7 +633,8 @@ class TestWizardProProfile:
         assert p.storage.s3_object_lock_mode == "COMPLIANCE"
         assert p.storage.s3_object_lock_days == 395  # 13 months
         assert p.retention.gfs_enabled is False
-        assert p.full_backup_every == 30
+        assert p.full_schedule_mode == "monthly"
+        assert p.full_day_of_month == 1
         assert p.backup_type == BackupType.DIFFERENTIAL
         assert p.storage.s3_speedtest_bucket == "test-bucket-speedtest"
 

@@ -9,12 +9,12 @@
 
 ## 🛡️ Backup Manager
 
-**📦 Classic profiles** — backup to external drive, network share, SSH server, or S3 cloud storage.
+**📦 Classic profiles** — backup to external drive, network share, SSH server, or S3 cloud storage.  
 **🔒 Anti-Ransomware profiles** — backup to Amazon AWS S3 with Object Lock, **the technology used in banking**. Your data becomes **impossible to delete**, even by ransomware.
 
-✅ **100 % automatic** — daily backups, email alerts, integrity checks
-✅ **No AWS knowledge needed** — the wizard creates and locks everything
-✅ **Free and open-source** — no subscription, no account
+✅ **100 % automatic** — daily backups, email alerts, integrity checks  
+✅ **No AWS knowledge needed** — the wizard creates and locks everything  
+✅ **Free and open-source** — no subscription, no account  
 ✅ **Windows 10 / 11** — one-click MSI installer
 
 ### ⬇️ **[Download for Windows 10 / 11](https://github.com/loicata/backup-manager/releases/latest)**

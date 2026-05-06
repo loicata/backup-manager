@@ -701,6 +701,41 @@ class InAppScheduler:
                     detail=f"Verify error: {type(e).__name__}: {e}",
                 )
 
+    # ------------------------------------------------------------------
+    # Public mark/unmark API for backups triggered OUTSIDE the scheduler
+    # ------------------------------------------------------------------
+
+    def mark_profile_running(self, profile_id: str) -> None:
+        """Mark a profile as actively running.
+
+        The scheduler tracks its own triggers in ``_profile_in_progress``
+        so periodic checks (``_check_schedules``, ``_check_missed_backups``,
+        ``_check_startup_missed``) can skip profiles that already have a
+        backup in flight. When a backup is started OUTSIDE the scheduler
+        — e.g. the user clicks "Start backup" in the Run tab — the
+        scheduler is unaware of it; without this call the next periodic
+        check happily fires a second trigger which then trips the
+        engine's ``ProfileLockError``, producing a confusing
+        "Backup rejected" line in the Run-tab log.
+
+        Idempotent: calling twice for the same id is a no-op.
+
+        Args:
+            profile_id: Profile identifier (``BackupProfile.id``).
+        """
+        with self._in_progress_lock:
+            self._profile_in_progress.add(profile_id)
+
+    def unmark_profile_running(self, profile_id: str) -> None:
+        """Symmetric to :meth:`mark_profile_running`.
+
+        Idempotent: calling for an unknown id is a silent no-op so the
+        UI's ``finally`` block can call it without first checking that
+        ``mark_profile_running`` succeeded.
+        """
+        with self._in_progress_lock:
+            self._profile_in_progress.discard(profile_id)
+
     def _check_missed_backups(self, now: datetime) -> None:
         """Check for missed backups after a wake-from-sleep event.
 

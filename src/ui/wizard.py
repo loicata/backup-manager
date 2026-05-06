@@ -275,13 +275,20 @@ class SetupWizard:
         self._progress["maximum"] = self._total_steps
         self._progress["value"] = self._step
         self._back_btn.state(["!disabled"])
-        self._next_btn.config(text="Next \u2192")
+        # On the very last step the action is "create the profile",
+        # so label the button accordingly. Pro-mode steps that need
+        # different text (e.g. "Run setup") override this themselves.
+        if self._step == self._total_steps:
+            self._next_btn.config(text="Finish")
+        else:
+            self._next_btn.config(text="Next \u2192")
 
         if self._mode == MODE_PERSONAL:
             builders = {
                 1: self._step_name,
                 2: self._step_sources,
                 3: self._step_storage,
+                4: self._step_schedule_frequency,
             }
         else:
             builders = {
@@ -341,6 +348,13 @@ class SetupWizard:
                 return "Please add at least one source folder."
         elif self._step == 3:
             return self._validate_personal_storage()
+        elif self._step == 4:
+            # Defensive: a Radiobutton with a default selection always
+            # produces a value, but if a future refactor breaks that
+            # invariant we want a clear error rather than a silent
+            # fallback to the WEEKLY default in ``_create_profile``.
+            if not self._data.get("schedule_frequency"):
+                return "Please choose a backup frequency."
         return None
 
     def _validate_personal_storage(self) -> str | None:
@@ -503,7 +517,8 @@ class SetupWizard:
         """Set the wizard mode and start the flow."""
         self._mode = mode
         if mode == MODE_PERSONAL:
-            self._total_steps = 3
+            # 4 steps: name → sources → storage → schedule frequency
+            self._total_steps = 4
         else:
             self._total_steps = 11
             # Auto-detect nearest AWS region in background (no UI freeze)
@@ -997,6 +1012,96 @@ class SetupWizard:
         ).pack(anchor="w")
 
         self._build_storage_config_ui(self._content, "storage")
+
+    # ------------------------------------------------------------------
+    # Step 5 (personal — last): Schedule frequency choice
+    # ------------------------------------------------------------------
+
+    def _step_schedule_frequency(self) -> None:
+        """Final personal-mode step: pick how often the scheduler runs.
+
+        Three radio cards: Daily / Weekly / Monthly.  Pre-selects the
+        previous default (Weekly) so a user who blasts through Next
+        gets the same behaviour as before this step existed.
+
+        The chosen value is stored as ``self._data["schedule_frequency"]``
+        and consumed by ``_create_profile`` when the wizard finishes.
+        """
+        self._set_header("How often should we backup?")
+        ttk.Label(
+            self._content,
+            text=(
+                "Pick a default cadence — you can change it any time "
+                "from the Schedule tab."
+            ),
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(pady=(0, Spacing.LARGE), anchor="w")
+
+        # Persist current selection across navigation: if the user
+        # comes back from Finish via "Back", the previously chosen
+        # value rehydrates the radio.
+        initial = self._data.get(
+            "schedule_frequency", ScheduleFrequency.WEEKLY.value
+        )
+        self._schedule_var = tk.StringVar(self._win, value=initial)
+        # Record the default eagerly so even a user who never touches
+        # the radio still hits the validate path with a value present.
+        self._data["schedule_frequency"] = initial
+
+        def _on_change(*_args):
+            self._data["schedule_frequency"] = self._schedule_var.get()
+
+        self._schedule_var.trace_add("write", _on_change)
+
+        cards = ttk.Frame(self._content)
+        cards.pack(fill="both", expand=True, pady=Spacing.MEDIUM)
+        cards.columnconfigure(0, weight=1)
+        cards.columnconfigure(1, weight=1)
+        cards.columnconfigure(2, weight=1)
+
+        # (value, icon, label, description) — kept compact so a future
+        # locale-switch only needs to translate three short strings each.
+        options = [
+            (
+                ScheduleFrequency.DAILY.value,
+                "\U0001f4c5",  # 📅
+                "Daily",
+                "Every day at the chosen time.\n"
+                "Best for actively-edited files\n(documents, code, mailbox).",
+            ),
+            (
+                ScheduleFrequency.WEEKLY.value,
+                "\U0001f5d3",  # 🗓
+                "Weekly",
+                "Once a week.\n"
+                "Good balance for personal\nphotos and home folders.",
+            ),
+            (
+                ScheduleFrequency.MONTHLY.value,
+                "\U0001f4c6",  # 📆
+                "Monthly",
+                "Once a month.\n"
+                "Best for archive data\nthat rarely changes.",
+            ),
+        ]
+
+        for col, (value, icon, label, description) in enumerate(options):
+            card = ttk.LabelFrame(cards, text="", padding=Spacing.LARGE)
+            card.grid(row=0, column=col, padx=Spacing.SMALL, sticky="nsew")
+
+            tk.Label(card, text=icon, font=("Segoe UI", 36)).pack(
+                pady=(0, Spacing.MEDIUM)
+            )
+            ttk.Label(card, text=label, font=Fonts.title()).pack()
+            ttk.Label(card, text=description, justify="center").pack(
+                pady=Spacing.MEDIUM
+            )
+            ttk.Radiobutton(
+                card,
+                text=f"Choose {label}",
+                variable=self._schedule_var,
+                value=value,
+            ).pack(pady=(Spacing.SMALL, 0))
 
     # ------------------------------------------------------------------
     # Professional steps (3-9)
@@ -1932,6 +2037,28 @@ class SetupWizard:
 
         storage = self._build_storage_config_from_key("storage")
 
+        # Frequency is set by the schedule step; falling back to WEEKLY
+        # preserves the pre-step behaviour for any code path that
+        # bypasses the wizard navigation (e.g. legacy tests that call
+        # _create_profile directly without populating _data).
+        freq_value = d.get("schedule_frequency", ScheduleFrequency.WEEKLY.value)
+        try:
+            frequency = ScheduleFrequency(freq_value)
+        except ValueError:
+            # Defensive: a corrupted _data entry must not break profile
+            # creation — degrade gracefully to the historical default.
+            frequency = ScheduleFrequency.WEEKLY
+
+        # ``gfs_daily`` displays in the Retention tab as ``internal - 1``
+        # ("today" is always kept on top of the configured days).  When
+        # the user picks DAILY in the wizard, default to 8 so the tab
+        # shows "Days of history: 7" — a week of restorable points
+        # matches what most users expect from a daily schedule.  For
+        # WEEKLY/MONTHLY the daily row is hidden in the Retention tab
+        # so the field's value is invisible — keep the historical 1 to
+        # avoid changing existing behaviour for non-daily flows.
+        gfs_daily_default = 8 if frequency == ScheduleFrequency.DAILY else 1
+
         profile = BackupProfile(
             name=d["name"],
             source_paths=d["sources"],
@@ -1939,11 +2066,11 @@ class SetupWizard:
             backup_type=BackupType.FULL,
             schedule=ScheduleConfig(
                 enabled=True,
-                frequency=ScheduleFrequency.WEEKLY,
+                frequency=frequency,
                 time="10:00",
             ),
             retention=RetentionConfig(
-                gfs_daily=1,
+                gfs_daily=gfs_daily_default,
                 gfs_weekly=4,
                 gfs_monthly=7,
             ),

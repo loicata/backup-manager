@@ -1992,6 +1992,26 @@ class BackupManagerApp:
         # the flag and skips. Reset in the thread's finally block.
         self._backup_running = True
 
+        # Tell the scheduler this profile is now in flight so its
+        # periodic checks (_check_schedules, _check_missed_backups,
+        # wake-from-sleep recovery) skip it instead of firing a
+        # duplicate trigger that would trip the engine's profile lock
+        # and surface "Backup rejected: Another backup is already
+        # running" in the Run-tab log. Symmetric ``unmark_profile_running``
+        # lives in the thread's finally block below.
+        self.scheduler.mark_profile_running(profile.id)
+
+        # Bump ``last_trigger`` to NOW so that ``_is_due`` returns
+        # False on the next periodic check.  Without this, the
+        # scheduler's "in-progress" guard above only silences the
+        # duplicate WHILE the backup runs — the moment ``unmark`` is
+        # called in the finally block, the next tick sees a stale
+        # ``last_trigger`` (still yesterday or earlier), decides the
+        # profile is overdue and fires a second full backup the user
+        # never asked for.  ``mark_triggered_now`` is the public API
+        # the scheduler exposes precisely for this UI-trigger case.
+        self.scheduler.mark_triggered_now(profile.id)
+
         # Outcome of the current run — populated in the try/except branches
         # below and read from the finally block to decide whether to
         # prompt the user before chaining the next queued profile.
@@ -2098,6 +2118,13 @@ class BackupManagerApp:
                 # Lower the flag so the next Save collects UI edits made
                 # during the backup (and warnings stop firing).
                 self._backup_running = False
+                # Release the scheduler's in-progress mark so the next
+                # tick of ``_check_schedules`` is free to fire the
+                # normal scheduled trigger.  Idempotent — safe even
+                # if mark_profile_running was never called for this
+                # profile (e.g. an early-exit path before it was
+                # invoked).
+                self.scheduler.unmark_profile_running(profile.id)
                 # Reset the Run tab header so any transient
                 # "full (auto-promoted)" override from BACKUP_TYPE_DETERMINED
                 # is replaced by the canonical profile-derived label

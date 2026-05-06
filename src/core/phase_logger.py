@@ -6,8 +6,20 @@ phase name to each event for downstream filtering.
 """
 
 import logging
+import time
 
 from src.core.events import LOG, PROGRESS, EventBus
+
+
+# Maximum PROGRESS event rate, in milliseconds between emissions.
+# 100 ms => ~10 Hz, plenty for a smooth bar update and well below
+# what a human can read; the original 1-event-per-file flood (could
+# reach hundreds of events per second on small-file phases) saturated
+# the Tk after() queue and starved the OS message pump, locking the
+# window in place on the desktop. The first event of a phase and the
+# last (current == total) are NEVER throttled so the user always sees
+# the start and the completion regardless of throughput.
+_PROGRESS_THROTTLE_MS = 100
 
 
 class PhaseLogger:
@@ -28,6 +40,10 @@ class PhaseLogger:
         self._logger = logging.getLogger(f"src.core.phases.{phase_name}")
         self._events = events
         self._phase_name = phase_name
+        # Monotonic timestamp of the last PROGRESS we actually pushed
+        # to the EventBus. ``0.0`` means "never emitted" so the very
+        # first call always fires.
+        self._last_progress_ms: float = 0.0
 
     def info(self, message: str) -> None:
         """Log at INFO level and emit LOG event.
@@ -83,17 +99,48 @@ class PhaseLogger:
     ) -> None:
         """Emit a PROGRESS event for UI progress tracking.
 
+        Throttles emissions to at most one every ``_PROGRESS_THROTTLE_MS``
+        milliseconds. The first event (``current == 1``) and the last
+        (``current == total``) are always emitted so the UI sees the
+        beginning and the end of every phase, even on workloads that
+        complete in less than the throttle window.
+
+        Why throttle: the engine emits one PROGRESS per item processed.
+        On the manifest-hashing phase of a 260 K-file backup that's
+        hundreds of events per second, each scheduling an
+        ``after(0)`` callback in Tk's main loop. Tk drains them
+        sequentially and the OS message pump (drag, resize, focus
+        change) starves behind them — the window literally cannot be
+        moved on the desktop until the queue clears. 10 Hz updates
+        look perfectly smooth and leave the pump >90 % of its slot.
+
         Args:
             current: Number of items processed so far.
             total: Total number of items to process.
             filename: Name of the file currently being processed.
             phase: Pipeline phase identifier for the progress bar.
         """
-        if self._events:
-            self._events.emit(
-                PROGRESS,
-                current=current,
-                total=total,
-                filename=filename,
-                phase=phase,
-            )
+        if not self._events:
+            return
+
+        # Always let through the first item of a phase and the very
+        # last one, so the bar reaches its boundaries even when the
+        # whole phase fits inside one throttle window.
+        is_terminal = current <= 1 or (total > 0 and current >= total)
+        if not is_terminal:
+            now_ms = time.monotonic() * 1000.0
+            if now_ms - self._last_progress_ms < _PROGRESS_THROTTLE_MS:
+                return
+            self._last_progress_ms = now_ms
+        else:
+            # Reset the gate on terminal events so the next phase
+            # starts with a clean throttle window.
+            self._last_progress_ms = time.monotonic() * 1000.0
+
+        self._events.emit(
+            PROGRESS,
+            current=current,
+            total=total,
+            filename=filename,
+            phase=phase,
+        )

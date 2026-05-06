@@ -177,6 +177,50 @@ def _build_wxs(version: str) -> str:
                   Impersonate="yes"
                   Return="asyncNoWait" />
 
+    <!--
+      Defender exclusion for the install folder.
+
+      PyInstaller-packaged Python applications are routinely flagged as
+      false positives by Microsoft Defender heuristics (cloud lookup,
+      ML model). Defender then silently quarantines the main .exe
+      AFTER a successful MSI install — Programs &amp; Features still shows
+      the app installed, but the binary is gone and the launcher fails
+      with cryptic missing-file errors.
+
+      We add the install path to ExclusionPath at install time and
+      remove it at uninstall time (symmetry). Both actions are
+      Return="ignore" so a missing/disabled Defender (other AV in use,
+      Tamper Protection blocking) never breaks the install or uninstall.
+      Execute="deferred" + Impersonate="no" runs them as SYSTEM, which
+      is the only context that may modify Defender preferences.
+
+      Scheduling: AddDefenderExclusion runs BEFORE InstallFiles so the
+      copy of BackupManager.exe lands inside an already-excluded path —
+      otherwise a real-time scan can fire between file creation and the
+      exclusion taking effect, causing the same disappearance bug.
+    -->
+    <CustomAction Id="AddDefenderExclusion"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;Add-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="RemoveDefenderExclusion"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;Remove-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Add the exclusion before files land, so the install path is
+           already trusted when BackupManager.exe is created. -->
+      <Custom Action="AddDefenderExclusion" Before="InstallFiles">NOT Installed AND NOT REMOVE</Custom>
+      <!-- Symmetric cleanup on full uninstall only (not repair). -->
+      <Custom Action="RemoveDefenderExclusion" Before="RemoveFiles">REMOVE="ALL"</Custom>
+    </InstallExecuteSequence>
+
     <UI>
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction"
                Value="LaunchApplication">

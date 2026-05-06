@@ -5,11 +5,15 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from src.core.config import RetentionConfig
+from src.core.exceptions import StorageDeleteError
 from src.core.phases.rotator import (
+    _delete_old_backups,
     _is_diff_backup,
     _is_full_backup,
     rotate_backups,
 )
+from src.core.phase_logger import PhaseLogger
+from src.storage._fs_utils import Residual
 
 
 def _make_backend(backups: list[dict]) -> MagicMock:
@@ -542,3 +546,98 @@ class TestWeeklyIsoCalendarFix:
         deleted_names = [c.args[0] for c in backend.delete_backup.call_args_list]
         # Must include exactly the older backup
         assert "P_FULL_2026-12-31_060000" in deleted_names
+
+
+class TestPartialDeleteHandling:
+    """Behavior of _delete_old_backups when backend reports residuals.
+
+    Regression tests for the bug where ``LocalStorage.delete_backup``
+    swallowed long-path failures, the rotator counted the backup as
+    deleted, and the user accumulated 5-MB skeleton folders on G:.
+    """
+
+    def test_storage_delete_error_does_not_increment_counter(self):
+        """A StorageDeleteError must NOT increase the deleted count.
+
+        Pre-fix: ``backend.delete_backup`` silently succeeded even when
+        rmtree left residuals → ``deleted += 1`` lied → the rotation
+        summary said 'deleted 1' on a backup still on disk.
+        """
+        backend = MagicMock()
+        backend.delete_backup.side_effect = StorageDeleteError(
+            "P_FULL_2026-04-20_100017",
+            [Residual(path="G:/Backup Manager/.../Newport", error="OSError: WinError 145")],
+        )
+
+        phase_log = PhaseLogger("rotator", events=None)
+        deleted = _delete_old_backups(
+            backend,
+            [{"name": "P_FULL_2026-04-20_100017"}],
+            phase_log,
+        )
+        assert deleted == 0, (
+            "Counter must reflect reality: the backup was not actually deleted"
+        )
+
+    def test_storage_delete_error_logged_as_partial(self, caplog):
+        """The rotator must log a structured 'Partial delete' error.
+
+        The log line drives both the user-visible Run-tab message and
+        ``backup_manager.log`` triage. It must include the count and
+        a sample of the residual paths so we can act on it without
+        diving into the raw rmtree warnings.
+        """
+        backend = MagicMock()
+        residuals = [
+            Residual(path="G:/Backup Manager/.../Newport", error="OSError: WinError 145"),
+            Residual(path="G:/Backup Manager/.../Maison", error="OSError: WinError 145"),
+        ]
+        backend.delete_backup.side_effect = StorageDeleteError(
+            "P_FULL_2026-04-20_100017", residuals
+        )
+
+        with caplog.at_level(logging.ERROR):
+            _delete_old_backups(
+                backend,
+                [{"name": "P_FULL_2026-04-20_100017"}],
+                PhaseLogger("rotator", events=None),
+            )
+
+        partial_logs = [r for r in caplog.records if "Partial delete" in r.message]
+        assert partial_logs, "Expected a 'Partial delete' error log"
+        assert "2 residual" in partial_logs[0].message
+        assert "Newport" in partial_logs[0].message
+
+    def test_mixed_success_and_residual_counts_only_success(self):
+        """Three deletions: 1 ok, 1 residual, 1 ok → counter says 2."""
+        backend = MagicMock()
+
+        def side_effect(name):
+            if name == "stuck":
+                raise StorageDeleteError(name, [Residual(path="x", error="OSError: y")])
+            # success: just return None
+
+        backend.delete_backup.side_effect = side_effect
+
+        deleted = _delete_old_backups(
+            backend,
+            [{"name": "ok1"}, {"name": "stuck"}, {"name": "ok2"}],
+            PhaseLogger("rotator", events=None),
+        )
+        assert deleted == 2
+
+    def test_generic_exception_still_handled(self):
+        """A non-StorageDeleteError exception keeps the counter accurate too.
+
+        Defensive check: a backend raising e.g. ``OSError`` mid-rmtree
+        (network share dropped) must not be counted as deleted either.
+        """
+        backend = MagicMock()
+        backend.delete_backup.side_effect = OSError("network down")
+
+        deleted = _delete_old_backups(
+            backend,
+            [{"name": "doomed"}],
+            PhaseLogger("rotator", events=None),
+        )
+        assert deleted == 0

@@ -9,6 +9,8 @@ import hashlib
 import io
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import BinaryIO
 
@@ -20,6 +22,20 @@ from src.core.phases.collector import FileInfo
 logger = logging.getLogger(__name__)
 
 
+# Worker count cap for parallel hashing. The bottleneck is rarely raw
+# CPU — it's per-file overhead (Defender real-time scan, NTFS file
+# table mutex, open/close syscalls). Past ~8 concurrent readers, OS
+# locks serialise the pool and extra workers add scheduling overhead
+# without throughput. The floor of 1 covers the (rare) case where
+# ``os.cpu_count()`` returns ``None``.
+_HASH_WORKERS_MAX = 8
+
+
+def _resolve_worker_count() -> int:
+    """Pick a sensible thread-pool size for parallel hashing."""
+    return max(1, min(_HASH_WORKERS_MAX, os.cpu_count() or 1))
+
+
 def build_integrity_manifest(
     files: list[FileInfo],
     events: EventBus | None = None,
@@ -27,6 +43,17 @@ def build_integrity_manifest(
     cached_hashes: dict[str, str] | None = None,
 ) -> dict:
     """Build integrity manifest with hashes of all source files.
+
+    Files without a cached hash are hashed in parallel via a
+    ``ThreadPoolExecutor`` (up to ``_HASH_WORKERS_MAX`` workers).
+    SHA-256 in ``hashlib`` releases the GIL during the C-level hash
+    update, and file I/O syscalls release it during read — so even
+    on CPython the threads run concurrently.  On a typical workload
+    dominated by Defender real-time scans this lifts throughput
+    roughly N×.
+
+    Cache hits are resolved on the main thread (no pool overhead);
+    only cache misses hit the worker pool.
 
     Args:
         files: Files that were backed up.
@@ -41,36 +68,72 @@ def build_integrity_manifest(
     """
     phase_log = PhaseLogger("manifest", events)
     cache = cached_hashes or {}
-    file_hashes = {}
+    file_hashes: dict = {}
     total = len(files)
     cache_hits = 0
+    completed = 0
 
-    for i, file_info in enumerate(files):
+    # Pass 1: drain the cache eagerly on the main thread.  This avoids
+    # paying thread-pool overhead for files whose hash we already know
+    # from the filter phase (common on incremental / differential
+    # backups where most files are unchanged).
+    to_hash: list[FileInfo] = []
+    for file_info in files:
         if cancel_check is not None:
             cancel_check()
-
         cached = cache.get(file_info.relative_path)
         if cached is not None:
-            file_hash = cached
+            file_hashes[file_info.relative_path] = {
+                "hash": cached,
+                "size": file_info.size,
+            }
             cache_hits += 1
+            completed += 1
+            phase_log.progress(
+                current=completed,
+                total=total,
+                filename=file_info.relative_path,
+                phase="hashing",
+            )
         else:
-            # Fail-fast: if we cannot hash a file at this stage the
-            # resulting manifest would be unverifiable. The filter
-            # phase drops unreadable files from ``changed`` so we
-            # should never end up here for such a file.
-            file_hash = compute_sha256(file_info.source_path)
+            to_hash.append(file_info)
 
-        file_hashes[file_info.relative_path] = {
-            "hash": file_hash,
-            "size": file_info.size,
-        }
-
-        phase_log.progress(
-            current=i + 1,
-            total=total,
-            filename=file_info.relative_path,
-            phase="hashing",
-        )
+    # Pass 2: parallel hash the cache misses.
+    if to_hash:
+        workers = _resolve_worker_count()
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="manifest-hash",
+        ) as pool:
+            futures = {
+                pool.submit(compute_sha256, fi.source_path): fi for fi in to_hash
+            }
+            for fut in as_completed(futures):
+                # Cancel must be honoured even mid-pool.  Raising here
+                # exits the ``with`` block, which calls
+                # ``ThreadPoolExecutor.shutdown(wait=True, cancel_futures=False)``
+                # — pending futures are cancelled, in-flight ones drain
+                # but their results are discarded.
+                if cancel_check is not None:
+                    cancel_check()
+                file_info = futures[fut]
+                # Fail-fast: if we cannot hash a file at this stage the
+                # resulting manifest would be unverifiable. The filter
+                # phase drops unreadable files from ``changed`` so we
+                # should never end up here for such a file. ``fut.result()``
+                # re-raises the worker's exception.
+                file_hash = fut.result()
+                file_hashes[file_info.relative_path] = {
+                    "hash": file_hash,
+                    "size": file_info.size,
+                }
+                completed += 1
+                phase_log.progress(
+                    current=completed,
+                    total=total,
+                    filename=file_info.relative_path,
+                    phase="hashing",
+                )
 
     if cache_hits:
         phase_log.info(

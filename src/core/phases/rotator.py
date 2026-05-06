@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 
 from src.core.config import RetentionConfig
 from src.core.events import EventBus
+from src.core.exceptions import StorageDeleteError
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.local_writer import sanitize_profile_name
 from src.storage.base import StorageBackend
@@ -264,9 +265,21 @@ def _delete_old_backups(
     phase_log: PhaseLogger,
     cancel_check=None,
 ) -> int:
-    """Delete backups not in the keep set, with progress reporting."""
+    """Delete backups not in the keep set, with progress reporting.
+
+    Returns the count of backups *fully* removed.  ``StorageDeleteError``
+    means the backend left residuals on disk — those backups are NOT
+    counted as deleted, so the rotation summary stays truthful.
+
+    Backups that triggered a ``StorageDeleteError`` are kept on disk
+    in their partial state. The next rotation run will attempt
+    deletion again; transient causes (antivirus scan, indexer holding
+    a handle) usually resolve by then. Persistent residuals indicate
+    a real filesystem problem the user must investigate.
+    """
     total = len(to_delete)
     deleted = 0
+    failed_with_residuals = 0
 
     for i, backup in enumerate(to_delete):
         if cancel_check is not None:
@@ -275,6 +288,15 @@ def _delete_old_backups(
             backend.delete_backup(backup["name"])
             deleted += 1
             phase_log.info(f"GFS rotated: deleted {backup['name']}")
+        except StorageDeleteError as e:
+            failed_with_residuals += 1
+            sample = "; ".join(str(r) for r in e.residuals[:3])
+            suffix = f" (+{len(e.residuals) - 3} more)" if len(e.residuals) > 3 else ""
+            phase_log.error(
+                f"Partial delete on {backup['name']}: {len(e.residuals)} "
+                f"residual(s) remain — {sample}{suffix}. "
+                f"Will retry on next rotation."
+            )
         except Exception as e:
             phase_log.error(f"Failed to delete {backup['name']}: {e}")
 
@@ -283,6 +305,12 @@ def _delete_old_backups(
             total=total,
             filename=backup["name"],
             phase="rotation",
+        )
+
+    if failed_with_residuals:
+        phase_log.warning(
+            f"Rotation finished with {failed_with_residuals} partial delete(s) — "
+            f"orphan files remain on the destination."
         )
 
     return deleted

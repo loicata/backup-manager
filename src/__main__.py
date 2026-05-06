@@ -106,6 +106,79 @@ def _set_window_icon(root):
 _mutex_handle = None
 
 
+def _show_starting_splash(parent) -> "object":
+    """Show a transient "Starting Backup Manager..." splash window.
+
+    Used only on the first-launch wizard path: after the wizard's
+    Toplevel is destroyed, ``BackupManagerApp.__init__`` builds 12
+    tabs synchronously plus runs an integrity check, which can take
+    5-10 seconds on a cold boot. Without a placeholder the screen is
+    completely blank during that window — indistinguishable from a
+    crash from the user's point of view.
+
+    The splash is a chromeless Tk Toplevel (``overrideredirect``)
+    centered on the primary monitor, so it cannot be moved or
+    closed and does not appear in the taskbar. It is intentionally
+    static (no spinner): the Tk event loop is blocked by the
+    BackupManagerApp constructor that runs immediately after, so any
+    ``after``-driven animation would freeze on the first frame.
+
+    The caller MUST call ``.destroy()`` once the main window is
+    ready to deiconify, otherwise the splash will outlive the app
+    transition.
+
+    Args:
+        parent: The (currently hidden) Tk root window.
+
+    Returns:
+        The Toplevel widget. Stored as ``object`` in the type hint to
+        keep this module importable without a Tk display present
+        (e.g. in unit tests that mock the root).
+    """
+    import tkinter as tk
+    from tkinter import ttk
+
+    splash = tk.Toplevel(parent)
+    splash.overrideredirect(True)
+    splash.attributes("-topmost", True)
+
+    width, height = 360, 140
+    sw = splash.winfo_screenwidth()
+    sh = splash.winfo_screenheight()
+    x = (sw - width) // 2
+    y = (sh - height) // 2
+    splash.geometry(f"{width}x{height}+{x}+{y}")
+
+    # Visible 1px frame border — without window chrome the splash
+    # would otherwise float on screen with no boundary against the
+    # desktop, which looks broken.
+    frame = ttk.Frame(splash, relief="solid", borderwidth=1)
+    frame.pack(fill="both", expand=True)
+
+    title = ttk.Label(
+        frame,
+        text="Backup Manager",
+        font=("Segoe UI", 14, "bold"),
+        anchor="center",
+    )
+    title.pack(pady=(28, 4))
+
+    msg = ttk.Label(
+        frame,
+        text="Starting...",
+        font=("Segoe UI", 10),
+        anchor="center",
+    )
+    msg.pack()
+
+    # Force the splash to draw NOW, before the synchronous
+    # BackupManagerApp constructor blocks the Tk event loop. Without
+    # this call the Toplevel is created but never rendered — the
+    # OS sees a window that never paints itself.
+    splash.update()
+    return splash
+
+
 def _get_signal_file() -> Path:
     """Return the path to the 'show window' signal file."""
     appdata = os.environ.get("APPDATA", "")
@@ -255,6 +328,15 @@ def main():
                 root.destroy()
                 return
 
+        # Bridge the visual gap between wizard close and main UI
+        # reveal. BackupManagerApp.__init__ takes 5-10 s after a fresh
+        # install and Tk shows nothing during that interval; the
+        # splash makes the wait obviously "starting", not "crashed".
+        # Only shown on the wizard path because returning users see
+        # the same delay but already trust the app — adding a splash
+        # there would just feel like an extra flash on every launch.
+        splash = _show_starting_splash(root) if from_wizard else None
+
         if _should_auto_enable_autostart():
             from src.core.scheduler import AutoStart
 
@@ -284,6 +366,13 @@ def main():
         # Build UI while window is still hidden to avoid flicker
         _app = BackupManagerApp(root, from_wizard=from_wizard)
         root.update_idletasks()
+
+        # Tear down the wizard splash now that the main UI is built.
+        # Done BEFORE deiconify so the visual handover is splash →
+        # full window with no perceptible blank frame in between.
+        if splash is not None:
+            with contextlib.suppress(Exception):
+                splash.destroy()
 
         # Now reveal the fully-built window
         root.attributes("-alpha", 1)

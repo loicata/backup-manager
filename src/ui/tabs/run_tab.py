@@ -17,6 +17,56 @@ from src.core.health_checker import DestinationHealth, format_bytes
 from src.ui.theme import Colors, Fonts, Spacing
 
 
+# Maximum characters displayed in the "phase: filename" status line.
+# Beyond this length the path is truncated with a leading ellipsis so the
+# percent label on the right of the same row stays visible.  Calibrated
+# for a ~1400 px window with the default Tk font: 80 chars leaves ~6-8
+# chars of empty pad before the % column even on smaller screens.
+_STATUS_MAX_CHARS = 80
+
+
+def _truncate_status_text(phase: str, filename: str, max_chars: int = _STATUS_MAX_CHARS) -> str:
+    """Build a "phase: filename" line that never exceeds ``max_chars``.
+
+    The truncation keeps the **end** of the path (basename + a few
+    parents) which is the part the user actually wants to see — the
+    leading components are replaced with ``...``.
+
+    Why we truncate at all: ``status_label`` and ``percent_label`` share
+    a horizontal row with ``fill="x"``.  Tk Labels do not clip their
+    own text, so a 200-char path requests a 200-char-wide label and
+    pushes the percent off-screen even when ``side="right"`` is used.
+
+    Examples:
+        >>> _truncate_status_text("hashing", "a.txt", max_chars=80)
+        'hashing: a.txt'
+        >>> _truncate_status_text("hashing", "/very/long/path/...long.../mail.eml", max_chars=30)
+        'hashing: ...g.../mail.eml'
+
+    Args:
+        phase: Phase name (``hashing``, ``upload``, ...).  May be empty.
+        filename: File path being processed.  May be empty.
+        max_chars: Hard cap on the returned string length.
+
+    Returns:
+        Display-ready status line bounded by ``max_chars``.
+    """
+    if not filename:
+        return phase[:max_chars]
+    full = f"{phase}: {filename}" if phase else filename
+    if len(full) <= max_chars:
+        return full
+
+    prefix = f"{phase}: ..." if phase else "..."
+    # If even the prefix doesn't fit, hard-clip from the right.  This is
+    # a degenerate case (phase name itself > max_chars) — better to
+    # truncate the phase than crash the layout.
+    tail_budget = max_chars - len(prefix)
+    if tail_budget < 1:
+        return full[:max_chars]
+    return prefix + filename[-tail_budget:]
+
+
 class RunTab(ttk.Frame):
     """Backup execution: progress bar, log output, start/cancel."""
 
@@ -64,19 +114,27 @@ class RunTab(ttk.Frame):
         status_row = ttk.Frame(progress_frame)
         status_row.pack(fill="x", pady=(Spacing.SMALL, 0))
 
-        self.status_label = ttk.Label(
-            status_row,
-            text="Waiting...",
-            foreground=Colors.TEXT_SECONDARY,
-        )
-        self.status_label.pack(side="left")
-
+        # IMPORTANT: pack ``percent_label`` BEFORE ``status_label``.
+        # Tk's pack manager gives priority to widgets packed first,
+        # so packing the % first (``side="right"``) reserves its slot
+        # on the right edge of the row.  ``status_label`` then takes
+        # what's left with ``fill="x", expand=True``.  Without this
+        # ordering, a long file path can claim the full width and
+        # push the percent off-screen.
         self.percent_label = ttk.Label(
             status_row,
             text="0%",
             foreground=Colors.TEXT_SECONDARY,
         )
         self.percent_label.pack(side="right")
+
+        self.status_label = ttk.Label(
+            status_row,
+            text="Waiting...",
+            foreground=Colors.TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.status_label.pack(side="left", fill="x", expand=True)
 
         # Log output
         log_frame = ttk.LabelFrame(self, text="Log", padding=Spacing.PAD)
@@ -447,7 +505,9 @@ class RunTab(ttk.Frame):
             self.progress_bar["value"] = self._last_pct
             self.percent_label.config(text=f"{self._last_pct}%")
             if filename:
-                self.status_label.config(text=f"{phase}: {filename}")
+                self.status_label.config(
+                    text=_truncate_status_text(phase, filename)
+                )
 
     def _on_phase(self, phase="", **kw):
         """Schedule phase label update on the main thread."""

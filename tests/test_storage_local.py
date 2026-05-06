@@ -1,13 +1,15 @@
 """Tests for src.storage.local — LocalStorage."""
 
 import io
-import os
 import stat
 from pathlib import Path
 
 import pytest
 
-from src.storage.local import SYSTEM_FOLDERS, LocalStorage, _force_remove_readonly
+from src.core.exceptions import StorageDeleteError
+from src.storage import _fs_utils
+from src.storage._fs_utils import RemoveResult, Residual
+from src.storage.local import SYSTEM_FOLDERS, LocalStorage
 
 
 class TestLocalStorage:
@@ -197,14 +199,37 @@ class TestLocalStorage:
         storage.delete_backup("readonly_backup")
         assert not (Path(storage._dest) / "readonly_backup").exists()
 
-    def test_force_remove_readonly_non_permission_error(self, tmp_path):
-        """_force_remove_readonly logs warning for non-PermissionError."""
-        # Should not raise — just log
-        _force_remove_readonly(
-            os.remove,
-            str(tmp_path / "nonexistent"),
-            (FileNotFoundError, FileNotFoundError("not found"), None),
-        )
+    def test_delete_backup_raises_storage_error_on_residual(self, storage, tmp_path, monkeypatch):
+        """delete_backup must raise StorageDeleteError when safe_remove_tree leaves residuals.
+
+        The legacy code logged a warning and returned successfully,
+        which made the rotator increment its 'deleted' counter and
+        log 'Deleted backup' on a backup that was still on disk. The
+        new contract surfaces the failure so the rotator can flag it.
+        """
+        src_dir = tmp_path / "doomed"
+        src_dir.mkdir()
+        (src_dir / "stuck.txt").write_text("locked", encoding="utf-8")
+        storage.upload(src_dir, "doomed_backup")
+
+        # Force safe_remove_tree to report a hard failure as if the
+        # underlying file system refused to release a file.
+        def fake_remove(path, **_kwargs):
+            return RemoveResult(
+                residuals=[Residual(path=str(path), error="OSError: simulated")]
+            )
+
+        monkeypatch.setattr(_fs_utils, "safe_remove_tree", fake_remove)
+        # The local module imports the symbol directly, patch that too.
+        from src.storage import local as local_mod
+
+        monkeypatch.setattr(local_mod, "safe_remove_tree", fake_remove)
+
+        with pytest.raises(StorageDeleteError) as exc_info:
+            storage.delete_backup("doomed_backup")
+        assert exc_info.value.target == "doomed_backup"
+        assert len(exc_info.value.residuals) == 1
+        assert "simulated" in exc_info.value.residuals[0].error
 
     def test_upload_overwrites_readonly_backup_directory(self, storage, tmp_path):
         """upload(dir) must replace a previous backup that has read-only files.

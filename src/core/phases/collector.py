@@ -7,7 +7,7 @@ skips symlinks, and collects file metadata.
 import fnmatch
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.core.events import EventBus
@@ -23,6 +23,71 @@ _ALWAYS_EXCLUDED_DIRS = {
     "System Volume Information",
     ".Trash-1000",
 }
+
+# How many sample paths to keep per skipped category for the UI summary.
+# Five is enough to identify the pattern (e.g. ``.pytest_cache``,
+# ``...\evidence\<uuid>\volatile``) without flooding the run-tab log.
+_SKIPPED_SAMPLE_LIMIT = 5
+
+
+@dataclass
+class _SkippedPaths:
+    """Accumulator for paths the collector could not enter.
+
+    The legacy code emitted one ``phase_log.warning`` per failure,
+    which sent thousands of LOG events to the UI on workloads with
+    a lot of restricted directories (``.pytest_cache`` from every
+    Python project, ``volatile`` evidence folders from security
+    tools, etc.). The Run tab became unusable.
+
+    This accumulator keeps the per-path detail in the file log
+    (``logger.debug``) so deep diagnostic stays available, but
+    surfaces a single aggregated WARNING per category in the UI
+    once the collect phase finishes.
+    """
+
+    permission_denied: list[str] = field(default_factory=list)
+    permission_denied_count: int = 0
+    os_errors: list[tuple[str, str]] = field(default_factory=list)
+    os_errors_count: int = 0
+
+    def add_permission(self, path: str) -> None:
+        """Record a PermissionError on ``path``."""
+        self.permission_denied_count += 1
+        if len(self.permission_denied) < _SKIPPED_SAMPLE_LIMIT:
+            self.permission_denied.append(path)
+        logger.debug("Permission denied: %s", path)
+
+    def add_os_error(self, path: str, message: str) -> None:
+        """Record a generic OSError on ``path``."""
+        self.os_errors_count += 1
+        if len(self.os_errors) < _SKIPPED_SAMPLE_LIMIT:
+            self.os_errors.append((path, message))
+        logger.debug("Error accessing %s: %s", path, message)
+
+    def emit_summary(self, phase_log: PhaseLogger) -> None:
+        """Push one aggregated WARNING per non-empty category to the UI.
+
+        Format: ``"Skipped N path(s) — <reason>. First: <samples>(+M more)"``
+        — keeps "permission" and "Skipped" keywords so users grepping
+        the log can still find the info.
+        """
+        if self.permission_denied_count:
+            sample = "; ".join(self.permission_denied)
+            extra = self.permission_denied_count - len(self.permission_denied)
+            suffix = f" (+{extra} more)" if extra > 0 else ""
+            phase_log.warning(
+                f"Skipped {self.permission_denied_count} path(s) — "
+                f"permission denied. First: {sample}{suffix}"
+            )
+        if self.os_errors_count:
+            sample = "; ".join(f"{p} ({m})" for p, m in self.os_errors)
+            extra = self.os_errors_count - len(self.os_errors)
+            suffix = f" (+{extra} more)" if extra > 0 else ""
+            phase_log.warning(
+                f"Skipped {self.os_errors_count} path(s) — "
+                f"OS error. First: {sample}{suffix}"
+            )
 
 
 @dataclass
@@ -76,6 +141,7 @@ def collect_files(
     exclude = exclude_patterns or []
     files: list[FileInfo] = []
     seen: set[str] = set()  # Avoid duplicates
+    skipped = _SkippedPaths()
 
     for source in source_paths:
         source_path = Path(source)
@@ -87,8 +153,12 @@ def collect_files(
             if not _is_excluded(source_path, exclude):
                 _add_file(files, seen, source_path, source_path.parent, source)
         elif source_path.is_dir():
-            _collect_directory(files, seen, source_path, exclude, source, phase_log)
+            _collect_directory(files, seen, source_path, exclude, source, skipped)
 
+    # One aggregated WARNING per category beats thousands of per-path
+    # lines that drowned the Run-tab log on workloads with many
+    # restricted directories (.pytest_cache, evidence/<uuid>/volatile…).
+    skipped.emit_summary(phase_log)
     phase_log.info(f"Collected {len(files)} files from {len(source_paths)} sources")
     return files
 
@@ -99,9 +169,15 @@ def _collect_directory(
     directory: Path,
     exclude: list[str],
     source_root: str,
-    phase_log: PhaseLogger,
+    skipped: _SkippedPaths,
 ) -> None:
-    """Recursively collect files from a directory."""
+    """Recursively collect files from a directory.
+
+    Errors are recorded in the ``skipped`` accumulator (per-path
+    debug log + count) instead of being emitted as individual UI
+    warnings.  ``collect_files`` flushes a single aggregated WARNING
+    per category once the walk completes.
+    """
     try:
         for entry in os.scandir(directory):
             try:
@@ -118,21 +194,21 @@ def _collect_directory(
                     # Check if directory name matches exclusion
                     if _is_excluded(path, exclude):
                         continue
-                    _collect_directory(files, seen, path, exclude, source_root, phase_log)
+                    _collect_directory(files, seen, path, exclude, source_root, skipped)
 
                 elif entry.is_file(follow_symlinks=False):
                     if not _is_excluded(path, exclude):
                         _add_file(files, seen, path, Path(source_root), source_root)
 
             except PermissionError:
-                phase_log.warning(f"Permission denied: {entry.path}")
+                skipped.add_permission(entry.path)
             except OSError as e:
-                phase_log.warning(f"Error accessing {entry.path}: {e}")
+                skipped.add_os_error(entry.path, str(e))
 
     except PermissionError:
-        phase_log.warning(f"Permission denied: {directory}")
+        skipped.add_permission(str(directory))
     except OSError as e:
-        phase_log.warning(f"Error scanning {directory}: {e}")
+        skipped.add_os_error(str(directory), str(e))
 
 
 def _add_file(

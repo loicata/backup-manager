@@ -21,6 +21,7 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
+from src.storage._fs_utils import safe_remove_tree
 from src.storage.base import StorageBackend, long_path_mkdir, long_path_str, with_retry
 
 logger = logging.getLogger(__name__)
@@ -1429,7 +1430,6 @@ class SFTPStorage(StorageBackend):
                 backup is transferred. Ignored for encrypted archives
                 which are a single ``sftp.get`` call.
         """
-        import shutil
         import stat as stat_module
 
         local_dir.mkdir(parents=True, exist_ok=True)
@@ -1459,25 +1459,33 @@ class SFTPStorage(StorageBackend):
                     # Clear any stale local path: a previous restore of
                     # the unencrypted variant may have left a folder with
                     # the same name that would make sftp.get() fail.
+                    # safe_remove_tree handles long Windows paths and
+                    # transient antivirus locks that plain rmtree silently
+                    # misses, leaving sftp.get() to fail with a confusing
+                    # "destination already exists" error.
                     if dst.exists():
-                        if dst.is_dir():
-                            shutil.rmtree(dst)
-                        else:
-                            dst.unlink()
+                        clear_result = safe_remove_tree(dst)
+                        if not clear_result.success:
+                            raise OSError(
+                                f"Cannot clear existing download destination {dst}: "
+                                f"{len(clear_result.residuals)} residual(s). "
+                                f"Close any application using files inside it "
+                                f"and retry."
+                            )
                     sftp.get(remote_base, str(dst))
                     logger.info("Downloaded encrypted archive: %s", remote_name)
                     return dst
 
                 # Directory backup (unencrypted file tree).
                 if dst.exists():
-                    try:
-                        shutil.rmtree(dst)
-                    except OSError as e:
+                    clear_result = safe_remove_tree(dst)
+                    if not clear_result.success:
                         raise OSError(
                             f"Cannot clear existing download destination {dst}: "
-                            f"{e}. Close any application using files inside it "
+                            f"{len(clear_result.residuals)} residual(s). "
+                            f"Close any application using files inside it "
                             f"and retry."
-                        ) from e
+                        )
 
                 # Primary path: tar-stream the whole directory in one SSH
                 # session — symmetric to the tar-stream upload (v3.1.4)

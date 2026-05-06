@@ -7,11 +7,12 @@ import contextlib
 import logging
 import os
 import shutil
-import stat
 import threading
 from pathlib import Path
 from typing import BinaryIO
 
+from src.core.exceptions import StorageDeleteError
+from src.storage._fs_utils import RemoveResult, safe_remove_tree
 from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -34,26 +35,26 @@ SYSTEM_FOLDERS = frozenset(
 )
 
 
-def _force_remove_readonly(func, path: str, exc_info) -> None:
-    """Handle read-only files during shutil.rmtree.
+def _log_residuals(target: str, result: RemoveResult) -> None:
+    """Emit a single structured warning summarising any residuals.
 
-    On Windows, files like .scr or system-protected files may have the
-    read-only attribute set, causing PermissionError on deletion.
-    This callback clears the read-only flag and retries.
-
-    Args:
-        func: The function that raised the exception (os.remove, etc.).
-        path: The path that caused the error.
-        exc_info: Exception info tuple (type, value, traceback).
+    The legacy ``_force_remove_readonly`` callback logged one line per
+    failing path which spammed the log without surfacing the count or
+    the dependency between failures.  We emit one WARNING with the
+    total and a sample of the first three paths — enough to act on
+    without flooding ``backup_manager.log``.
     """
-    if isinstance(exc_info[1], PermissionError):
-        try:
-            os.chmod(path, stat.S_IWRITE)
-            func(path)
-        except Exception as retry_err:
-            logger.warning("Could not force-remove %s: %s", path, retry_err)
-    else:
-        logger.warning("rmtree error on %s: %s", path, exc_info[1])
+    if result.success:
+        return
+    sample = "; ".join(str(r) for r in result.residuals[:3])
+    suffix = f" (+{len(result.residuals) - 3} more)" if len(result.residuals) > 3 else ""
+    logger.warning(
+        "safe_remove_tree left %d residual(s) under %s: %s%s",
+        len(result.residuals),
+        target,
+        sample,
+        suffix,
+    )
 
 
 class LocalStorage(StorageBackend):
@@ -69,11 +70,17 @@ class LocalStorage(StorageBackend):
 
         if local_path.is_dir():
             if target.exists():
-                # Use the same read-only-forcing onerror handler as
-                # delete_backup; a previous backup with read-only
-                # attributes would otherwise raise PermissionError
-                # and abort the new upload.
-                shutil.rmtree(target, onerror=_force_remove_readonly)
+                # Replace any prior backup at the same name. We use the
+                # robust helper (long-path support, retries, attribute
+                # clearing) so a leftover read-only or deeply nested
+                # tree from a previous run does not abort the upload.
+                # Residuals are escalated as StorageDeleteError because
+                # copytree below would fail anyway with a confusing
+                # "destination already exists" error otherwise.
+                result = safe_remove_tree(target)
+                if not result.success:
+                    _log_residuals(str(target), result)
+                    raise StorageDeleteError(remote_name, result.residuals)
             shutil.copytree(local_path, target)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -158,20 +165,38 @@ class LocalStorage(StorageBackend):
         return sorted(backups, key=lambda b: b["modified"], reverse=True)
 
     def delete_backup(self, remote_name: str) -> None:
-        """Delete a backup and its associated .wbverify manifest."""
+        """Delete a backup and its associated .wbverify manifest.
+
+        Raises:
+            FileNotFoundError: If the backup does not exist.
+            StorageDeleteError: If the removal left any residual files
+                or directories (long-path failure, file-system lock
+                that survived retries, etc.). The rotator inspects the
+                residuals to log a structured failure instead of
+                marking the rotation as successful.
+        """
         target = self._dest / remote_name
-        if target.is_dir():
-            shutil.rmtree(target, onerror=_force_remove_readonly)
-        elif target.exists():
-            target.unlink()
-        else:
+        if not target.exists():
             raise FileNotFoundError(f"Backup not found: {remote_name}")
+
+        result = safe_remove_tree(target)
+        if not result.success:
+            _log_residuals(str(target), result)
+            raise StorageDeleteError(remote_name, result.residuals)
+
         logger.info("Deleted backup: %s", remote_name)
 
-        # Remove associated integrity manifest if present
+        # Remove associated integrity manifest if present. We use the
+        # same helper for symmetry — a stale lock on the manifest is
+        # rare but would otherwise leave an orphan .wbverify file.
         verify_file = self._dest / f"{remote_name}.wbverify"
         if verify_file.exists():
-            verify_file.unlink()
+            verify_result = safe_remove_tree(verify_file)
+            if not verify_result.success:
+                _log_residuals(str(verify_file), verify_result)
+                raise StorageDeleteError(
+                    f"{remote_name}.wbverify", verify_result.residuals
+                )
             logger.info("Deleted manifest: %s.wbverify", remote_name)
 
     def test_connection(self) -> tuple[bool, str]:

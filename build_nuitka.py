@@ -116,7 +116,6 @@ def build():
         "PIL",
         "cryptography",
         "sv_ttk",
-        "pyotp",
     ]
     for pkg in packages:
         cmd.append(f"--include-package={pkg}")

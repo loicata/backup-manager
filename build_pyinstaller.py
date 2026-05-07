@@ -76,7 +76,6 @@ def build():
         "botocore",
         "botocore.config",
         "botocore.exceptions",
-        "pyotp",
         "pystray",
         "pystray._win32",
         "PIL",

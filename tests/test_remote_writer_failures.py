@@ -101,8 +101,17 @@ def test_upload_encrypted_tar_upload_fails_raises(tmp_path):
 # -- Progress and edge cases --
 
 
-def test_progress_callback_values(tmp_path):
-    """Progress events emitted with correct current/total values."""
+def test_progress_callback_values(tmp_path, monkeypatch):
+    """Progress events emitted with correct current/total values.
+
+    ``PhaseLogger.progress`` throttles intermediate events to 10 Hz
+    in production (see ``_PROGRESS_THROTTLE_MS``); on a 3-file
+    fixture the whole loop fits inside a single 100 ms window, so
+    only the first and the terminal events would survive. Disable
+    the throttle here to keep the per-file contract observable.
+    """
+    monkeypatch.setattr("src.core.phase_logger._PROGRESS_THROTTLE_MS", 0)
+
     files = _make_files(tmp_path, count=3)
     backend = MagicMock()
     events = MagicMock()

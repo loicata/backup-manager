@@ -345,8 +345,17 @@ class TestWriteEncryptedTar:
         # Only the final archive sits in the destination.
         assert {p.name for p in dest.iterdir()} == {archive.name}
 
-    def test_emits_progress_events(self, tmp_path: Path) -> None:
-        """Progress events are emitted for each file in the archive."""
+    def test_emits_progress_events(self, tmp_path: Path, monkeypatch) -> None:
+        """Progress events are emitted for each file in the archive.
+
+        ``PhaseLogger.progress`` throttles intermediate events to 10 Hz
+        in production (see ``_PROGRESS_THROTTLE_MS``); on a 3-file
+        fixture the whole loop fits inside a single 100 ms window, so
+        only the first and the terminal events would survive. Disable
+        the throttle here to keep the per-file contract observable.
+        """
+        monkeypatch.setattr("src.core.phase_logger._PROGRESS_THROTTLE_MS", 0)
+
         src = tmp_path / "source"
         _make_file(src / "a.txt", "a")
         _make_file(src / "b.txt", "b")

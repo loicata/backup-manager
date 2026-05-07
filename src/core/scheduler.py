@@ -306,6 +306,13 @@ class InAppScheduler:
             except Exception:
                 logger.exception("Startup missed-backup check error")
 
+        # Reset the wake-from-sleep clock AFTER startup recovery, which
+        # may have run a backup that blocked us for tens of minutes.
+        # Without this, the first _check_schedules tick interprets the
+        # backup duration as a sleep gap and emits a misleading
+        # "Detected system wake from sleep" line.
+        self._last_check_time = time.monotonic()
+
         while self._running:
             try:
                 self._check_schedules()
@@ -406,12 +413,14 @@ class InAppScheduler:
         now = datetime.now()
         elapsed = time.monotonic() - self._last_check_time
 
-        # Detect sleep/hibernation (time jump > 3x check interval)
+        # Detect sleep/hibernation (time jump > 3x check interval).
+        # The clock is reset at the END of this method so that a long
+        # _trigger_backup or _check_verify_due (each may block this
+        # thread for tens of minutes) does not look like an OS sleep
+        # to the next iteration.
         if elapsed > CHECK_INTERVAL * 3:
             logger.info("Detected system wake from sleep (%.0fs gap)", elapsed)
             self._check_missed_backups(now)
-
-        self._last_check_time = time.monotonic()
 
         for profile in self._get_profiles():
             if not profile.active:
@@ -432,6 +441,15 @@ class InAppScheduler:
             # Periodic integrity verification
             if profile.schedule.verify_enabled:
                 self._check_verify_due(profile, now)
+
+        # Refresh AFTER the for-loop, not before. _trigger_backup and
+        # _check_verify_due each run synchronously in this thread and
+        # can take tens of minutes for large backups. Resetting at the
+        # start (the previous behaviour) made that duration count
+        # toward the next iteration's "wake from sleep" gap, producing
+        # a cosmetic "Detected system wake from sleep (1350s gap)" log
+        # right after every long backup.
+        self._last_check_time = time.monotonic()
 
     def _is_due(self, profile: BackupProfile, now: datetime) -> bool:
         sched = profile.schedule

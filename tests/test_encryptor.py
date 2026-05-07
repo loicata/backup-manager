@@ -60,8 +60,17 @@ class TestEncryptBackupDirectory:
                     if extracted and member.name == "file1.txt":
                         assert extracted.read() == b"Content one"
 
-    def test_emits_progress_events(self, backup_dir):
-        """Progress events should be emitted for each file."""
+    def test_emits_progress_events(self, backup_dir, monkeypatch):
+        """Progress events should be emitted for each file.
+
+        ``PhaseLogger.progress`` throttles intermediate events to 10 Hz
+        in production (see ``_PROGRESS_THROTTLE_MS``); on a 3-file
+        fixture the whole loop fits inside a single 100 ms window, so
+        only the first and the terminal events would survive. Disable
+        the throttle here to keep the per-file contract observable.
+        """
+        monkeypatch.setattr("src.core.phase_logger._PROGRESS_THROTTLE_MS", 0)
+
         events = EventBus()
         progress_calls = []
         events.subscribe("progress", lambda **kw: progress_calls.append(kw))

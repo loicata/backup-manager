@@ -35,7 +35,14 @@ from src.core.scheduler import InAppScheduler
 
 
 def _make_profile(profile_id: str = "p1") -> BackupProfile:
-    """Build a minimal valid BackupProfile that the scheduler will pick up."""
+    """Build a minimal valid BackupProfile that the scheduler will pick up.
+
+    Uses ``HOURLY`` rather than ``DAILY at 10:00`` so ``_is_due`` is
+    independent of the wall-clock hour. ``DAILY`` gates on
+    ``now >= target_today`` which makes "callback should fire" tests
+    pass-or-fail depending on whether the suite happens to run before
+    or after 10:00 — a flake we hit on a 07:30 CI run.
+    """
     return BackupProfile(
         id=profile_id,
         name="TestProfile",
@@ -47,7 +54,7 @@ def _make_profile(profile_id: str = "p1") -> BackupProfile:
         ),
         schedule=ScheduleConfig(
             enabled=True,
-            frequency=ScheduleFrequency.DAILY,
+            frequency=ScheduleFrequency.HOURLY,
             time="10:00",
         ),
     )

@@ -340,9 +340,14 @@ def main():
         if _should_auto_enable_autostart():
             from src.core.scheduler import AutoStart
 
+            # Re-create the Run-key entry whenever it is missing.  This
+            # is NOT necessarily "first launch": MSI uninstall removes
+            # the key, so an upgrade install path will see it gone and
+            # legitimately rewrite it.  The old "(first launch)" label
+            # was misleading in that case — say what we actually did.
             if not AutoStart.is_enabled():
                 AutoStart.ensure_startup(show_window=False)
-                logger.info("Auto-start enabled (first launch)")
+                logger.info("Auto-start registry entry created (was missing)")
 
         # Integrity check (non-blocking)
         logger.info("Running integrity check...")

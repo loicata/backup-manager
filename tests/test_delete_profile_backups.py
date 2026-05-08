@@ -89,14 +89,23 @@ class TestDeleteProfileBackups:
         )
         mock_create.return_value = backend
 
-        messages = []
+        # New signature: (current, total, name) so the UI can drive a
+        # determinate progress bar. Capture every invocation as a tuple.
+        events: list[tuple[int, int, str]] = []
         deleted, errors = delete_profile_backups(
-            "Prof", [_make_config()], progress_callback=messages.append
+            "Prof",
+            [_make_config()],
+            progress_callback=lambda c, t, n: events.append((c, t, n)),
         )
 
         assert deleted == 2
-        assert len(messages) == 2
-        assert all("Deleted" in m for m in messages)
+        # One call per matching backup, monotonically increasing 1..N,
+        # constant total across the whole sweep.
+        assert [e[0] for e in events] == [1, 2]
+        assert [e[1] for e in events] == [2, 2]
+        names = [e[2] for e in events]
+        assert "Prof_FULL_2026-04-01_120000" in names
+        assert "Prof_DIFF_2026-04-02_120000" in names
 
     @patch("src.core.backup_engine.create_backend")
     def test_delete_individual_failure_continues(self, mock_create):
@@ -131,3 +140,117 @@ class TestDeleteProfileBackups:
 
         assert deleted == 2
         assert not errors
+
+
+class TestDeleteProgressCallback:
+    """Behaviour of the determinate-progress callback added in v3.3.16
+    so the UI can paint a 0..N progress bar instead of a silent spinner."""
+
+    @patch("src.core.backup_engine.create_backend")
+    def test_total_aggregates_across_destinations(self, mock_create):
+        """``total`` reflects matches on ALL backends, not just the first."""
+        backend1 = _make_backend(["Prof_FULL_2026-04-01_120000"])
+        backend2 = _make_backend(
+            [
+                "Prof_DIFF_2026-04-02_120000",
+                "Prof_DIFF_2026-04-03_120000",
+            ]
+        )
+        mock_create.side_effect = [backend1, backend2]
+
+        events: list[tuple[int, int, str]] = []
+        deleted, errors = delete_profile_backups(
+            "Prof",
+            [_make_config(), _make_config(StorageType.SFTP)],
+            progress_callback=lambda c, t, n: events.append((c, t, n)),
+        )
+
+        assert deleted == 3
+        # Total is precomputed across both backends.
+        assert all(e[1] == 3 for e in events)
+        # current is monotonic 1..3 across the whole sweep.
+        assert [e[0] for e in events] == [1, 2, 3]
+
+    @patch("src.core.backup_engine.create_backend")
+    def test_listing_failure_recorded_but_does_not_abort(self, mock_create):
+        """A backend whose ``list_backups`` blows up surfaces an error
+        in the result tuple but the other backend is still cleaned."""
+        broken = MagicMock()
+        broken.list_backups.side_effect = OSError("network down")
+        good = _make_backend(["Prof_FULL_2026-04-01_120000"])
+        mock_create.side_effect = [broken, good]
+
+        deleted, errors = delete_profile_backups(
+            "Prof", [_make_config(), _make_config(StorageType.SFTP)]
+        )
+
+        assert deleted == 1  # the good backend's backup
+        assert any("network down" in e for e in errors)
+
+    @patch("src.core.backup_engine.create_backend")
+    def test_callback_exception_does_not_abort(self, mock_create):
+        """A callback that raises (Tk shutdown, etc.) MUST NOT abort
+        the deletion sweep — the cleanup is more important than the UI."""
+        backend = _make_backend(
+            [
+                "Prof_FULL_2026-04-01_120000",
+                "Prof_DIFF_2026-04-02_120000",
+            ]
+        )
+        mock_create.return_value = backend
+
+        def angry_cb(current: int, total: int, name: str) -> None:
+            raise RuntimeError("UI gone")
+
+        deleted, errors = delete_profile_backups(
+            "Prof", [_make_config()], progress_callback=angry_cb
+        )
+
+        assert deleted == 2
+        assert not errors  # callback failure is swallowed silently
+
+    @patch("src.core.backup_engine.create_backend")
+    def test_callback_invoked_before_actual_delete(self, mock_create):
+        """The callback is called BEFORE ``delete_backup`` so the UI
+        shows the file currently being processed (matches user expectation
+        of "Deleting X" rather than the just-finished name)."""
+        backend = _make_backend(
+            [
+                "Prof_FULL_2026-04-01_120000",
+                "Prof_DIFF_2026-04-02_120000",
+            ]
+        )
+        mock_create.return_value = backend
+
+        order: list[str] = []
+        backend.delete_backup.side_effect = lambda n: order.append(f"DEL:{n}")
+
+        def cb(current: int, total: int, name: str) -> None:
+            order.append(f"CB:{name}")
+
+        delete_profile_backups("Prof", [_make_config()], progress_callback=cb)
+
+        # Each callback fires immediately before the matching delete.
+        assert order == [
+            "CB:Prof_FULL_2026-04-01_120000",
+            "DEL:Prof_FULL_2026-04-01_120000",
+            "CB:Prof_DIFF_2026-04-02_120000",
+            "DEL:Prof_DIFF_2026-04-02_120000",
+        ]
+
+    @patch("src.core.backup_engine.create_backend")
+    def test_no_matching_backups_total_zero(self, mock_create):
+        """A sweep that finds nothing must produce a clean (0, []) result
+        with no callback invocations at all."""
+        backend = _make_backend(["OtherProfile_FULL_2026-04-01_120000"])
+        mock_create.return_value = backend
+
+        events: list[tuple[int, int, str]] = []
+        deleted, errors = delete_profile_backups(
+            "Prof",
+            [_make_config()],
+            progress_callback=lambda c, t, n: events.append((c, t, n)),
+        )
+        assert deleted == 0
+        assert errors == []
+        assert events == []

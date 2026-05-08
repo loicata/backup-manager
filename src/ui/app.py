@@ -1639,34 +1639,86 @@ class BackupManagerApp:
         self.scheduler.mark_triggered_now(profile.id, datetime.now())
 
     def _delete_profile_backups_async(self, profile: BackupProfile) -> None:
-        """Delete all backups for a profile in background, then remove config."""
+        """Delete all backups for a profile, with a live progress dialog.
+
+        Replaces the previous fire-and-forget pattern (close the
+        confirm dialog, sweep silently in the background) with a
+        modal Toplevel that shows a 0..N progress bar driven by
+        ``delete_profile_backups``'s progress callback. The dialog
+        auto-closes once the sweep finishes.
+        """
         from src.core.backup_engine import delete_profile_backups
+        from src.ui.delete_progress_dialog import DeleteProgressDialog
 
         configs = [profile.storage] + list(profile.mirror_destinations)
         configs = [c for c in configs if c.destination_path or c.sftp_host or c.s3_bucket]
 
+        progress_dialog = DeleteProgressDialog(self.root)
         result: list = [None]
 
+        def _progress_cb(current: int, total: int, name: str) -> None:
+            # Fired from the worker thread — DeleteProgressDialog.update
+            # handles the marshalling onto the Tk main thread.
+            progress_dialog.update(current, total, name)
+
         def _do_delete():
-            result[0] = delete_profile_backups(profile.name, configs)
+            try:
+                result[0] = delete_profile_backups(
+                    profile.name,
+                    configs,
+                    progress_callback=_progress_cb,
+                )
+            except Exception as e:  # pragma: no cover — defensive
+                # Unexpected blow-up at the engine level: surface it
+                # via the same result tuple shape so the polling loop
+                # can clean up the dialog and report.
+                logger.exception("delete_profile_backups raised")
+                result[0] = (0, [str(e)])
 
         def _poll():
             if result[0] is None:
                 self.root.after(200, _poll)
                 return
             deleted, errors = result[0]
+            # Snap the bar to 100 % and schedule the dialog auto-close.
+            progress_dialog.complete()
             for err in errors:
                 logger.warning("Backup deletion error: %s", err)
-            if errors:
-                messagebox.showwarning(
-                    "Partial cleanup",
-                    f"Deleted {deleted} backup(s) but {len(errors)} "
-                    f"error(s) occurred.\nCheck logs for details.",
-                )
-            self._finalize_profile_deletion(profile)
+            # Defer the user-visible warning + finalisation until AFTER
+            # the dialog has finished its closing animation, otherwise
+            # the messagebox steals focus while the modal is still
+            # visible underneath and looks like a stacking glitch.
+            self.root.after(
+                progress_dialog._COMPLETION_HOLD_MS + 50,
+                self._finish_delete_profile_backups,
+                profile,
+                deleted,
+                errors,
+            )
 
         threading.Thread(target=_do_delete, daemon=True, name="DeleteBackups").start()
         self.root.after(200, _poll)
+
+    def _finish_delete_profile_backups(
+        self,
+        profile: BackupProfile,
+        deleted: int,
+        errors: list[str],
+    ) -> None:
+        """Final step after the progress dialog has closed.
+
+        Shows the partial-cleanup warning if any backend failed, then
+        finalises the profile config removal. Split out from
+        ``_delete_profile_backups_async`` so the deferred ``after``
+        callback has a stable, named target.
+        """
+        if errors:
+            messagebox.showwarning(
+                "Partial cleanup",
+                f"Deleted {deleted} backup(s) but {len(errors)} "
+                f"error(s) occurred.\nCheck logs for details.",
+            )
+        self._finalize_profile_deletion(profile)
 
     def _clear_tabs(self):
         """Reset all tabs to empty/default state after profile deletion."""

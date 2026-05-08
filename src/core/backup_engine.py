@@ -168,68 +168,81 @@ def create_backend(storage: StorageConfig) -> StorageBackend:
     return builder(storage)
 
 
-def _delete_matching_backups(
-    backend: StorageBackend,
-    prefix: str,
-    progress_callback: Callable[[str], None] | None = None,
-) -> tuple[int, list[str]]:
-    """Delete backups matching a profile prefix on a single backend.
-
-    Args:
-        backend: Storage backend to clean.
-        prefix: Profile name prefix (e.g. "MyProfile_").
-        progress_callback: Optional callback for status messages.
-
-    Returns:
-        Tuple of (deleted_count, error_messages).
-    """
-    deleted = 0
-    errors: list[str] = []
-    backups = backend.list_backups()
-    matching = [b for b in backups if b["name"].startswith(prefix)]
-
-    for backup in matching:
-        name = backup["name"]
-        try:
-            backend.delete_backup(name)
-            deleted += 1
-            if progress_callback:
-                progress_callback(f"Deleted {name}")
-        except Exception as e:
-            errors.append(f"{name}: {e}")
-            logger.warning("Failed to delete %s: %s", name, e)
-
-    return deleted, errors
-
-
 def delete_profile_backups(
     profile_name: str,
     storage_configs: list[StorageConfig],
-    progress_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[int, list[str]]:
     """Delete all backups created by a profile across all destinations.
+
+    Operates in two passes so the optional ``progress_callback`` can
+    drive a determinate progress bar:
+
+    1. Enumerate matching backups across every reachable backend
+       (``list_backups`` per backend, filter by prefix).  Backends that
+       fail to list are skipped silently and their share of the total
+       is omitted; the failure surfaces in the returned error list.
+    2. Delete each matching backup. Before each ``delete_backup`` call
+       the callback is invoked with ``(current, total, name)`` so the
+       UI can paint a 0..total bar instead of an indeterminate
+       "deleting…" placeholder.
 
     Args:
         profile_name: Human-readable profile name.
         storage_configs: List of storage configurations to clean.
-        progress_callback: Optional callback for status messages.
+        progress_callback: Optional callable receiving
+            ``(current, total, name)`` where ``current`` is the 1-based
+            index of the backup being deleted across all destinations
+            and ``total`` is the precomputed grand total.
 
     Returns:
         Tuple of (total_deleted, error_messages).
     """
     prefix = sanitize_profile_name(profile_name) + "_"
-    total_deleted = 0
+
+    # Pass 1: build a flat plan of (backend, name) pairs across all
+    # configs. Listing failures are recorded but do not abort — a
+    # mirror that is offline should not block primary cleanup.
+    plan: list[tuple[StorageBackend, str]] = []
     all_errors: list[str] = []
 
     for config in storage_configs:
         try:
             backend = create_backend(config)
-            deleted, errors = _delete_matching_backups(backend, prefix, progress_callback)
-            total_deleted += deleted
-            all_errors.extend(errors)
+            backups = backend.list_backups()
         except Exception as e:
             all_errors.append(f"{config.storage_type.value}: {e}")
-            logger.warning("Backend error during cleanup: %s", e)
+            logger.warning("Backend listing error during cleanup: %s", e)
+            continue
+
+        for backup in backups:
+            name = backup.get("name", "")
+            if name.startswith(prefix):
+                plan.append((backend, name))
+
+    total = len(plan)
+    total_deleted = 0
+    current = 0
+
+    # Pass 2: delete with progress reporting.  ``progress_callback`` is
+    # called BEFORE the actual delete so the UI shows the file that is
+    # currently being processed (matches user expectation of "Deleting
+    # X" rather than the just-finished name).
+    for backend, name in plan:
+        current += 1
+        if progress_callback is not None:
+            try:
+                progress_callback(current, total, name)
+            except Exception as cb_err:
+                # A misbehaving callback (Tk shutdown, etc.) must not
+                # abort the deletion sweep — log and keep going.
+                logger.debug("delete progress_callback raised: %s", cb_err)
+        try:
+            backend.delete_backup(name)
+            total_deleted += 1
+        except Exception as e:
+            all_errors.append(f"{name}: {e}")
+            logger.warning("Failed to delete %s: %s", name, e)
 
     return total_deleted, all_errors
 

@@ -7,8 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [3.3.16] - 2026-05-08
 
+### Added
+- Live progress dialog when deleting a profile's backups. The previous flow closed the "Also delete all backups?" confirmation immediately on Yes and ran the sweep silently on a background thread, leaving the user with no way to know whether the app was working or had hung. The new modal keeps a determinate 0..N progress bar visible — ``delete_profile_backups`` now pre-counts matches across every reachable destination so the bar can be accurately driven — and shows the backup name currently being processed. The dialog auto-closes 500 ms after the last delete (the brief 100 % hold gives the user a chance to register the success state before the modal vanishes). The OS close button is neutralised while the sweep runs so a stray click cannot orphan the worker thread mid-deletion.
+
 ### Fixed
 - Backup throughput collapsed to ~7 MB/s on external USB SSDs (Samsung T7 and similar) because the new single-pass `copy_and_hash` introduced in 3.3.15 was reading/writing in 128 KiB chunks (`HASH_CHUNK_SIZE`). The 128 KiB value was inherited from the old read-only `compute_sha256` helper, where it was fine; once the same constant drove the write side too, the syscall overhead dominated and capped the USB pipe well below its native ~500 MB/s. Bumped to **4 MiB** — matches the buffer size SSDs/USB devices saturate on, and SHA-256 absorbs the larger chunks without CPU penalty. Restores 3.3.14-class throughput while preserving the anti-TOCTOU single-pass guarantee.
+
+### Changed
+- ``delete_profile_backups`` signature: ``progress_callback`` is now ``Callable[[int, int, str], None]`` (current, total, name) instead of ``Callable[[str], None]`` (status string). Existing callers were already passing ``None`` so this change is invisible outside of tests; the new shape is what makes the determinate progress bar above possible.
 
 ## [3.3.15] - 2026-05-08
 

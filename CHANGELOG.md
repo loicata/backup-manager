@@ -5,6 +5,11 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.16] - 2026-05-08
+
+### Fixed
+- Backup throughput collapsed to ~7 MB/s on external USB SSDs (Samsung T7 and similar) because the new single-pass `copy_and_hash` introduced in 3.3.15 was reading/writing in 128 KiB chunks (`HASH_CHUNK_SIZE`). The 128 KiB value was inherited from the old read-only `compute_sha256` helper, where it was fine; once the same constant drove the write side too, the syscall overhead dominated and capped the USB pipe well below its native ~500 MB/s. Bumped to **4 MiB** — matches the buffer size SSDs/USB devices saturate on, and SHA-256 absorbs the larger chunks without CPU penalty. Restores 3.3.14-class throughput while preserving the anti-TOCTOU single-pass guarantee.
+
 ## [3.3.15] - 2026-05-08
 
 ### Added

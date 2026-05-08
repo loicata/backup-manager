@@ -12,7 +12,18 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-HASH_CHUNK_SIZE: int = 128 * 1024  # 128 KiB
+# 4 MiB matches the buffer size most efficient for sustained
+# SSD/USB throughput. ``shutil.copy2`` uses 1 MiB internally on
+# Windows; we go a bit larger because SHA-256 absorbs big chunks
+# without CPU penalty (~500 MB/s on a modern desktop core) and
+# fewer Python-loop iterations means fewer syscall round-trips on
+# external SSDs. The previous 128 KiB value was inherited from the
+# old read-only ``compute_sha256`` helper, where it was fine; once
+# ``copy_and_hash`` started feeding the same chunk into a write,
+# 128 KiB became the bottleneck and capped backup throughput at
+# ~7 MB/s on a Samsung T7 USB SSD (vs 50+ MB/s in 3.3.14, which
+# went through ``shutil.copy2``).
+HASH_CHUNK_SIZE: int = 4 * 1024 * 1024  # 4 MiB
 
 
 def _long_path(p: Path) -> str:

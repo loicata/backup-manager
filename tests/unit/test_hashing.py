@@ -93,11 +93,19 @@ class TestComputeSha256:
 
 
 class TestHashChunkSize:
-    """Verify the chunk size constant."""
+    """Verify the chunk size constant.
 
-    def test_chunk_size_is_128kb(self) -> None:
-        """HASH_CHUNK_SIZE is 128 KiB."""
-        assert HASH_CHUNK_SIZE == 128 * 1024
+    The chunk size matters for write throughput: ``copy_and_hash``
+    feeds each chunk into both ``hashlib`` and the destination's
+    ``open(..., "wb").write``, so a too-small chunk caps USB/SSD
+    throughput by syscall overhead. 4 MiB is large enough to saturate
+    consumer-grade external SSDs and small enough to keep the
+    rolling buffer cheap on memory-constrained machines.
+    """
+
+    def test_chunk_size_is_4mib(self) -> None:
+        """HASH_CHUNK_SIZE is 4 MiB (matches sustained-throughput sweet spot)."""
+        assert HASH_CHUNK_SIZE == 4 * 1024 * 1024
 
 
 class TestCopyAndHash:

@@ -7,10 +7,39 @@ a new full only if the interrupted backup was a full.
 
 import json
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from src.core.backup_result import BackupResult
 from src.core.config import BackupProfile, BackupType, ConfigManager
 from src.core.events import EventBus
+from src.core.phases.commit_marker import write_commit_marker
+
+# Stable test HMAC key — see commit_marker tests for rationale.
+_TEST_KEY = b"\x55" * 32
+
+
+@pytest.fixture(autouse=True)
+def _patch_hmac_key():
+    """Avoid touching the real DPAPI-wrapped HMAC key during tests."""
+    with patch(
+        "src.core.phases.commit_marker.get_app_hmac_key",
+        return_value=_TEST_KEY,
+    ):
+        yield
+
+
+def _stamp_committed(backup_dir: Path) -> None:
+    """Mark a fake backup as committed so list_backups returns it."""
+    write_commit_marker(
+        backup_path=backup_dir,
+        manifest_sha256="a" * 64,
+        files_count=1,
+        destination_label="storage",
+        writer_version="3.3.14",
+    )
 
 
 class TestLastBackupCompletedFlag:
@@ -239,10 +268,15 @@ class TestForceFullAfterInterrupt:
         from src.core.backup_engine import BackupEngine
         from src.core.config import StorageConfig, StorageType, compute_profile_hash
 
-        # Create a valid local destination with a fake full backup
+        # Create a valid local destination with a fake full backup.
+        # Stamp it with a commit marker so list_backups treats it as
+        # complete (otherwise the orphan-aware list_backups returns
+        # nothing and _any_destination_missing_full forces a full).
         backups_dir = tmp_config_dir / "backups"
         backups_dir.mkdir()
-        (backups_dir / "Test_FULL_2026-01-01_000000").mkdir()
+        fake_full = backups_dir / "Test_FULL_2026-01-01_000000"
+        fake_full.mkdir()
+        _stamp_committed(fake_full)
 
         profile = BackupProfile(
             name="Test",
@@ -406,8 +440,11 @@ class TestMarkCompletedPersistence:
         manifest_path = mgr.get_manifest_path(reloaded.id)
         manifest_path.write_text("{}", encoding="utf-8")
 
-        # Create a fake full backup so destination check passes
-        (backups_dir / "E2E_FULL_2026-01-01_000000").mkdir()
+        # Create a fake full backup so destination check passes,
+        # stamped with a commit marker so list_backups returns it.
+        fake_full = backups_dir / "E2E_FULL_2026-01-01_000000"
+        fake_full.mkdir()
+        _stamp_committed(fake_full)
 
         reloaded.profile_hash = compute_profile_hash(reloaded)
         ctx2 = self._make_ctx(reloaded, mgr)

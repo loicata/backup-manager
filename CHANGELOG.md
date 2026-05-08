@@ -5,6 +5,25 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.15] - 2026-05-08
+
+### Added
+- Commit-marker module (`.wbcommit`) — destination-side proof of completeness. Each backup is now sealed with a small HMAC-signed JSON sidecar that binds the marker to the backup's `.wbverify` checksum and to the local install's DPAPI-wrapped HMAC key. The presence of a *valid* `.wbcommit` is the **sole authority** for whether a backup on a destination is restorable; without one, the backup is treated as orphaned. Defeats marker transposition (lifting a marker from backup A onto backup B fails the manifest-binding check) and forged markers (signed by a different key are rejected).
+- Phase 0 orphan scan — at the start of every run, deletes any backup that lacks a valid commit marker on every reachable destination (primary + mirrors). Skips legacy backends that don't expose `list_orphan_backups` and Object-Lock buckets (the bucket lifecycle rule reclaims those).
+- Phase 6.5 commit primary + per-mirror commit phase — write/upload the `.wbcommit` only after the corresponding `.wbverify` has been validated, so a destination that fails verification stays orphan-tagged.
+- `LocalStorage.list_orphan_backups()` — drives the phase-0 scan for local destinations.
+- `copy_and_hash()` in `src/core/hashing.py` — single-pass SHA-256 + copy that defeats the manifest→write TOCTOU window: source files mutated between hash and write would otherwise produce a manifest that doesn't match what landed on disk.
+- `prune_manifest_entries()` + `skipped_files` recording — when a file vanishes between hash and write, the manifest now removes the entry AND records it under `skipped_files` so the verifier and UI can surface the data loss instead of hiding it behind a recomputed checksum.
+- `_best_effort_cleanup` and backup-type rollback sentinel — partial backups are reclaimed immediately on the failure path of `run_backup`; a forced-FULL promotion that crashes mid-run never permanently strands the profile in FULL mode.
+
+### Fixed
+- Blank main window after clicking "Show window" from the system tray — `pystray` invokes its menu callbacks from a daemon thread, and the previous wiring called `root.deiconify()` / widget mutation directly from that thread. Tk is not thread-safe, so the call sometimes raced with the Tk render loop and produced an empty white window with no widgets. All three tray callbacks (`Show window`, `Run backup now`, `Exit`) now marshal onto the Tk main thread via `root.after(0, ...)` before touching any widget state. Regression test in `tests/unit/test_tray_main_thread_marshalling.py`.
+- Test-suite memory leak that hard-crashed the developer machine — `tests/test_manifest_upload.py::TestSFTPDownloadManifest::test_download_raises_when_existing_dst_cannot_be_cleared` patched `shutil.rmtree` while the SFTP code path uses `safe_remove_tree` (`os.unlink`/`os.rmdir` directly). The patch was inert, the cleanup succeeded, and the test then ran `_tar_stream_download` against an unconfigured `MagicMock` SFTP transport — that call grew the Python process to 5+ GB of virtual memory in 20 s and saturated the pagefile, freezing the system. The test now stubs `safe_remove_tree` to return a `RemoveResult` with residuals, exercising the intended error branch in 1 s and 58 MB. Full suite peak memory dropped from >8 GB (crash) to 215 MB.
+
+### Tests
+- 125 new tests added across four files: `tests/unit/test_manifest_pruning.py` (17), `tests/unit/test_s3_auto_detect.py` (50), `tests/test_backup_engine_phases.py` (42), and `tests/unit/test_bandwidth_tester.py` (+16 covering `_RandomStream`, `_remote_sync`, Object-Lock guard, fall-back paths).
+- Coverage 85 % → 90 %. Modules formerly below the 80 % gate (`s3_setup.py` 50 %, `bandwidth_tester.py` 71 %, `backup_engine.py` 73 %, `manifest.py` 79 %) now sit at 91 %, 99 %, 80 %, and 100 % respectively.
+
 ## [3.3.6] - 2026-04-18
 
 ### Fixed

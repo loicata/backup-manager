@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import BinaryIO
 
 from src.core.exceptions import StorageDeleteError
+from src.core.phases.commit_marker import (
+    COMMIT_MARKER_SUFFIX,
+    is_backup_committed,
+)
 from src.storage._fs_utils import RemoveResult, safe_remove_tree
 from src.storage.base import StorageBackend
 
@@ -129,23 +133,25 @@ class LocalStorage(StorageBackend):
             raise
 
     def list_backups(self) -> list[dict]:
-        """List backups in the destination directory."""
+        """List backups in the destination directory.
+
+        Only backups with a valid ``.wbcommit`` marker are returned.
+        The marker is written by the pipeline after the destination has
+        passed verification, so its presence is the sole authority for
+        whether a backup is complete and restorable. Anything without
+        a valid marker is an orphan (interrupted write, failed verify,
+        marker tampered with, foreign artefact) and is invisible here
+        — it will be cleaned up by the orphan scan at the start of the
+        next pipeline run.
+        """
         if not self._dest.exists():
             return []
 
         backups = []
         for entry in self._dest.iterdir():
-            if entry.name.startswith("."):
+            if not self._is_backup_candidate(entry):
                 continue
-            if entry.name.startswith("$"):
-                continue
-            if entry.suffix == ".wbverify":
-                continue
-            if entry.name.endswith(".partial"):
-                # Leftover from an interrupted encrypted-tar write;
-                # never expose it as a usable backup.
-                continue
-            if entry.name in SYSTEM_FOLDERS:
+            if not is_backup_committed(entry):
                 continue
             stat = entry.stat()
             if entry.is_dir():
@@ -164,16 +170,83 @@ class LocalStorage(StorageBackend):
 
         return sorted(backups, key=lambda b: b["modified"], reverse=True)
 
+    def list_orphan_backups(self) -> list[dict]:
+        """List backup-like entries WITHOUT a valid ``.wbcommit``.
+
+        Used by the orphan scan at the start of each pipeline run to
+        identify and delete leftovers from interrupted writes, failed
+        verifications, or foreign artefacts on shared destinations.
+        Entries that look like backups (correctly named, not system
+        folders, not metadata files) but have no commit marker are
+        returned here.
+
+        Returns:
+            Same dict shape as ``list_backups``, but for entries
+            classified as orphans.
+        """
+        if not self._dest.exists():
+            return []
+
+        orphans = []
+        for entry in self._dest.iterdir():
+            if not self._is_backup_candidate(entry):
+                continue
+            if is_backup_committed(entry):
+                continue
+            stat = entry.stat()
+            if entry.is_dir():
+                total_size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+            else:
+                total_size = stat.st_size
+
+            orphans.append(
+                {
+                    "name": entry.name,
+                    "size": total_size,
+                    "modified": stat.st_mtime,
+                    "is_dir": entry.is_dir(),
+                }
+            )
+        return sorted(orphans, key=lambda b: b["modified"], reverse=True)
+
+    @staticmethod
+    def _is_backup_candidate(entry: Path) -> bool:
+        """Filter out non-backup filesystem noise.
+
+        Excludes hidden files, the ``$RECYCLE.BIN``-style system
+        folders, ``.partial`` artefacts from interrupted writes,
+        sidecar metadata (``.wbverify``, ``.wbcommit``, ``.wbcommit.tmp``).
+        Everything else is a candidate backup whose validity will be
+        decided by the presence of a valid commit marker.
+        """
+        if entry.name.startswith("."):
+            return False
+        if entry.name.startswith("$"):
+            return False
+        if entry.suffix == ".wbverify":
+            return False
+        if entry.name.endswith(COMMIT_MARKER_SUFFIX):
+            return False
+        if entry.name.endswith(COMMIT_MARKER_SUFFIX + ".tmp"):
+            return False
+        if entry.name.endswith(".partial"):
+            return False
+        return entry.name not in SYSTEM_FOLDERS
+
     def delete_backup(self, remote_name: str) -> None:
-        """Delete a backup and its associated .wbverify manifest.
+        """Delete a backup and its sidecar metadata.
+
+        Removes the backup itself, the ``.wbverify`` manifest, the
+        ``.wbcommit`` marker, and any leftover ``.wbcommit.tmp``
+        from an interrupted commit-marker write. All deletes use the
+        same robust helper so a single stuck handle on any sidecar
+        does not leave the destination half-cleaned.
 
         Raises:
             FileNotFoundError: If the backup does not exist.
-            StorageDeleteError: If the removal left any residual files
-                or directories (long-path failure, file-system lock
-                that survived retries, etc.). The rotator inspects the
-                residuals to log a structured failure instead of
-                marking the rotation as successful.
+            StorageDeleteError: If any removal leaves residual files
+                or directories (long-path failure, FS lock that
+                survived retries, etc.).
         """
         target = self._dest / remote_name
         if not target.exists():
@@ -186,18 +259,24 @@ class LocalStorage(StorageBackend):
 
         logger.info("Deleted backup: %s", remote_name)
 
-        # Remove associated integrity manifest if present. We use the
-        # same helper for symmetry — a stale lock on the manifest is
-        # rare but would otherwise leave an orphan .wbverify file.
-        verify_file = self._dest / f"{remote_name}.wbverify"
-        if verify_file.exists():
-            verify_result = safe_remove_tree(verify_file)
-            if not verify_result.success:
-                _log_residuals(str(verify_file), verify_result)
-                raise StorageDeleteError(
-                    f"{remote_name}.wbverify", verify_result.residuals
-                )
-            logger.info("Deleted manifest: %s.wbverify", remote_name)
+        # Remove sidecar metadata: ``.wbverify`` (manifest),
+        # ``.wbcommit`` (commit marker), and any stray ``.wbcommit.tmp``
+        # left by an interrupted commit-marker write. A miss on any
+        # of these is non-fatal (file may simply not exist) — only
+        # an unsuccessful removal raises.
+        sidecars = [
+            self._dest / f"{remote_name}.wbverify",
+            self._dest / f"{remote_name}{COMMIT_MARKER_SUFFIX}",
+            self._dest / f"{remote_name}{COMMIT_MARKER_SUFFIX}.tmp",
+        ]
+        for sidecar in sidecars:
+            if not sidecar.exists():
+                continue
+            sidecar_result = safe_remove_tree(sidecar)
+            if not sidecar_result.success:
+                _log_residuals(str(sidecar), sidecar_result)
+                raise StorageDeleteError(sidecar.name, sidecar_result.residuals)
+            logger.info("Deleted sidecar: %s", sidecar.name)
 
     def test_connection(self) -> tuple[bool, str]:
         """Check if the destination is accessible and writable.

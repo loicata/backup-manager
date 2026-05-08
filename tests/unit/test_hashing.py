@@ -1,11 +1,12 @@
 """Tests for src.core.hashing — SHA-256 file hashing utility."""
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
-from src.core.hashing import HASH_CHUNK_SIZE, compute_sha256
+from src.core.hashing import HASH_CHUNK_SIZE, compute_sha256, copy_and_hash
 
 
 class TestComputeSha256:
@@ -97,3 +98,134 @@ class TestHashChunkSize:
     def test_chunk_size_is_128kb(self) -> None:
         """HASH_CHUNK_SIZE is 128 KiB."""
         assert HASH_CHUNK_SIZE == 128 * 1024
+
+
+class TestCopyAndHash:
+    """Single-pass copy + hash that defeats manifest→write TOCTOU."""
+
+    def test_destination_bytes_match_source(self, tmp_path: Path) -> None:
+        """Trivial round-trip: copied bytes equal source bytes."""
+        src = tmp_path / "src.bin"
+        dst = tmp_path / "dst.bin"
+        src.write_bytes(b"hello world\n" * 100)
+
+        copy_and_hash(src, dst)
+        assert dst.read_bytes() == src.read_bytes()
+
+    def test_returned_hash_matches_source_content(self, tmp_path: Path) -> None:
+        """Hash returned equals SHA-256 of the bytes that landed on dst."""
+        src = tmp_path / "src.bin"
+        dst = tmp_path / "dst.bin"
+        content = b"some content here"
+        src.write_bytes(content)
+
+        h = copy_and_hash(src, dst)
+        assert h == hashlib.sha256(content).hexdigest()
+        assert h == hashlib.sha256(dst.read_bytes()).hexdigest()
+
+    def test_empty_file_round_trip(self, tmp_path: Path) -> None:
+        """Empty source produces empty dest and SHA-256 of empty bytes."""
+        src = tmp_path / "empty.bin"
+        dst = tmp_path / "empty_dst.bin"
+        src.write_bytes(b"")
+
+        h = copy_and_hash(src, dst)
+        assert dst.read_bytes() == b""
+        assert h == hashlib.sha256(b"").hexdigest()
+
+    def test_large_file_spans_chunks(self, tmp_path: Path) -> None:
+        """Files > HASH_CHUNK_SIZE are streamed correctly."""
+        src = tmp_path / "big.bin"
+        dst = tmp_path / "big_dst.bin"
+        # Use deterministic-but-non-uniform content so any off-by-one
+        # in chunk boundaries surfaces as a hash mismatch.
+        content = bytes(range(256)) * (HASH_CHUNK_SIZE // 256 + 1) * 3
+        src.write_bytes(content)
+
+        h = copy_and_hash(src, dst)
+        assert dst.read_bytes() == content
+        assert h == hashlib.sha256(content).hexdigest()
+
+    def test_preserves_mtime(self, tmp_path: Path) -> None:
+        """copystat-equivalent: destination mtime tracks source."""
+        src = tmp_path / "stat_src.txt"
+        dst = tmp_path / "stat_dst.txt"
+        src.write_text("hello", encoding="utf-8")
+        target_mtime = 1_400_000_000.0  # 2014-05-13 in UTC, well in the past
+        os.utime(src, (target_mtime, target_mtime))
+
+        copy_and_hash(src, dst)
+        # NTFS truncates mtime to ~100ns; allow a small tolerance.
+        assert abs(dst.stat().st_mtime - target_mtime) < 1.0
+
+    def test_hash_matches_compute_sha256_for_same_file(self, tmp_path: Path) -> None:
+        """copy_and_hash on src is equivalent to compute_sha256 on src."""
+        src = tmp_path / "compare.bin"
+        dst = tmp_path / "compare_dst.bin"
+        src.write_bytes(b"compare me" * 200)
+
+        h_combined = copy_and_hash(src, dst)
+        h_separate = compute_sha256(src)
+        assert h_combined == h_separate
+
+    def test_overwrites_existing_destination(self, tmp_path: Path) -> None:
+        """If dst already exists with different content, it is replaced."""
+        src = tmp_path / "src.bin"
+        dst = tmp_path / "dst.bin"
+        src.write_bytes(b"new content")
+        dst.write_bytes(b"old content that is longer than the new")
+
+        copy_and_hash(src, dst)
+        assert dst.read_bytes() == b"new content"
+
+    def test_missing_source_raises(self, tmp_path: Path) -> None:
+        """Source absent → FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            copy_and_hash(tmp_path / "ghost.bin", tmp_path / "out.bin")
+
+    def test_directory_source_raises(self, tmp_path: Path) -> None:
+        """Directory source → ValueError."""
+        d = tmp_path / "dir"
+        d.mkdir()
+        with pytest.raises(ValueError, match="directory"):
+            copy_and_hash(d, tmp_path / "out.bin")
+
+    def test_rejects_non_path_arguments(self, tmp_path: Path) -> None:
+        """str/None inputs are TypeErrors, not silent stringification."""
+        f = tmp_path / "f.bin"
+        f.write_bytes(b"x")
+        with pytest.raises(TypeError, match="src_path"):
+            copy_and_hash(str(f), tmp_path / "out.bin")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="dst_path"):
+            copy_and_hash(f, str(tmp_path / "out.bin"))  # type: ignore[arg-type]
+
+    def test_returns_hex_lowercase_64(self, tmp_path: Path) -> None:
+        """Output format contract — lowercase, 64 hex chars."""
+        src = tmp_path / "fmt.bin"
+        dst = tmp_path / "fmt_dst.bin"
+        src.write_bytes(b"abc")
+
+        h = copy_and_hash(src, dst)
+        assert len(h) == 64
+        assert all(c in "0123456789abcdef" for c in h)
+
+    def test_hash_reflects_destination_bytes_not_a_second_source_read(self, tmp_path: Path) -> None:
+        """The returned hash is for the bytes that were actually written.
+
+        This is the TOCTOU-defeating property: we never re-read the
+        source after copying. Demonstrate by mutating the source after
+        the call — the hash returned was for the original bytes (what
+        we wrote), and that's still what lives on disk at ``dst``.
+        """
+        src = tmp_path / "moving.bin"
+        dst = tmp_path / "moving_dst.bin"
+        original = b"first version"
+        src.write_bytes(original)
+
+        h = copy_and_hash(src, dst)
+        # Mutate source AFTER the call.
+        src.write_bytes(b"mutated content that is unrelated")
+
+        # The hash returned is for what we wrote, which is still on dst.
+        assert h == hashlib.sha256(original).hexdigest()
+        assert dst.read_bytes() == original

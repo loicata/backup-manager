@@ -236,6 +236,25 @@ def _compute_hmac(data: str) -> str:
     return hmac.new(key, data.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def get_app_hmac_key() -> bytes:
+    """Public accessor for the per-install HMAC key.
+
+    Returns the same 32-byte key used to sign ``app_checksums.json``.
+    Reused by other on-disk integrity artefacts (notably the
+    ``.wbcommit`` markers written next to backups) so every signed
+    artefact on this machine binds to a single secret that a malware
+    process running as the user still needs to unwrap via DPAPI to
+    forge.
+
+    Returns:
+        Raw 32-byte key.
+
+    Raises:
+        OSError: if neither DPAPI nor a fallback key file is available.
+    """
+    return _get_hmac_key()
+
+
 def save_checksums() -> None:
     """Compute and save checksums with HMAC signature."""
     checksums = compute_checksums()

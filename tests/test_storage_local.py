@@ -3,13 +3,46 @@
 import io
 import stat
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from src.core.exceptions import StorageDeleteError
+from src.core.phases.commit_marker import write_commit_marker
 from src.storage import _fs_utils
 from src.storage._fs_utils import RemoveResult, Residual
 from src.storage.local import SYSTEM_FOLDERS, LocalStorage
+
+# A fixed HMAC key for tests so they don't touch the real DPAPI-wrapped
+# user key. Must be applied at every callsite of get_app_hmac_key —
+# both the original definition and the alias imported by commit_marker.
+_TEST_KEY = b"\x77" * 32
+
+
+@pytest.fixture(autouse=True)
+def _patch_hmac_key():
+    """Prevent tests from reading the real on-disk HMAC key."""
+    with patch(
+        "src.core.phases.commit_marker.get_app_hmac_key",
+        return_value=_TEST_KEY,
+    ):
+        yield
+
+
+def _commit(dest: Path, name: str) -> None:
+    """Stamp a backup as committed by writing a valid ``.wbcommit``.
+
+    Tests that exercise ``list_backups`` need their backups to look
+    completed end-to-end — without a marker, the new ``list_backups``
+    contract treats them as orphans and hides them.
+    """
+    write_commit_marker(
+        backup_path=dest / name,
+        manifest_sha256="a" * 64,
+        files_count=1,
+        destination_label="storage",
+        writer_version="3.3.14",
+    )
 
 
 class TestLocalStorage:
@@ -49,6 +82,7 @@ class TestLocalStorage:
         src = tmp_path / "file.txt"
         src.write_text("data", encoding="utf-8")
         storage.upload(src, "backup1.txt")
+        _commit(Path(storage._dest), "backup1.txt")
 
         backups = storage.list_backups()
         assert len(backups) == 1
@@ -60,6 +94,7 @@ class TestLocalStorage:
         dest = Path(storage._dest)
         (dest / "Prof_FULL_2026-04-16_120000.tar.wbenc").write_bytes(b"ok")
         (dest / "Prof_FULL_2026-04-16_130000.tar.wbenc.partial").write_bytes(b"junk")
+        _commit(dest, "Prof_FULL_2026-04-16_120000.tar.wbenc")
 
         backups = storage.list_backups()
         names = {b["name"] for b in backups}
@@ -72,6 +107,7 @@ class TestLocalStorage:
             src = tmp_path / name
             src.write_text(name, encoding="utf-8")
             storage.upload(src, name)
+            _commit(Path(storage._dest), name)
             time.sleep(0.1)
 
         backups = storage.list_backups()
@@ -156,6 +192,7 @@ class TestLocalStorage:
     def test_hidden_files_excluded_from_list(self, storage):
         (Path(storage._dest) / ".hidden").write_text("hidden", encoding="utf-8")
         (Path(storage._dest) / "visible.txt").write_text("visible", encoding="utf-8")
+        _commit(Path(storage._dest), "visible.txt")
         backups = storage.list_backups()
         names = [b["name"] for b in backups]
         assert "visible.txt" in names
@@ -167,6 +204,7 @@ class TestLocalStorage:
             (Path(storage._dest) / folder).mkdir(exist_ok=True)
         (Path(storage._dest) / "real_backup").mkdir()
         (Path(storage._dest) / "real_backup" / "file.txt").write_text("ok", encoding="utf-8")
+        _commit(Path(storage._dest), "real_backup")
 
         backups = storage.list_backups()
         names = [b["name"] for b in backups]
@@ -178,6 +216,7 @@ class TestLocalStorage:
         """Folders starting with $ (e.g. $RECYCLE.BIN) must be excluded."""
         (Path(storage._dest) / "$SomeSystemDir").mkdir()
         (Path(storage._dest) / "valid_backup").mkdir()
+        _commit(Path(storage._dest), "valid_backup")
         backups = storage.list_backups()
         names = [b["name"] for b in backups]
         assert "valid_backup" in names
@@ -215,9 +254,7 @@ class TestLocalStorage:
         # Force safe_remove_tree to report a hard failure as if the
         # underlying file system refused to release a file.
         def fake_remove(path, **_kwargs):
-            return RemoveResult(
-                residuals=[Residual(path=str(path), error="OSError: simulated")]
-            )
+            return RemoveResult(residuals=[Residual(path=str(path), error="OSError: simulated")])
 
         monkeypatch.setattr(_fs_utils, "safe_remove_tree", fake_remove)
         # The local module imports the symbol directly, patch that too.

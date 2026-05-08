@@ -36,14 +36,22 @@ class TestLocalWriterDiskFull:
     """Disk-full errors during flat copy."""
 
     def test_copy2_enospc_raises_write_error(self, tmp_path):
-        """shutil.copy2 raises ENOSPC — WriteError raised immediately."""
+        """copy_and_hash raises ENOSPC — WriteError raised immediately.
+
+        The single-pass writer copies via ``copy_and_hash`` (so the
+        manifest hash is bound to the bytes actually written). The
+        ENOSPC injection point follows the writer's I/O path.
+        """
         from src.core.phases.local_writer import write_flat
 
         fi = _make_file_info(tmp_path)
         enospc = OSError(errno.ENOSPC, "No space left on device")
 
         with (
-            patch("src.core.phases.local_writer.shutil.copy2", side_effect=enospc),
+            patch(
+                "src.core.phases.local_writer.copy_and_hash",
+                side_effect=enospc,
+            ),
             pytest.raises(WriteError, match="file.txt") as exc_info,
         ):
             write_flat([fi], tmp_path / "dst", "bk1")

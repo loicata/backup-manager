@@ -6,6 +6,7 @@ connection errors, _verify_remote flat backup, and _build_backend.
 """
 
 import hashlib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,6 +21,30 @@ from src.core.integrity_verifier import (
     IntegrityVerifier,
     _build_backend,
 )
+from src.core.phases.commit_marker import write_commit_marker
+
+_TEST_KEY = b"\x66" * 32
+
+
+@pytest.fixture(autouse=True)
+def _patch_hmac_key():
+    """Avoid touching the real DPAPI-wrapped HMAC key during tests."""
+    with patch(
+        "src.core.phases.commit_marker.get_app_hmac_key",
+        return_value=_TEST_KEY,
+    ):
+        yield
+
+
+def _stamp(backup_dir: Path) -> None:
+    """Mark a fake backup as committed for list_backups visibility."""
+    write_commit_marker(
+        backup_path=backup_dir,
+        manifest_sha256="0" * 64,
+        files_count=1,
+        destination_label="storage",
+        writer_version="3.3.14",
+    )
 
 
 def _sha256(data: bytes) -> str:
@@ -466,9 +491,14 @@ class TestVerifyIterCancellation:
         """Cancellation during iteration stops processing backups."""
         dest = tmp_path / "backups"
         dest.mkdir()
-        # Create multiple backup dirs
-        (dest / "Test_FULL_2026-01-01_120000").mkdir()
-        (dest / "Test_FULL_2026-01-02_120000").mkdir()
+        # Create multiple backup dirs, both stamped as committed so
+        # the orphan-aware list_backups returns them.
+        b1 = dest / "Test_FULL_2026-01-01_120000"
+        b2 = dest / "Test_FULL_2026-01-02_120000"
+        b1.mkdir()
+        b2.mkdir()
+        _stamp(b1)
+        _stamp(b2)
 
         profile = BackupProfile(
             storage=StorageConfig(

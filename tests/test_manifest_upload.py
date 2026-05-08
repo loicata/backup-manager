@@ -627,9 +627,19 @@ class TestSFTPDownloadManifest:
             storage.download_backup("bk_01", tmp_path)
 
     def test_download_raises_when_existing_dst_cannot_be_cleared(self, tmp_path):
-        """Unclearable existing destination must fail loudly, not silently."""
+        """Unclearable existing destination must fail loudly, not silently.
+
+        The SFTP path uses ``safe_remove_tree`` (not ``shutil.rmtree``)
+        for cleanup, so the failure must be injected by stubbing
+        ``safe_remove_tree`` to return a ``RemoveResult`` with residuals.
+        Patching ``shutil.rmtree`` here would no-op: the fallback
+        ``_tar_stream_download`` then runs against unconfigured mocks
+        and explodes the process VM (>5 GB) before failing — that is
+        precisely the regression this test now guards against.
+        """
         import stat as stat_module
 
+        from src.storage._fs_utils import RemoveResult, Residual
         from src.storage.sftp import SFTPStorage
 
         storage = SFTPStorage(
@@ -649,13 +659,21 @@ class TestSFTPDownloadManifest:
         mock_transport = MagicMock()
         mock_transport.is_active.return_value = True
 
-        def _fail(*a, **kw):
-            raise PermissionError("file locked")
+        # Simulate a residual file that refused to delete — the
+        # contract is ``RemoveResult.success is False`` whenever
+        # ``residuals`` is non-empty, which triggers the OSError path.
+        fail_result = RemoveResult()
+        fail_result.residuals.append(
+            Residual(
+                path=str(tmp_path / "bk_01" / "stale.txt"),
+                error="PermissionError: file locked",
+            )
+        )
 
         with (
             patch.object(storage, "_get_transport", return_value=mock_transport),
             patch.object(storage, "_get_sftp", return_value=mock_sftp),
-            patch("shutil.rmtree", side_effect=_fail),
+            patch("src.storage.sftp.safe_remove_tree", return_value=fail_result),
             pytest.raises(OSError, match="Cannot clear existing download"),
         ):
             storage.download_backup("bk_01", tmp_path)

@@ -328,6 +328,7 @@ class BackupEngine:
             self._log("Backup cancelled by user")
             self._emit_status("idle")
             self._rollback_backup_type_on_failure(ctx, original_backup_type)
+            self._best_effort_cleanup(ctx)
             raise
 
         except Exception as e:
@@ -336,9 +337,76 @@ class BackupEngine:
             self._emit_status("error")
             self._events.emit(ERROR, exception=e, context="backup")
             self._rollback_backup_type_on_failure(ctx, original_backup_type)
+            self._best_effort_cleanup(ctx)
             raise
         finally:
             release(lock_path)
+
+    def _best_effort_cleanup(self, ctx: PipelineContext) -> None:
+        """Remove the partial backup that was just created, if possible.
+
+        Called from the ``except`` block of ``run_backup`` so disk
+        space is reclaimed immediately on the common case of a
+        recoverable failure (verify mismatch, network blip, cancel)
+        rather than waiting for the next run's orphan scan to do it.
+
+        This is **best-effort**: any error here is swallowed — the
+        original failure is what matters, and the persistent
+        ``incomplete_backup_name`` flag plus the orphan scan are the
+        safety nets that catch anything we cannot clean up here
+        (disk unmounted, S3 Object Lock, etc.).
+
+        Without a ``.wbcommit`` the backup is invisible to ``list_backups``
+        either way, so leaving the bytes on disk is correctness-safe;
+        the cleanup just frees space sooner.
+        """
+        # Without a backup_name there is nothing to delete.
+        backup_name = getattr(ctx, "backup_name", "")
+        if not backup_name:
+            return
+
+        # Primary destination
+        if ctx.backend is not None:
+            self._try_delete(ctx.backend, backup_name, "primary")
+            self._try_delete(ctx.backend, f"{backup_name}.tar.wbenc", "primary")
+
+        # Mirror destinations: each one might have its own backend.
+        for i, config in enumerate(ctx.profile.mirror_destinations):
+            try:
+                backend = self._get_backend(config)
+            except Exception:
+                continue
+            label = f"mirror {i + 1}"
+            self._try_delete(backend, backup_name, label)
+            self._try_delete(backend, f"{backup_name}.tar.wbenc", label)
+
+    @staticmethod
+    def _try_delete(backend, name: str, label: str) -> None:
+        """Best-effort backend delete that swallows every error.
+
+        Logs at INFO level on success so the cleanup is visible in
+        the run log; logs at DEBUG on FileNotFoundError (the artefact
+        was never created — common when the failure happened during
+        write of the very first file). All other errors get a single
+        WARNING line so they do not drown the original failure.
+        """
+        try:
+            backend.delete_backup(name)
+            logger.info("Best-effort cleanup: deleted %s on %s", name, label)
+        except FileNotFoundError:
+            logger.debug(
+                "Best-effort cleanup: nothing to delete (%s on %s)",
+                name,
+                label,
+            )
+        except Exception as e:
+            logger.warning(
+                "Best-effort cleanup failed for %s on %s: %s "
+                "(orphan scan will retry at next run)",
+                name,
+                label,
+                e,
+            )
 
     def _rollback_backup_type_on_failure(
         self,
@@ -484,15 +552,38 @@ class BackupEngine:
         # Tell the UI how many progress-emitting phases to expect
         self._emit_phase_count(ctx)
 
-        # Phase 3: Build integrity manifest
-        self._phase_integrity(ctx)
-
-        # Phase 4: Write backup
         ctx.backend = self._get_backend(ctx.profile.storage)
         ctx.backend.set_cancel_check(self._check_cancel)
         self._apply_bandwidth_throttle(ctx.backend, ctx.profile)
         self._apply_object_lock_retention(ctx)
-        self._phase_write(ctx)
+
+        # Phase 0: Scan and remove orphans (anything without a valid
+        # ``.wbcommit``) on every destination. This catches leftovers
+        # from failed runs that the synchronous best-effort cleanup
+        # could not delete (disk was unmounted, profile was edited,
+        # different machine), as well as foreign artefacts on shared
+        # destinations.
+        self._phase_orphan_scan(ctx)
+
+        # Phase 3 + 4 ordering depends on the destination:
+        #
+        # * LOCAL destinations (plain or encrypted): the writer hashes
+        #   each source file in the same pass it copies/streams it,
+        #   filling ``ctx.file_hashes``. The manifest phase then builds
+        #   ``ctx.integrity_manifest`` purely from those hashes
+        #   (cache-only, no second source read). This closes the
+        #   manifest→write TOCTOU window.
+        #
+        # * REMOTE destinations: the writer still consumes a pre-built
+        #   manifest (legacy path). The manifest phase therefore runs
+        #   FIRST and hashes the source. Closing the remote TOCTOU
+        #   requires hashing during upload — tracked as a follow-up.
+        if ctx.profile.storage.is_remote():
+            self._phase_integrity(ctx)
+            self._phase_write(ctx)
+        else:
+            self._phase_write(ctx)
+            self._phase_integrity(ctx)
         ctx.result.backup_path = str(ctx.backup_path or ctx.backup_remote_name)
 
         # Phase 5: Save integrity manifest
@@ -501,10 +592,17 @@ class BackupEngine:
         # Phase 6: Verify
         self._phase_verify(ctx)
 
+        # Phase 6.5: Commit marker for the primary destination.
+        # Writing the marker is the only way for ``list_backups`` and
+        # restore to recognise this backup as complete; running it
+        # AFTER verify guarantees the marker is never present on a
+        # backup that has not been integrity-checked end-to-end.
+        self._phase_commit_primary(ctx)
+
         # Phase 8: Update delta manifest
         self._phase_update_delta(ctx)
 
-        # Phase 9: Mirror
+        # Phase 9: Mirror (per-destination write + verify + commit)
         self._phase_mirror(ctx)
 
         # Phase 10: Verify mirrors
@@ -712,17 +810,38 @@ class BackupEngine:
             pass  # Path not accessible yet (USB not plugged, etc.)
 
     def _phase_integrity(self, ctx: PipelineContext) -> None:
-        """Phase 3: Build integrity manifest (hashing)."""
+        """Phase 3: Build integrity manifest (hashing).
+
+        For local destinations the writer phase has already populated
+        ``ctx.file_hashes`` with hashes computed from the bytes
+        actually written, so this phase becomes a pure aggregation —
+        no source files are read a second time. For remote
+        destinations the writer has not run yet and we fall back to
+        ``ctx.filter_hashes`` (differential mode) or a fresh source
+        hashing pass.
+        """
         self._phase("Building integrity manifest...")
         self._check_cancel()
+
+        # Prefer hashes captured by the writer (closes manifest→write
+        # TOCTOU on local destinations). Fall back to filter_hashes
+        # for differential runs when the writer hasn't run yet
+        # (remote path).
+        writer_hashes = getattr(ctx, "file_hashes", None) or {}
+        cached: dict[str, str] | None = writer_hashes or (
+            getattr(ctx, "filter_hashes", None) or None
+        )
+
         ctx.integrity_manifest = build_integrity_manifest(
             ctx.files,
             self._events,
             cancel_check=self._check_cancel,
-            cached_hashes=getattr(ctx, "filter_hashes", None),
+            cached_hashes=cached,
         )
 
-        # Cache file hashes for reuse in Phase 8 (delta manifest)
+        # Cache file hashes for reuse in Phase 8 (delta manifest).
+        # Re-export from the manifest so this remains correct whether
+        # the hashes came from the writer or from a fresh source pass.
         ctx.file_hashes = {
             rel_path: info["hash"]
             for rel_path, info in ctx.integrity_manifest.get("files", {}).items()
@@ -781,6 +900,161 @@ class BackupEngine:
                     message=message,
                     exception=e,
                 )
+
+    def _phase_orphan_scan(self, ctx: PipelineContext) -> None:
+        """Phase 0: Delete any backup without a valid ``.wbcommit``.
+
+        Called at the very start of every run, before write phases
+        consume disk space. Iterates over the primary destination and
+        every configured mirror, asking each backend for its orphan
+        list (``list_orphan_backups`` — backends that don't implement
+        it are skipped silently). Each orphan is delete-best-effort:
+        a single failure does not abort the scan or the run.
+
+        Skipped destinations:
+            * Backends that do not expose ``list_orphan_backups``
+              (legacy SFTP/S3 — they will be retrofitted).
+            * S3 Object Lock destinations: the lock prevents deletion
+              before retention expiry; the lifecycle rule on the
+              bucket reclaims those objects when they expire.
+        """
+        from src.core.config import StorageType
+
+        destinations: list[tuple[str, object, object]] = [
+            ("Storage", ctx.profile.storage, ctx.backend),
+        ]
+        for i, mirror_config in enumerate(ctx.profile.mirror_destinations):
+            try:
+                backend = self._get_backend(mirror_config)
+            except Exception as e:
+                logger.warning(
+                    "Orphan scan: cannot reach mirror %d backend (%s) " "— skipping",
+                    i + 1,
+                    e,
+                )
+                continue
+            destinations.append((f"Mirror {i + 1}", mirror_config, backend))
+
+        for label, config, backend in destinations:
+            # Object Lock buckets refuse delete before retention expiry;
+            # let the bucket lifecycle rule reclaim those orphans.
+            if config.storage_type == StorageType.S3 and getattr(config, "s3_object_lock", False):
+                continue
+
+            list_orphans = getattr(backend, "list_orphan_backups", None)
+            if list_orphans is None:
+                # Legacy backend — phase B will retrofit. Skip silently
+                # so the missing capability is not noisy at every run.
+                continue
+
+            try:
+                orphans = list_orphans()
+            except Exception as e:
+                logger.warning(
+                    "Orphan scan: list_orphan_backups failed on %s: %s",
+                    label,
+                    e,
+                )
+                continue
+
+            for orphan in orphans:
+                name = orphan["name"]
+                try:
+                    backend.delete_backup(name)
+                    self._log(
+                        f"Orphan removed on {label}: {name} " f"({orphan.get('size', 0):,} bytes)"
+                    )
+                except FileNotFoundError:
+                    # Concurrent removal — fine.
+                    pass
+                except Exception as e:
+                    logger.warning(
+                        "Orphan scan: failed to delete %s on %s: %s",
+                        name,
+                        label,
+                        e,
+                    )
+
+    def _phase_commit_primary(self, ctx: PipelineContext) -> None:
+        """Phase 6.5: Write commit marker for the primary destination.
+
+        The commit marker (``.wbcommit``) is the destination-side proof
+        that a backup is complete and integrity-verified. It is the
+        sole authority used by ``list_backups``, restore, and the
+        orphan scan to decide whether a backup is "real" or just
+        leftover bytes from a failed run.
+
+        Must run only after ``_phase_verify`` has succeeded. A failed
+        write/upload here is fatal: without a marker the backup is
+        invisible to the rest of the system and will be cleaned up at
+        the next run, which would silently lose the run that just
+        completed.
+
+        Raises:
+            RuntimeError: If the integrity manifest is missing the
+                ``total_checksum`` field (defensive — should never
+                happen if ``_phase_integrity`` ran).
+            OSError / Exception: If the marker write/upload fails;
+                the run is aborted before the profile is marked
+                completed.
+        """
+        from src.core.phases.commit_marker import (
+            DESTINATION_STORAGE,
+            build_commit_marker,
+            serialise_commit_marker,
+            write_commit_marker,
+        )
+
+        manifest_sha = ctx.integrity_manifest.get("total_checksum", "")
+        if not manifest_sha:
+            # Without the manifest checksum the marker would have
+            # nothing to bind to → an attacker could later swap the
+            # ``.wbverify`` and the marker would still validate.
+            # Refuse outright rather than write a useless commit.
+            raise RuntimeError(
+                "Cannot write commit marker: integrity manifest has no total_checksum"
+            )
+
+        files_count = len(ctx.integrity_manifest.get("files", {}))
+
+        # Local destination (plain directory or encrypted .tar.wbenc)
+        if ctx.backup_path is not None and ctx.backup_path.exists():
+            self._phase("Writing commit marker...")
+            try:
+                write_commit_marker(
+                    backup_path=ctx.backup_path,
+                    manifest_sha256=manifest_sha,
+                    files_count=files_count,
+                    destination_label=DESTINATION_STORAGE,
+                )
+            except OSError as e:
+                self._log(
+                    f"Commit marker write failed for primary destination: {e}. "
+                    f"Backup will be treated as orphaned at the next run."
+                )
+                raise
+            return
+
+        # Remote destination
+        if ctx.backup_remote_name and ctx.backend is not None:
+            self._phase("Uploading commit marker...")
+            from io import BytesIO
+
+            payload = build_commit_marker(
+                manifest_sha256=manifest_sha,
+                files_count=files_count,
+                destination_label=DESTINATION_STORAGE,
+            )
+            data = serialise_commit_marker(payload)
+            commit_remote_name = f"{ctx.backup_remote_name}.wbcommit"
+            try:
+                ctx.backend.upload_file(BytesIO(data), commit_remote_name, size=len(data))
+            except Exception as e:
+                self._log(
+                    f"Commit marker upload failed for primary destination: {e}. "
+                    f"Backup will be treated as orphaned at the next run."
+                )
+                raise
 
     def _phase_verify(self, ctx: PipelineContext) -> None:
         """Phase 6: Post-backup verification.
@@ -1297,10 +1571,100 @@ class BackupEngine:
                             if not ok:
                                 raise RuntimeError(f"{mirror_name}: {msg}")
 
+                # Mirror passed verification — write its commit marker
+                # so list_backups / restore on this mirror's destination
+                # recognise the artefact as committed. Each mirror has
+                # its own marker so a failure on mirror 2 does not
+                # invalidate mirror 1.
+                self._commit_mirror(ctx, config, i, mirror_name, mirror_encrypted)
+
             except RuntimeError:
                 raise
             except Exception as e:
                 raise RuntimeError(f"{mirror_name} verification failed: {e}") from e
+
+    def _commit_mirror(
+        self,
+        ctx: PipelineContext,
+        config,
+        mirror_idx: int,
+        mirror_name: str,
+        is_encrypted: bool,
+    ) -> None:
+        """Write a commit marker on a mirror destination after its verify.
+
+        Each mirror gets its own ``.wbcommit`` so per-destination state
+        is honest: a mirror that did not pass verification has no
+        marker and is invisible to the orphan scan / restore.
+
+        Args:
+            ctx: Pipeline context (already-built integrity manifest).
+            config: This mirror's storage configuration.
+            mirror_idx: Zero-based mirror index for the destination
+                label (``"mirror_1"`` for index 0, etc).
+            mirror_name: Human-readable label for log messages.
+            is_encrypted: Whether the mirror artefact is a
+                ``.tar.wbenc`` archive (vs a plain directory).
+        """
+        from src.core.phases.commit_marker import (
+            DESTINATION_MIRROR_PREFIX,
+            build_commit_marker,
+            serialise_commit_marker,
+            write_commit_marker,
+        )
+
+        manifest_sha = ctx.integrity_manifest.get("total_checksum", "")
+        if not manifest_sha:
+            raise RuntimeError(
+                f"Cannot commit {mirror_name}: integrity manifest has no total_checksum"
+            )
+        files_count = len(ctx.integrity_manifest.get("files", {}))
+        label = f"{DESTINATION_MIRROR_PREFIX}{mirror_idx + 1}"
+
+        artefact_relname = f"{ctx.backup_name}.tar.wbenc" if is_encrypted else ctx.backup_name
+
+        if config.is_remote():
+            from io import BytesIO
+
+            self._phase(f"Uploading commit marker for {mirror_name}...")
+            payload = build_commit_marker(
+                manifest_sha256=manifest_sha,
+                files_count=files_count,
+                destination_label=label,
+            )
+            data = serialise_commit_marker(payload)
+            backend = self._get_backend(config)
+            commit_remote_name = f"{artefact_relname}.wbcommit"
+            try:
+                backend.upload_file(BytesIO(data), commit_remote_name, size=len(data))
+            except Exception as e:
+                self._log(
+                    f"Commit marker upload failed for {mirror_name}: {e}. "
+                    f"This mirror will be treated as orphaned at the next run."
+                )
+                raise
+            return
+
+        # Local mirror
+        artefact_path = Path(config.destination_path) / artefact_relname
+        if not artefact_path.exists():
+            # Should not happen — verify just succeeded — but refuse
+            # to write a marker pointing at a non-existent artefact.
+            raise RuntimeError(f"{mirror_name}: artefact missing after verify: {artefact_path}")
+        self._phase(f"Writing commit marker for {mirror_name}...")
+        try:
+            write_commit_marker(
+                backup_path=artefact_path,
+                manifest_sha256=manifest_sha,
+                files_count=files_count,
+                destination_label=label,
+            )
+        except OSError as e:
+            self._log(
+                f"Commit marker write failed for {mirror_name}: {e}. "
+                f"This mirror will be treated as orphaned at the next run."
+            )
+            raise
 
     def _verify_mirror_checksums(
         self,

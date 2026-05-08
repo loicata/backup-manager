@@ -690,10 +690,15 @@ class BackupManagerApp:
         )
 
         # Setup tray
+        # pystray runs its icon loop in a daemon thread, so menu callbacks
+        # fire off-thread.  Tk is not thread-safe — calling deiconify() /
+        # destroy() / widget mutation from the tray thread causes render
+        # races (notably a blank main window on "Show window").  Marshal
+        # every tray-originated action onto the Tk main thread via after().
         self.tray = BackupTray(
-            show_callback=self._show_window,
-            run_backup_callback=self._run_backup,
-            quit_callback=self._quit_app,
+            show_callback=self._on_tray_show,
+            run_backup_callback=self._on_tray_run,
+            quit_callback=self._on_tray_quit,
         )
 
         # Build UI
@@ -2712,6 +2717,18 @@ class BackupManagerApp:
             self.root.after(500, _check_signal)
 
         self.root.after(500, _check_signal)
+
+    def _on_tray_show(self):
+        """Tray 'Show window' callback — marshals onto the Tk main thread."""
+        self.root.after(0, self._show_window)
+
+    def _on_tray_run(self):
+        """Tray 'Run backup now' callback — marshals onto the Tk main thread."""
+        self.root.after(0, self._run_backup)
+
+    def _on_tray_quit(self):
+        """Tray 'Exit' callback — marshals onto the Tk main thread."""
+        self.root.after(0, self._quit_app)
 
     def _show_window(self):
         """Bring the main window to the foreground."""

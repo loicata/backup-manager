@@ -223,7 +223,13 @@ class TestRecoveryRoundTrip:
         assert (restore_dir / "large.bin").read_bytes() == large_data
 
     def test_empty_backup_restores_cleanly(self, tmp_path: Path) -> None:
-        """An encrypted backup with no files can be restored."""
+        """An encrypted backup with no files can be restored.
+
+        Under the single-pass writer the integrity manifest is always
+        embedded — even for empty backups — so the archive contains
+        exactly one entry: ``.wbverify``. Restoring it yields an empty
+        files set with the manifest available for inspection.
+        """
         password = "empty"
         dest = tmp_path / "backup_dest"
         dest.mkdir()
@@ -231,7 +237,7 @@ class TestRecoveryRoundTrip:
 
         restore_dir = tmp_path / "restored"
         names = _restore_archive(archive, password, restore_dir)
-        assert names == []
+        assert names == [".wbverify"]
 
     def test_unicode_filenames_roundtrip(self, tmp_path: Path) -> None:
         """Files with unicode names survive the encrypt/decrypt cycle."""

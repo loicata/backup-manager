@@ -3,6 +3,9 @@
 import hashlib
 import json
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from src.core.config import (
     BackupProfile,
@@ -15,6 +18,21 @@ from src.core.integrity_verifier import (
     IntegrityVerifier,
     VerifyAllResult,
 )
+from src.core.phases.commit_marker import write_commit_marker
+
+# Stable test HMAC key — see commit_marker tests for rationale.
+_TEST_KEY = b"\x33" * 32
+
+
+@pytest.fixture(autouse=True)
+def _patch_hmac_key():
+    """Avoid touching the real DPAPI-wrapped HMAC key during tests."""
+    with patch(
+        "src.core.phases.commit_marker.get_app_hmac_key",
+        return_value=_TEST_KEY,
+    ):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -31,7 +49,13 @@ def _sha256(data: bytes) -> str:
 
 
 def _create_flat_backup(dest: Path, name: str, files: dict[str, bytes]) -> None:
-    """Create a flat backup directory with a .wbverify manifest."""
+    """Create a flat backup directory with a .wbverify manifest AND a
+    .wbcommit marker.
+
+    The pipeline writes the marker only after verify succeeds; under
+    test we stamp it eagerly so ``list_backups`` recognises the backup
+    as committed and returns it for the verifier to inspect.
+    """
     backup_dir = dest / name
     backup_dir.mkdir(parents=True)
 
@@ -42,9 +66,23 @@ def _create_flat_backup(dest: Path, name: str, files: dict[str, bytes]) -> None:
             "hash": _sha256(content),
             "size": len(content),
         }
+    # Compute total_checksum to bind the marker to this manifest.
+    parts = []
+    for rel_path in sorted(manifest["files"].keys()):
+        entry = manifest["files"][rel_path]
+        parts.append(f"{rel_path}\x00{entry['hash']}\x00{entry['size']}")
+    manifest["total_checksum"] = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
     manifest_path = dest / f"{name}.wbverify"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    write_commit_marker(
+        backup_path=backup_dir,
+        manifest_sha256=manifest["total_checksum"],
+        files_count=len(manifest["files"]),
+        destination_label="storage",
+        writer_version="3.3.14",
+    )
 
 
 def _create_encrypted_backup(
@@ -74,6 +112,16 @@ def _create_encrypted_backup(
     # Store the hash like backup_engine would
     archive_hash = _sha256(archive.read_bytes())
     config_mgr.save_verify_hash(archive.name, archive_hash, archive.stat().st_size)
+
+    # Stamp the archive as committed so list_backups returns it.
+    # Total checksum mirrors what the writer's embedded manifest used.
+    write_commit_marker(
+        backup_path=archive,
+        manifest_sha256="0" * 64,  # any 64-hex string; verifier here
+        files_count=len(files),  # checks archive bytes, not the marker
+        destination_label="storage",
+        writer_version="3.3.14",
+    )
 
     # Clean up source dir so it doesn't get listed as a backup
     import shutil
@@ -167,11 +215,26 @@ class TestVerifyFlatBackup:
         assert result.total_backups == 0
 
     def test_verify_no_manifest(self, tmp_path: Path) -> None:
-        """Backup without manifest is reported as OK (no ref to compare)."""
+        """Committed backup without ``.wbverify`` is reported as OK.
+
+        A committed backup that has lost its manifest sidecar is rare
+        but possible (manual deletion, copy-paste between drives). The
+        verifier reports it as ``ok`` since there is no reference to
+        compare against — the commit marker is what authorises the
+        ``ok`` verdict, not the manifest.
+        """
         dest = tmp_path / "backups"
         backup_dir = dest / "Backup_FULL_2026-01-01_120000"
         backup_dir.mkdir(parents=True)
         (backup_dir / "a.txt").write_bytes(b"data")
+        # Stamp the backup as committed so list_backups returns it.
+        write_commit_marker(
+            backup_path=backup_dir,
+            manifest_sha256="0" * 64,
+            files_count=1,
+            destination_label="storage",
+            writer_version="3.3.14",
+        )
 
         profile = BackupProfile(
             storage=StorageConfig(
@@ -272,7 +335,13 @@ class TestVerifyEncryptedBackup:
         assert "mismatch" in result.results[0].message.lower()
 
     def test_verify_encrypted_no_stored_hash(self, tmp_path: Path) -> None:
-        """Encrypted archive without stored hash — fallback to existence check."""
+        """Encrypted archive without stored hash — fallback to existence check.
+
+        Stamps the archive with a commit marker so it appears in
+        ``list_backups`` even though no reference hash was saved
+        (legacy archives carried over from an older Backup Manager
+        version that didn't yet record ``verify_hash``).
+        """
         dest = tmp_path / "backups"
         dest.mkdir()
         mgr = ConfigManager(config_dir=tmp_path / "config")
@@ -290,7 +359,16 @@ class TestVerifyEncryptedBackup:
             mtime=(src / "a.txt").stat().st_mtime,
             source_root=str(src),
         )
-        write_encrypted_tar([fi], dest, "Old_FULL_2025-12-01_120000", "pw")
+        archive = write_encrypted_tar([fi], dest, "Old_FULL_2025-12-01_120000", "pw")
+
+        # Stamp as committed so list_backups returns the archive.
+        write_commit_marker(
+            backup_path=archive,
+            manifest_sha256="0" * 64,
+            files_count=1,
+            destination_label="storage",
+            writer_version="3.3.14",
+        )
 
         # Clean up source dir so it doesn't get listed as a backup
         import shutil

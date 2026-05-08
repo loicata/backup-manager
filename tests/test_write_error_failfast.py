@@ -68,12 +68,17 @@ class TestWriteError:
 
 
 class TestLocalWriterFailFast:
-    """write_flat raises WriteError on any copy failure."""
+    """write_flat raises WriteError on any copy failure.
+
+    The single-pass writer routes copies through ``copy_and_hash``
+    (so the manifest is hashed from the bytes actually written, not a
+    second source read). These tests mock the new primitive accordingly.
+    """
 
     def test_permission_error_raises(self, tmp_path):
         fi = _make_file(tmp_path)
         with patch(
-            "src.core.phases.local_writer.shutil.copy2",
+            "src.core.phases.local_writer.copy_and_hash",
             side_effect=PermissionError("access denied"),
         ):
             with pytest.raises(WriteError, match="test.txt") as exc_info:
@@ -84,7 +89,7 @@ class TestLocalWriterFailFast:
         fi = _make_file(tmp_path)
         with (
             patch(
-                "src.core.phases.local_writer.shutil.copy2",
+                "src.core.phases.local_writer.copy_and_hash",
                 side_effect=OSError("I/O error"),
             ),
             pytest.raises(WriteError, match="test.txt"),
@@ -97,7 +102,7 @@ class TestLocalWriterFailFast:
         mock_copy = MagicMock(side_effect=OSError("fail"))
 
         with (
-            patch("src.core.phases.local_writer.shutil.copy2", mock_copy),
+            patch("src.core.phases.local_writer.copy_and_hash", mock_copy),
             pytest.raises(WriteError),
         ):
             write_flat(files, tmp_path / "dst", "bk1")

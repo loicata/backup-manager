@@ -14,6 +14,7 @@ from src.core.phases.local_writer import (
     generate_backup_name,
     write_encrypted_tar,
     write_flat,
+    write_flat_with_hashes,
 )
 
 # ---------------------------------------------------------------------------
@@ -125,7 +126,12 @@ class TestWriteFlat:
             write_flat([fi], dest, "Backup")
 
     def test_source_permission_error_raises_write_error(self, tmp_path: Path) -> None:
-        """WriteError when source file cannot be read."""
+        """WriteError when source file cannot be read.
+
+        ``write_flat`` now uses ``copy_and_hash`` (single-pass copy +
+        SHA-256) so the mock target is the new primitive, not the
+        legacy ``shutil.copy2``.
+        """
         from unittest.mock import patch
 
         src = tmp_path / "source"
@@ -134,10 +140,14 @@ class TestWriteFlat:
 
         dest = tmp_path / "dest"
         dest.mkdir()
-        with patch("src.core.phases.local_writer.shutil.copy2") as mock_copy:
-            mock_copy.side_effect = PermissionError("Access denied")
-            with pytest.raises(WriteError):
-                write_flat(files, dest, "Backup")
+        with (
+            patch(
+                "src.core.phases.local_writer.copy_and_hash",
+                side_effect=PermissionError("Access denied"),
+            ),
+            pytest.raises(WriteError),
+        ):
+            write_flat(files, dest, "Backup")
 
     def test_preserves_file_content_large_file(self, tmp_path: Path) -> None:
         """Binary content is preserved exactly (1 MB file)."""
@@ -152,6 +162,134 @@ class TestWriteFlat:
         dest.mkdir()
         result = write_flat(files, dest, "Backup")
         assert (result / "big.bin").read_bytes() == data
+
+
+# ---------------------------------------------------------------------------
+# write_flat_with_hashes — single-pass copy that defeats manifest→write TOCTOU
+# ---------------------------------------------------------------------------
+
+
+class TestWriteFlatWithHashes:
+    """Single-pass copy + hash returns the dict that will become the
+    integrity manifest. The hash is computed from the bytes written to
+    the destination, not a second source read — so a source mutation
+    after the write either lands inside our pass (and is reflected in
+    the hash + bytes coherently) or after our pass (and never affects
+    the backup).
+    """
+
+    def test_returns_path_and_hashes_dict(self, tmp_path: Path) -> None:
+        src = tmp_path / "source"
+        _make_file(src / "a.txt", "alpha")
+        _make_file(src / "sub" / "b.txt", "beta")
+
+        files = [
+            _make_file_info(src / "a.txt", "a.txt"),
+            _make_file_info(src / "sub" / "b.txt", "sub/b.txt"),
+        ]
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        backup_dir, hashes = write_flat_with_hashes(files, dest, "Backup_FULL_2026-05-08_120000")
+
+        assert backup_dir == dest / "Backup_FULL_2026-05-08_120000"
+        assert backup_dir.is_dir()
+        assert set(hashes.keys()) == {"a.txt", "sub/b.txt"}
+        # Each hash is a 64-char lowercase hex digest.
+        for h in hashes.values():
+            assert len(h) == 64
+            assert all(c in "0123456789abcdef" for c in h)
+
+    def test_hash_matches_destination_bytes(self, tmp_path: Path) -> None:
+        """The returned hash equals SHA-256 of the file on disk."""
+        import hashlib
+
+        src = tmp_path / "source"
+        _make_file(src / "a.txt", "alpha")
+        files = [_make_file_info(src / "a.txt", "a.txt")]
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        backup_dir, hashes = write_flat_with_hashes(files, dest, "bk")
+
+        actual = hashlib.sha256((backup_dir / "a.txt").read_bytes()).hexdigest()
+        assert hashes["a.txt"] == actual
+
+    def test_empty_file_list_returns_empty_dict(self, tmp_path: Path) -> None:
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        backup_dir, hashes = write_flat_with_hashes([], dest, "Empty_FULL")
+        assert backup_dir.is_dir()
+        assert hashes == {}
+
+    def test_hashes_are_independent_per_file(self, tmp_path: Path) -> None:
+        """Different content → different hashes, same content → same hash."""
+        src = tmp_path / "source"
+        _make_file(src / "x.txt", "xxx")
+        _make_file(src / "y.txt", "xxx")  # same content as x.txt
+        _make_file(src / "z.txt", "different")
+
+        files = [
+            _make_file_info(src / "x.txt", "x.txt"),
+            _make_file_info(src / "y.txt", "y.txt"),
+            _make_file_info(src / "z.txt", "z.txt"),
+        ]
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        _, hashes = write_flat_with_hashes(files, dest, "bk")
+        assert hashes["x.txt"] == hashes["y.txt"]
+        assert hashes["x.txt"] != hashes["z.txt"]
+
+    def test_hash_bound_to_what_was_written_not_what_remains_at_source(
+        self, tmp_path: Path
+    ) -> None:
+        """TOCTOU defence: if the source is modified AFTER the writer
+        finishes, the destination still has the original bytes and the
+        returned hash is for those bytes — no inconsistency."""
+        import hashlib
+
+        src = tmp_path / "source"
+        _make_file(src / "moving.txt", "first version")
+        files = [_make_file_info(src / "moving.txt", "moving.txt")]
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        backup_dir, hashes = write_flat_with_hashes(files, dest, "bk")
+
+        # Mutate source AFTER the write finishes.
+        (src / "moving.txt").write_text("mutated content unrelated", encoding="utf-8")
+
+        dest_bytes = (backup_dir / "moving.txt").read_bytes()
+        assert dest_bytes == b"first version"
+        assert hashes["moving.txt"] == hashlib.sha256(dest_bytes).hexdigest()
+
+    def test_wrapper_write_flat_returns_path_only(self, tmp_path: Path) -> None:
+        """The legacy ``write_flat`` API returns just the Path; hashes
+        are silently dropped. Used by tests and any caller that does
+        not need the manifest hashes."""
+        src = tmp_path / "source"
+        _make_file(src / "a.txt", "data")
+        files = [_make_file_info(src / "a.txt", "a.txt")]
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        result = write_flat(files, dest, "bk")
+        # write_flat returns Path, not tuple.
+        assert isinstance(result, Path)
+        assert result.is_dir()
+
+    def test_destination_subdirs_created(self, tmp_path: Path) -> None:
+        """Nested relative paths trigger parent-dir creation under dest."""
+        src = tmp_path / "source"
+        _make_file(src / "a" / "b" / "c" / "deep.txt", "buried")
+        files = [_make_file_info(src / "a" / "b" / "c" / "deep.txt", "a/b/c/deep.txt")]
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        backup_dir, hashes = write_flat_with_hashes(files, dest, "bk")
+        assert (backup_dir / "a" / "b" / "c" / "deep.txt").read_text(encoding="utf-8") == "buried"
+        assert "a/b/c/deep.txt" in hashes
 
 
 # ---------------------------------------------------------------------------
@@ -238,25 +376,25 @@ class TestWriteEncryptedTar:
                     tar.extract(member, path=tmp_path / "fail")
 
     def test_embeds_integrity_manifest(self, tmp_path: Path) -> None:
-        """Integrity manifest is embedded as .wbverify inside the archive."""
+        """Integrity manifest is embedded as ``.wbverify`` inside the archive.
+
+        The single-pass writer builds the manifest itself from the
+        hashes computed during tar streaming, so the embedded
+        ``.wbverify`` accurately describes what was written. The legacy
+        ``integrity_manifest`` parameter is ignored.
+        """
         from src.security.encryption import DecryptingReader
 
         src = tmp_path / "source"
         _make_file(src / "a.txt", "alpha")
         files = [_make_file_info(src / "a.txt", "a.txt")]
 
-        manifest = {
-            "version": 1,
-            "algorithm": "sha256",
-            "files": {"a.txt": {"hash": "abc123", "size": 5}},
-        }
-
         dest = tmp_path / "dest"
         dest.mkdir()
         password = "manifest-test"
-        archive = write_encrypted_tar(files, dest, "Backup", password, integrity_manifest=manifest)
+        archive = write_encrypted_tar(files, dest, "Backup", password)
 
-        # Extract and check for .wbverify
+        # Extract and check for .wbverify with the writer-computed hash.
         extract_dir = tmp_path / "extracted"
         extract_dir.mkdir()
         with open(archive, "rb") as f:
@@ -269,9 +407,64 @@ class TestWriteEncryptedTar:
         loaded = json.loads(wbverify.read_text(encoding="utf-8"))
         assert loaded["algorithm"] == "sha256"
         assert "a.txt" in loaded["files"]
+        # Hash matches the actual content (single-pass writer
+        # computed it from the bytes written).
+        import hashlib
 
-    def test_no_manifest_when_none(self, tmp_path: Path) -> None:
-        """No .wbverify entry when integrity_manifest is None."""
+        expected = hashlib.sha256(b"alpha").hexdigest()
+        assert loaded["files"]["a.txt"]["hash"] == expected
+        assert loaded["files"]["a.txt"]["size"] == 5
+
+    def test_caller_supplied_manifest_is_ignored(self, tmp_path: Path) -> None:
+        """Writer ignores any caller-supplied manifest and builds its own.
+
+        Defeats the manifest→write TOCTOU: a caller-supplied manifest
+        would describe a *snapshot* of source hashes from before the
+        write, which can diverge from what actually lands in the tar
+        if the source mutates in between. The writer's own manifest
+        is bound to the bytes it actually streamed.
+        """
+        from src.security.encryption import DecryptingReader
+
+        src = tmp_path / "source"
+        _make_file(src / "a.txt", "alpha")
+        files = [_make_file_info(src / "a.txt", "a.txt")]
+
+        # Caller supplies a bogus manifest claiming the file's hash is
+        # all zeroes — the writer must NOT honour this.
+        bogus_manifest = {
+            "version": 1,
+            "algorithm": "sha256",
+            "files": {"a.txt": {"hash": "0" * 64, "size": 5}},
+            "total_checksum": "0" * 64,
+        }
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        password = "ignore-test"
+        archive = write_encrypted_tar(
+            files, dest, "Backup", password, integrity_manifest=bogus_manifest
+        )
+
+        extract_dir = tmp_path / "extracted"
+        extract_dir.mkdir()
+        with open(archive, "rb") as f:
+            reader = DecryptingReader(f, password)
+            with tarfile.open(fileobj=reader, mode="r|") as tar:
+                tar.extractall(path=extract_dir)
+
+        loaded = json.loads((extract_dir / ".wbverify").read_text(encoding="utf-8"))
+        # The embedded hash is the REAL one, not the caller's bogus one.
+        assert loaded["files"]["a.txt"]["hash"] != "0" * 64
+
+    def test_manifest_is_always_embedded(self, tmp_path: Path) -> None:
+        """The writer always embeds an integrity manifest now.
+
+        Previously, omitting ``integrity_manifest`` produced an archive
+        with no ``.wbverify`` entry. With hash-during-write the manifest
+        is built from streaming hashes and always embedded — the
+        archive is self-describing on every path.
+        """
         from src.security.encryption import DecryptingReader
 
         src = tmp_path / "source"
@@ -293,7 +486,7 @@ class TestWriteEncryptedTar:
                     names.append(member.name)
                     tar.extract(member, path=extract_dir)
 
-        assert ".wbverify" not in names
+        assert ".wbverify" in names
 
     def test_cancellation_leaves_no_partial_or_final(self, tmp_path: Path) -> None:
         """Cancel mid-write removes the .partial file and leaves no archive."""
@@ -379,7 +572,14 @@ class TestWriteEncryptedTar:
         assert progress_data[-1]["current"] == 3
 
     def test_empty_file_list(self, tmp_path: Path) -> None:
-        """Empty file list creates a valid (small) encrypted archive."""
+        """Empty file list creates a valid encrypted archive containing
+        only an empty integrity manifest.
+
+        With the single-pass writer the ``.wbverify`` entry is always
+        present (even when no files were archived), so a restore tool
+        can still authenticate the archive's intent rather than facing
+        an unsigned, ambiguous artefact.
+        """
         from src.security.encryption import DecryptingReader
 
         dest = tmp_path / "dest"
@@ -389,12 +589,12 @@ class TestWriteEncryptedTar:
         assert archive.exists()
         assert archive.stat().st_size > 0
 
-        # Should be decryptable with no files inside
+        # Should be decryptable; only the (empty) manifest is inside.
         with open(archive, "rb") as f:
             reader = DecryptingReader(f, "pw")
             with tarfile.open(fileobj=reader, mode="r|") as tar:
                 members = list(tar)
-                assert len(members) == 0
+                assert [m.name for m in members] == [".wbverify"]
 
 
 # ---------------------------------------------------------------------------
@@ -403,15 +603,17 @@ class TestWriteEncryptedTar:
 
 
 class TestVanishingFileManifestSync:
-    """When a file vanishes between manifest build and write, the
-    embedded .wbverify must drop its entry.
+    """A file that vanishes between collection and write must NOT
+    appear in the embedded ``.wbverify``.
 
-    Before the fix the file was silently skipped but the manifest
-    still listed it → post-restore verify reported "missing" forever
-    on an otherwise valid archive.
+    Under the legacy two-pass writer this required explicit pruning
+    of a pre-built manifest. Under the single-pass writer the property
+    is automatic: a file we cannot ``open`` is skipped, no hash is
+    computed, no manifest entry is created. The test verifies the
+    invariant from the outside (only the produced artefact matters).
     """
 
-    def test_manifest_pruned_for_vanished_file(self, tmp_path: Path) -> None:
+    def test_vanished_file_not_in_embedded_manifest(self, tmp_path: Path) -> None:
         from src.security.encryption import DecryptingReader
 
         src_dir = tmp_path / "src"
@@ -423,19 +625,8 @@ class TestVanishingFileManifestSync:
 
         files = [_make_file_info(f1, "a.txt"), _make_file_info(f2, "b.txt")]
 
-        # Build a manifest that references both files.
-        manifest = {
-            "version": 1,
-            "algorithm": "sha256",
-            "files": {
-                "a.txt": {"hash": "a" * 64, "size": 3},
-                "b.txt": {"hash": "b" * 64, "size": 3},
-            },
-            "total_checksum": "stale_will_be_recomputed",
-        }
-
-        # Now remove b.txt BEFORE the write phase runs, so the writer
-        # encounters OSError and skips it.
+        # Remove b.txt BEFORE the write phase runs, so the writer
+        # encounters OSError on os.path.getsize and skips it.
         f2.unlink()
 
         dest = tmp_path / "dest"
@@ -445,7 +636,6 @@ class TestVanishingFileManifestSync:
             destination=dest,
             backup_name="Prof_FULL_2026-04-17_000000",
             password="pw",
-            integrity_manifest=manifest,
         )
 
         # Read the embedded manifest back and verify it only lists a.txt.
@@ -463,9 +653,11 @@ class TestVanishingFileManifestSync:
         assert "a.txt" in embedded["files"]
         assert (
             "b.txt" not in embedded["files"]
-        ), "Vanished file must be pruned from the embedded manifest"
-        # Checksum must have been recomputed (not the stale sentinel).
-        assert embedded["total_checksum"] != "stale_will_be_recomputed"
+        ), "Vanished file must not appear in the embedded manifest"
+        # Hash matches the actual content (writer computed it during stream).
+        import hashlib
+
+        assert embedded["files"]["a.txt"]["hash"] == hashlib.sha256(b"aaa").hexdigest()
 
 
 # ---------------------------------------------------------------------------

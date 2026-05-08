@@ -5,6 +5,11 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.17] - 2026-05-09
+
+### Fixed
+- USB throughput on small-file workloads remained capped (~1–10 MB/s) even after the 3.3.16 chunk-size bump, because the bottleneck on a 30 k+ small-file backup is per-file syscall overhead (open + open + Python loop + ``copystat`` + close × 2) — not chunk size. ``copy_and_hash`` now delegates the actual transfer to ``shutil.copy2``, which on Windows resolves to ``CopyFileExW`` (kernel-space, single transaction for open + transfer + metadata) and on Linux uses ``sendfile``/``copy_file_range`` where supported. The SHA-256 is computed from the destination after the copy, not from the source during the copy: the destination is frozen at that point, so the manifest still describes exactly what is on disk and the anti-TOCTOU guarantee that 3.3.15 introduced is preserved. The OS file-system cache absorbs the cost of the read-back for small files (their bytes are still hot in RAM), so the post-pass hash is near-free; large files pay one additional linear read but the savings on the rest of the workload swamp it.
+
 ## [3.3.16] - 2026-05-08
 
 ### Added

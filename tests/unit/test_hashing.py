@@ -217,13 +217,10 @@ class TestCopyAndHash:
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
 
-    def test_hash_reflects_destination_bytes_not_a_second_source_read(self, tmp_path: Path) -> None:
-        """The returned hash is for the bytes that were actually written.
-
-        This is the TOCTOU-defeating property: we never re-read the
-        source after copying. Demonstrate by mutating the source after
-        the call — the hash returned was for the original bytes (what
-        we wrote), and that's still what lives on disk at ``dst``.
+    def test_hash_reflects_original_source_not_post_copy_mutation(self, tmp_path: Path) -> None:
+        """The returned hash is for the original source bytes — a
+        post-copy mutation of the source can't retroactively change
+        what the manifest claims.
         """
         src = tmp_path / "moving.bin"
         dst = tmp_path / "moving_dst.bin"
@@ -231,9 +228,55 @@ class TestCopyAndHash:
         src.write_bytes(original)
 
         h = copy_and_hash(src, dst)
-        # Mutate source AFTER the call.
+        # Mutate source AFTER the call — must not affect the returned hash.
         src.write_bytes(b"mutated content that is unrelated")
 
-        # The hash returned is for what we wrote, which is still on dst.
         assert h == hashlib.sha256(original).hexdigest()
         assert dst.read_bytes() == original
+
+    def test_returned_hash_lets_verify_detect_silent_kernel_corruption(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """v3.3.18 INVARIANT: if the kernel copy silently corrupts the
+        destination, ``compute_sha256(dst)`` MUST differ from the
+        manifest hash returned by ``copy_and_hash``.
+
+        v3.3.17 hashed the destination instead of the source, which
+        meant a corrupt copy would hash to its own corruption and
+        the verify phase would happily accept the bad backup. The
+        v3.3.18 model — hash source first, then copy — restores the
+        v3.3.14 detection: any divergence between source and
+        destination triggers a verify-phase mismatch.
+        """
+        import shutil
+
+        # Capture the real ``copy2`` BEFORE the monkeypatch, otherwise
+        # the wrapper below would call its own patched version and
+        # recurse forever.
+        real_copy2 = shutil.copy2
+
+        src = tmp_path / "src.bin"
+        dst = tmp_path / "dst.bin"
+        src.write_bytes(b"original content that the user wanted to back up")
+
+        # Wrap shutil.copy2 in a fault injector that simulates a
+        # kernel-side corruption: copy normally, then overwrite dst
+        # with garbage as if a flaky USB controller had flipped bits.
+        def _corrupt_copy(s: str, d: str) -> None:
+            real_copy2(s, d)
+            Path(d).write_bytes(b"corrupted by faulty hardware mid-transfer")
+
+        monkeypatch.setattr("src.core.hashing.shutil.copy2", _corrupt_copy)
+
+        manifest_hash = copy_and_hash(src, dst)
+
+        # The manifest reflects the ORIGINAL source bytes, regardless
+        # of what landed on the destination.
+        expected = hashlib.sha256(
+            b"original content that the user wanted to back up"
+        ).hexdigest()
+        assert manifest_hash == expected
+
+        # And a verify-style re-hash of the destination diverges,
+        # which is the loud failure that protects the user.
+        assert compute_sha256(dst) != manifest_hash

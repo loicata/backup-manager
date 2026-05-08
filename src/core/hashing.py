@@ -80,62 +80,68 @@ def compute_sha256(filepath: Path) -> str:
 
 
 def copy_and_hash(src_path: Path, dst_path: Path) -> str:
-    """Copy a file via the OS-native copy primitive, then hash the
-    bytes that landed on the destination.
+    """Hash the source file, then copy it via the OS-native copy
+    primitive. The returned digest is the source's SHA-256.
 
-    Implementation history
-    ----------------------
-    The first cut (3.3.15) used a Python ``read → hash → write`` loop
-    with ``HASH_CHUNK_SIZE`` chunks so the manifest could be built from
-    the bytes we wrote, closing the manifest→write TOCTOU window of
-    the previous two-pass design (hash source, copy source — source
-    could mutate between the two opens).
+    INVARIANT (see docs/INVARIANTS.md): the actual byte transfer MUST
+    delegate to ``shutil.copy2`` (which resolves to ``CopyFileExW`` on
+    Windows and ``sendfile`` / ``copy_file_range`` on Linux). A pure-
+    Python read/hash/write loop here was empirically benchmarked at
+    30–60× slower on a 30 k-small-file workload over USB; the loss
+    was so severe (~7 MB/s vs ~50+ MB/s) it crashed the daily
+    development cycle. Don't replace this delegation without a fresh
+    benchmark on a real spinning/USB target.
 
-    On a workload of 30 k+ small files (e.g. a ``site-packages``
-    snapshot full of JSON data files), that loop was 30–60× slower
-    than 3.3.14's plain ``shutil.copy2``. The reason: ``shutil.copy2``
-    on Windows delegates to ``CopyFileExW``, which packs the open +
-    transfer + metadata copy into a single tightly-tuned kernel
-    transaction. A Python user-space loop pays Python+syscall overhead
-    on every chunk and on every per-file ``open/close/copystat`` —
-    that overhead dominates when each file is only a few KB.
+    Why hash the SOURCE, not the destination
+    -----------------------------------------
+    Three pipelines were tried in v3.3.15–3.3.17:
 
-    The current shape preserves the anti-TOCTOU guarantee while
-    restoring native-copy throughput:
+    * v3.3.15 — Python read+hash+write loop. Hashes the bytes lying
+      between source and destination, but uses no kernel primitive
+      (slow).
+    * v3.3.17 — ``shutil.copy2`` then ``compute_sha256(dst)``. Fast,
+      but a silent corruption introduced by the kernel copy (rare
+      hardware fault, bit-flip in a buggy driver) would be hashed
+      from the corrupted destination and accepted as "valid": the
+      manifest matches the destination, ``verify`` re-reads the
+      destination, everything looks green even though the backup no
+      longer matches the source.
+    * v3.3.18 (current) — hash source first, then ``shutil.copy2``.
+      The manifest contains a hash of what was on the source at hash
+      time. The verify phase later re-hashes the destination and
+      compares it against the manifest, so:
+      - A corrupted copy → mismatch → ``verify`` rejects the backup
+        (loud failure, user re-runs).
+      - A source mutation during the copy → mismatch → same loud
+        failure (a Frankenstein backup is never silently committed).
 
-    1. ``shutil.copy2`` writes ``src → dst`` in kernel-space.
-    2. ``compute_sha256(dst)`` reads back ``dst`` and returns its
-       digest. Reading from the just-written destination is mostly
-       served by the OS file-system cache (the bytes are still hot in
-       RAM for small files), so the second pass is near-free; on
-       multi-MB files we pay one more linear read but the savings
-       from the native copy on the rest of the workload swamp it.
+    Trade-off: the v3.3.18 model has a TOCTOU window between the
+    hash and the copy (source could mutate in those few ms). The
+    consequence is a *false-positive verify failure* — the user
+    re-runs the backup. That's strictly safer than the v3.3.17
+    silent acceptance of an inconsistent destination.
 
-    Why this still defeats the TOCTOU
-    ---------------------------------
-    The hash describes exactly the bytes that are on the destination
-    after the copy.  Whatever the source mutated to between or after
-    those two operations is irrelevant: the verify phase later re-hashes
-    the destination and matches it against the manifest we built here,
-    so a sleeping-pill scenario where the source becomes inconsistent
-    AFTER the copy can never produce a "valid" manifest that disagrees
-    with what is on disk.
+    Cost: the source is read twice — once for the hash, once by the
+    kernel copy. The OS file-system cache serves the second read
+    almost for free on small files (the bytes are hot in RAM); on
+    large files we pay one extra linear read but the savings on the
+    rest of the workload swamp it.
 
     Args:
         src_path: Source file path. Must exist and be a regular file.
         dst_path: Destination file path. Parent must exist.
 
     Returns:
-        Lowercase hex SHA-256 digest of the bytes that ended up on
-        ``dst_path``.
+        Lowercase hex SHA-256 digest of the source bytes (which, on
+        a successful copy, equal the destination bytes).
 
     Raises:
         TypeError: If either argument is not a ``Path``.
         FileNotFoundError: If the source file does not exist.
         ValueError: If the source is a directory.
-        OSError: On any I/O failure during the copy or the read-back
-            hash. The destination should be considered garbage by the
-            caller (the write phase rolls back the entire backup).
+        OSError: On any I/O failure during the hash or the copy. The
+            destination should be considered garbage by the caller
+            (the write phase rolls back the entire backup).
     """
     if not isinstance(src_path, Path):
         raise TypeError(f"src_path must be a Path, got {type(src_path).__name__}")
@@ -149,16 +155,10 @@ def copy_and_hash(src_path: Path, dst_path: Path) -> str:
     if src_path.is_dir():
         raise ValueError(f"Source is a directory, not a file: {src_path}")
 
-    # Native copy — on Windows this is CopyFileExW, on Linux it
-    # uses sendfile/copy_file_range when the source and destination
-    # filesystems allow it. ``copy2`` also calls ``copystat`` for us,
-    # so the mtime + read-only bit + extended attributes are
-    # preserved with the fewest possible round-trips.
+    # Pre-pass: hash the source. This is what lands in the manifest.
+    src_hash = compute_sha256(src_path)
+
+    # Native copy. INVARIANT: do not replace this with a Python loop.
     shutil.copy2(src_str, dst_str)
 
-    # Hash from the destination, not the source: the destination is
-    # frozen now (the copy returned), so the hash is guaranteed to
-    # describe exactly what verify will later re-read. The OS file
-    # cache absorbs most of the cost for small files; large files
-    # pay one extra linear read.
-    return compute_sha256(dst_path)
+    return src_hash

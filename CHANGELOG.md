@@ -5,6 +5,14 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.18] - 2026-05-09
+
+### Fixed
+- Restored the v3.3.14-class corruption-detection guarantee that v3.3.15–v3.3.17 had silently weakened. ``copy_and_hash`` now hashes the **source** before delegating the byte transfer to ``shutil.copy2``, instead of hashing the destination after the copy. The manifest therefore records what the user wanted to back up, and the ``verify`` phase later catches any divergence between source and destination — whether caused by a flaky USB controller flipping bits during the copy, a bad cable, or a source mutation that produced a Frankenstein destination. Previously, hashing the destination meant a corrupted copy would hash to its own corruption and the backup would be silently accepted as valid. Performance is unchanged from v3.3.17 because the source pre-pass read is served almost entirely by the OS file-system cache (the bytes are still hot when ``shutil.copy2`` calls ``CopyFileExW`` immediately after).
+
+### Added
+- ``src/core/hashing.py::copy_and_hash`` now carries an explicit ``INVARIANT`` comment block documenting that the byte transfer MUST stay on a kernel primitive (``shutil.copy2``). A fresh USB benchmark is required before swapping that delegation for a Python loop. This is the first rule of the upcoming ``docs/INVARIANTS.md`` register and is meant to prevent the v3.3.15-style throughput regression from happening again.
+
 ## [3.3.17] - 2026-05-09
 
 ### Fixed

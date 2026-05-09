@@ -49,7 +49,7 @@ class TestLocalWriterDiskFull:
 
         with (
             patch(
-                "src.core.phases.local_writer.copy_and_hash",
+                "src.core.phases.local_writer.shutil.copy2",
                 side_effect=enospc,
             ),
             pytest.raises(WriteError, match="file.txt") as exc_info,

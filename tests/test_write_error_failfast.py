@@ -78,7 +78,7 @@ class TestLocalWriterFailFast:
     def test_permission_error_raises(self, tmp_path):
         fi = _make_file(tmp_path)
         with patch(
-            "src.core.phases.local_writer.copy_and_hash",
+            "src.core.phases.local_writer.shutil.copy2",
             side_effect=PermissionError("access denied"),
         ):
             with pytest.raises(WriteError, match="test.txt") as exc_info:
@@ -89,7 +89,7 @@ class TestLocalWriterFailFast:
         fi = _make_file(tmp_path)
         with (
             patch(
-                "src.core.phases.local_writer.copy_and_hash",
+                "src.core.phases.local_writer.shutil.copy2",
                 side_effect=OSError("I/O error"),
             ),
             pytest.raises(WriteError, match="test.txt"),
@@ -102,7 +102,7 @@ class TestLocalWriterFailFast:
         mock_copy = MagicMock(side_effect=OSError("fail"))
 
         with (
-            patch("src.core.phases.local_writer.copy_and_hash", mock_copy),
+            patch("src.core.phases.local_writer.shutil.copy2", mock_copy),
             pytest.raises(WriteError),
         ):
             write_flat(files, tmp_path / "dst", "bk1")

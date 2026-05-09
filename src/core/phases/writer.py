@@ -1,19 +1,16 @@
 """Unified backup writer — dispatches to local or remote.
 
-Encapsulates the local/remote decision so that BackupEngine
-does not need to know the storage details for writing.
+Encapsulates the local/remote decision so that BackupEngine does not
+need to know the storage details for writing.
 
-For local destinations (plain or encrypted) the writer hashes each
-source file in the same pass that copies/streams it, so the integrity
-manifest is built from the bytes actually written and the
-manifest→write TOCTOU is closed. ``ctx.file_hashes`` is filled with
-``{relative_path: sha256_hex}`` for the pipeline's manifest phase to
-consume directly (cache-only build, no second source read).
-
-For remote destinations the legacy two-pass flow is preserved for now:
-``ctx.integrity_manifest`` is expected to be pre-built by
-``_phase_integrity`` BEFORE ``write_backup`` is called. The remote
-TOCTOU window will be closed in a follow-up by hashing during upload.
+Pipeline contract (since v3.3.19): ``_phase_integrity`` ALWAYS runs
+BEFORE this phase, populating ``ctx.integrity_manifest`` via parallel
+source hashing in ``manifest.py``. The writer therefore only needs to
+move bytes — for local plain mode that means a pure ``shutil.copy2``
+loop (kernel-fast), for encrypted mode a streaming tar through
+``EncryptingWriter``, for remote mode the existing protocol-specific
+upload. None of those branches has to compute hashes itself any more,
+which restores v3.3.14-class throughput on USB SSDs.
 """
 
 import logging
@@ -23,7 +20,7 @@ from pathlib import Path
 from src.core.phases.base import PipelineContext
 from src.core.phases.local_writer import (
     write_encrypted_tar_with_hashes,
-    write_flat_with_hashes,
+    write_flat,
 )
 from src.core.phases.remote_writer import write_remote
 from src.security.secure_memory import SecurePassword
@@ -37,19 +34,21 @@ def write_backup(
 ) -> None:
     """Write backup to the configured destination.
 
-    Dispatches to local flat copy or remote streaming based on storage
-    configuration.
+    Dispatches to local flat copy, encrypted tar, or remote streaming
+    based on storage configuration.
 
     Updates ``ctx.backup_path`` (local) or ``ctx.backup_remote_name``
-    (remote). For local destinations also fills ``ctx.file_hashes`` so
-    the manifest phase can build ``ctx.integrity_manifest`` without
-    re-reading the source.
+    (remote). The integrity manifest is read from ``ctx.integrity_manifest``
+    (built by ``_phase_integrity`` BEFORE this phase) — encrypted tar
+    embeds it inside the archive, remote uploads it alongside, plain
+    local writes it as a sidecar in ``_phase_save_manifest``.
 
     The encryption password is wrapped in a ``SecurePassword`` and
     zeroed after the write phase completes.
 
     Args:
-        ctx: Pipeline context with profile, files, and backend populated.
+        ctx: Pipeline context with profile, files, backend, and
+            integrity_manifest populated.
         cancel_check: Callable that raises CancelledError if cancelled.
     """
     secure_pw = _get_encrypt_password(ctx)
@@ -57,11 +56,6 @@ def write_backup(
         encrypt_pw = secure_pw.get() if secure_pw else ""
 
         if ctx.profile.storage.is_remote():
-            # Remote upload still uses the legacy pre-built manifest
-            # path. ``_run_pipeline`` runs ``_phase_integrity`` BEFORE
-            # ``_phase_write`` for remote destinations, so
-            # ``ctx.integrity_manifest`` is populated here.
-            # TODO(phase-A.1): hash-during-upload for remote modes.
             ctx.backup_remote_name = write_remote(
                 ctx.files,
                 ctx.backend,
@@ -71,33 +65,38 @@ def write_backup(
                 cancel_check=cancel_check,
                 integrity_manifest=ctx.integrity_manifest if encrypt_pw else None,
             )
-        else:
-            dest = Path(ctx.profile.storage.destination_path)
+            return
 
-            if encrypt_pw:
-                archive_path, file_hashes = write_encrypted_tar_with_hashes(
-                    ctx.files,
-                    dest,
-                    ctx.backup_name,
-                    encrypt_pw,
-                    ctx.events,
-                    cancel_check=cancel_check,
-                )
-                ctx.backup_path = archive_path
-            else:
-                backup_dir, file_hashes = write_flat_with_hashes(
-                    ctx.files,
-                    dest,
-                    ctx.backup_name,
-                    ctx.events,
-                    cancel_check=cancel_check,
-                )
-                ctx.backup_path = backup_dir
-            # Hand the hashes to the pipeline so ``_phase_integrity``
-            # can build the manifest with zero source re-reads. This
-            # is what makes the manifest hash-bound to the bytes that
-            # actually landed on the destination.
-            ctx.file_hashes = file_hashes
+        dest = Path(ctx.profile.storage.destination_path)
+
+        if encrypt_pw:
+            # Encrypted tar still streams source files through a
+            # hashing wrapper for the embedded ``.wbverify`` inside
+            # the archive. The hashes it computes happen to match
+            # ``ctx.integrity_manifest`` (both come from the same
+            # source bytes); kept for backward compatibility with
+            # the in-archive layout.
+            archive_path, _ = write_encrypted_tar_with_hashes(
+                ctx.files,
+                dest,
+                ctx.backup_name,
+                encrypt_pw,
+                ctx.events,
+                cancel_check=cancel_check,
+            )
+            ctx.backup_path = archive_path
+            return
+
+        # Plain local mode: pure kernel ``shutil.copy2`` per file.
+        # The manifest was already built by ``_phase_integrity``;
+        # the writer just moves bytes.
+        ctx.backup_path = write_flat(
+            ctx.files,
+            dest,
+            ctx.backup_name,
+            ctx.events,
+            cancel_check=cancel_check,
+        )
     finally:
         if secure_pw:
             secure_pw.clear()

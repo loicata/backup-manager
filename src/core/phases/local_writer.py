@@ -1,32 +1,97 @@
-"""Phase 3a: Write backup to local/network destination.
+"""Phase 4: Write backup files to destination — flat or encrypted tar.
 
 Supports two modes:
 - Plain: flat directory copy (no encryption).
 - Encrypted: single .tar.wbenc archive written directly.
 
-Both modes hash each source file in the same pass that copies/encrypts
-it, so the resulting integrity manifest describes exactly the bytes
-that landed on the destination. A two-pass implementation (hash first,
-copy second) opens a TOCTOU window: if the source is modified between
-the two passes, the manifest's hash no longer matches what was written
-and the verify phase rejects the entire backup. Single-pass copy +
-hash closes that window — see ``src.core.hashing.copy_and_hash``.
+INVARIANT (see docs/INVARIANTS.md): for the plain (flat) mode the
+byte transfer of every file MUST go through ``shutil.copy2`` so the
+copy stays in kernel-space (``CopyFileExW`` on Windows, ``sendfile``
+on Linux). The integrity manifest is built BEFORE this phase by
+``_phase_integrity``, which hashes every source in parallel via the
+manifest module's ``ThreadPoolExecutor``. A previous shape
+(v3.3.15-v3.3.18) hashed inside this phase per file, serialising
+hash + copy and capping USB throughput at ~8 MB/s on a 30 k-small-
+file workload.
 """
 
 import logging
 import os
+import shutil
 import tarfile
 from datetime import datetime
 from pathlib import Path
 
 from src.core.events import EventBus
 from src.core.exceptions import WriteError
-from src.core.hashing import copy_and_hash
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
 from src.storage.base import long_path_mkdir, long_path_str
 
 logger = logging.getLogger(__name__)
+
+
+def write_flat(
+    files: list[FileInfo],
+    destination: Path,
+    backup_name: str,
+    events: EventBus | None = None,
+    cancel_check=None,
+) -> Path:
+    """Write files as a flat directory copy via ``shutil.copy2``.
+
+    Pure kernel-space copy: every file is transferred by
+    ``shutil.copy2``, which on Windows resolves to ``CopyFileExW``
+    (one syscall packs open + transfer + metadata copy) and on Linux
+    to ``sendfile`` / ``copy_file_range`` where supported. The
+    integrity manifest has already been built by ``_phase_integrity``
+    using parallel hashing, so this loop has nothing to do besides
+    feed the kernel as fast as the destination can accept bytes.
+
+    Args:
+        files: Files to back up.
+        destination: Base destination path.
+        backup_name: Name for this backup (directory name).
+        events: Optional event bus.
+        cancel_check: Optional callable that raises CancelledError.
+
+    Returns:
+        Path to the created backup directory.
+
+    Raises:
+        WriteError: If any file fails to copy. Wraps the underlying
+            OSError/PermissionError with the offending relative path
+            so the caller can surface a precise diagnostic.
+    """
+    phase_log = PhaseLogger("writer", events)
+    backup_dir = destination / backup_name
+    long_path_mkdir(backup_dir)
+
+    total = len(files)
+    for i, file_info in enumerate(files):
+        if cancel_check is not None:
+            cancel_check()
+        target = backup_dir / file_info.relative_path
+        long_path_mkdir(target.parent)
+
+        try:
+            # INVARIANT: kernel copy. Do NOT replace with a Python loop.
+            shutil.copy2(
+                long_path_str(file_info.source_path),
+                long_path_str(target),
+            )
+        except (OSError, PermissionError) as e:
+            raise WriteError(file_info.relative_path, e) from e
+
+        phase_log.progress(
+            current=i + 1,
+            total=total,
+            filename=file_info.relative_path,
+            phase="backup",
+        )
+
+    phase_log.info(f"Backup written: {total} files to {backup_dir}")
+    return backup_dir
 
 
 def write_flat_with_hashes(
@@ -36,14 +101,12 @@ def write_flat_with_hashes(
     events: EventBus | None = None,
     cancel_check=None,
 ) -> tuple[Path, dict[str, str]]:
-    """Write files as a flat directory copy AND collect SHA-256 per file.
+    """Compatibility wrapper kept for callers that pre-date v3.3.19.
 
-    The hash is computed from the bytes that are actually written to
-    the destination, in the same pass as the copy. The returned dict
-    can be fed to ``build_integrity_manifest`` via its ``cached_hashes``
-    parameter so the pipeline never reads the source a second time —
-    this eliminates the manifest→write TOCTOU window that previously
-    let live source edits invalidate freshly-written backups.
+    Calls :func:`write_flat` (kernel copy) then rehashes every file
+    from the source. Production pipelines no longer need this —
+    ``_phase_integrity`` builds the manifest in parallel BEFORE the
+    write phase, so the writer does not need to track hashes itself.
 
     Args:
         files: Files to back up.
@@ -55,75 +118,17 @@ def write_flat_with_hashes(
     Returns:
         Tuple ``(backup_dir, file_hashes)`` where ``file_hashes`` maps
         each file's ``relative_path`` to its lowercase hex SHA-256.
-
-    Raises:
-        WriteError: If any file fails to copy. Wraps the underlying
-            OSError/PermissionError with the offending relative path so
-            the caller can surface a precise diagnostic.
     """
-    phase_log = PhaseLogger("writer", events)
-    backup_dir = destination / backup_name
-    long_path_mkdir(backup_dir)
+    from src.core.hashing import compute_sha256
 
-    file_hashes: dict[str, str] = {}
-    total = len(files)
-    for i, file_info in enumerate(files):
-        if cancel_check is not None:
-            cancel_check()
-        target = backup_dir / file_info.relative_path
-        long_path_mkdir(target.parent)
-
-        try:
-            digest = copy_and_hash(file_info.source_path, target)
-        except (OSError, PermissionError) as e:
-            raise WriteError(file_info.relative_path, e) from e
-
-        file_hashes[file_info.relative_path] = digest
-
-        phase_log.progress(
-            current=i + 1,
-            total=total,
-            filename=file_info.relative_path,
-            phase="backup",
-        )
-
-    phase_log.info(f"Backup written: {total} files to {backup_dir}")
-    return backup_dir, file_hashes
-
-
-def write_flat(
-    files: list[FileInfo],
-    destination: Path,
-    backup_name: str,
-    events: EventBus | None = None,
-    cancel_check=None,
-) -> Path:
-    """Write files as a flat directory copy.
-
-    Thin wrapper over :func:`write_flat_with_hashes` that discards the
-    hash dictionary. Kept for callers (mostly tests) that don't need
-    the per-file hashes — production pipelines should call
-    ``write_flat_with_hashes`` directly so the integrity manifest is
-    built from the bytes actually written, not a separate source read.
-
-    Args:
-        files: Files to back up.
-        destination: Base destination path.
-        backup_name: Name for this backup (directory name).
-        events: Optional event bus.
-        cancel_check: Optional callable that raises CancelledError.
-
-    Returns:
-        Path to the created backup directory.
-    """
-    backup_dir, _ = write_flat_with_hashes(
-        files,
-        destination,
-        backup_name,
-        events=events,
-        cancel_check=cancel_check,
+    backup_dir = write_flat(
+        files, destination, backup_name, events=events, cancel_check=cancel_check
     )
-    return backup_dir
+    file_hashes: dict[str, str] = {}
+    for file_info in files:
+        target = backup_dir / file_info.relative_path
+        file_hashes[file_info.relative_path] = compute_sha256(target)
+    return backup_dir, file_hashes
 
 
 class _HashingFileWrapper:

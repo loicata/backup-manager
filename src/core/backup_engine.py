@@ -578,25 +578,23 @@ class BackupEngine:
         # destinations.
         self._phase_orphan_scan(ctx)
 
-        # Phase 3 + 4 ordering depends on the destination:
+        # Phase 3 (integrity) ALWAYS runs before Phase 4 (write).
         #
-        # * LOCAL destinations (plain or encrypted): the writer hashes
-        #   each source file in the same pass it copies/streams it,
-        #   filling ``ctx.file_hashes``. The manifest phase then builds
-        #   ``ctx.integrity_manifest`` purely from those hashes
-        #   (cache-only, no second source read). This closes the
-        #   manifest→write TOCTOU window.
+        # ``_phase_integrity`` hashes every source file in parallel via
+        # the ``ThreadPoolExecutor`` in ``manifest.py`` (introduced in
+        # v3.3.13). The write phase then runs as a pure ``shutil.copy2``
+        # loop with no hashing in the inner pass, so the kernel copy
+        # primitive (``CopyFileExW`` on Windows) saturates the pipe.
         #
-        # * REMOTE destinations: the writer still consumes a pre-built
-        #   manifest (legacy path). The manifest phase therefore runs
-        #   FIRST and hashes the source. Closing the remote TOCTOU
-        #   requires hashing during upload — tracked as a follow-up.
-        if ctx.profile.storage.is_remote():
-            self._phase_integrity(ctx)
-            self._phase_write(ctx)
-        else:
-            self._phase_write(ctx)
-            self._phase_integrity(ctx)
+        # An earlier shape (v3.3.15–3.3.18) interleaved hash + copy
+        # per file inside ``_phase_write``. That was visually opaque
+        # ("Copying to Storage..." with no preceding manifest log) and
+        # serialised the hash with the copy, so on a 30 k-small-file
+        # workload the sequential per-file SHA-256 alone capped USB
+        # throughput at ~8 MB/s. The hash-then-copy split below
+        # restores the v3.3.14 model: parallel hash, then native copy.
+        self._phase_integrity(ctx)
+        self._phase_write(ctx)
         ctx.result.backup_path = str(ctx.backup_path or ctx.backup_remote_name)
 
         # Phase 5: Save integrity manifest
@@ -823,27 +821,35 @@ class BackupEngine:
             pass  # Path not accessible yet (USB not plugged, etc.)
 
     def _phase_integrity(self, ctx: PipelineContext) -> None:
-        """Phase 3: Build integrity manifest (hashing).
+        """Phase 3: Build integrity manifest by hashing every source.
 
-        For local destinations the writer phase has already populated
-        ``ctx.file_hashes`` with hashes computed from the bytes
-        actually written, so this phase becomes a pure aggregation —
-        no source files are read a second time. For remote
-        destinations the writer has not run yet and we fall back to
-        ``ctx.filter_hashes`` (differential mode) or a fresh source
-        hashing pass.
+        Runs BEFORE the write phase (since v3.3.19) so that:
+
+        1. The user sees an explicit "Building integrity manifest..."
+           log line before the long "Copying to Storage..." pass —
+           previously the integrity phase ran AFTER write and was
+           invisible until the copy was done.
+        2. The hashing is parallelised by ``manifest.py`` over the
+           ``_HASH_WORKERS_MAX`` thread pool, so 30 k small files
+           hash in O(N / workers) wallclock instead of O(N) — the
+           reason the v3.3.18 sequential hash-then-copy collapsed
+           to ~8 MB/s on a USB SSD.
+        3. The write phase becomes a pure ``shutil.copy2`` loop with
+           nothing in the inner pass except the kernel copy primitive,
+           which is what makes USB throughput match v3.3.14.
+
+        ``filter_hashes`` (populated during the differential filter
+        when a file's mtime/size already matched the previous manifest)
+        is still honoured as a cache so a clean differential run
+        avoids re-hashing files that did not change.
         """
         self._phase("Building integrity manifest...")
         self._check_cancel()
 
-        # Prefer hashes captured by the writer (closes manifest→write
-        # TOCTOU on local destinations). Fall back to filter_hashes
-        # for differential runs when the writer hasn't run yet
-        # (remote path).
-        writer_hashes = getattr(ctx, "file_hashes", None) or {}
-        cached: dict[str, str] | None = writer_hashes or (
-            getattr(ctx, "filter_hashes", None) or None
-        )
+        # Differential runs may already carry hashes for unchanged
+        # files in ``ctx.filter_hashes``. Use them as a hint; the rest
+        # is hashed fresh from the source.
+        cached: dict[str, str] | None = getattr(ctx, "filter_hashes", None) or None
 
         ctx.integrity_manifest = build_integrity_manifest(
             ctx.files,
@@ -853,8 +859,6 @@ class BackupEngine:
         )
 
         # Cache file hashes for reuse in Phase 8 (delta manifest).
-        # Re-export from the manifest so this remains correct whether
-        # the hashes came from the writer or from a fresh source pass.
         ctx.file_hashes = {
             rel_path: info["hash"]
             for rel_path, info in ctx.integrity_manifest.get("files", {}).items()

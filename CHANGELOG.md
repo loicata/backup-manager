@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.19] - 2026-05-09
+
+### Fixed
+- USB throughput on small-file workloads (~30 k files) was capped at ~8 MB/s in v3.3.18 because the writer phase was still hashing each file synchronously inside its inner loop (``copy_and_hash`` did ``compute_sha256(src)`` then ``shutil.copy2`` per file). The hash dominated the loop and serialised the kernel copy with the SHA-256 computation. Pipeline now restored to its v3.3.14 shape: ``_phase_integrity`` runs BEFORE ``_phase_write`` for **all** destinations and hashes every source in parallel via ``manifest.py``'s ``ThreadPoolExecutor`` (4-8 workers); ``_phase_write`` then becomes a pure ``shutil.copy2`` loop with nothing in the inner pass, so the kernel copy primitive saturates the USB pipe. Visually the user now sees ``Building integrity manifest...`` BEFORE ``Copying to Storage...`` in the run log, instead of the previous opaque "Copying" with hashes hidden inside.
+
+### Changed
+- ``_phase_integrity`` no longer consumes hashes from a writer cache; it always hashes from the source. This made the v3.3.15-style "writer fills ``ctx.file_hashes`` for the manifest phase" plumbing obsolete and removed an inter-phase coupling that was both a maintenance burden and the root cause of the regression chain v3.3.15→v3.3.18.
+- ``write_flat`` now uses ``shutil.copy2`` directly (kernel-space) and carries an ``INVARIANT`` comment block forbidding its replacement by a Python read/write loop without a fresh USB benchmark. ``write_flat_with_hashes`` is kept as a compatibility shim for tests; it now calls ``write_flat`` then re-hashes the destination.
+
 ## [3.3.18] - 2026-05-09
 
 ### Fixed

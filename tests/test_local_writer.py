@@ -128,9 +128,10 @@ class TestWriteFlat:
     def test_source_permission_error_raises_write_error(self, tmp_path: Path) -> None:
         """WriteError when source file cannot be read.
 
-        ``write_flat`` now uses ``copy_and_hash`` (single-pass copy +
-        SHA-256) so the mock target is the new primitive, not the
-        legacy ``shutil.copy2``.
+        Since v3.3.19 ``write_flat`` uses ``shutil.copy2`` directly
+        (the integrity manifest is built upstream by parallel hashing
+        in ``_phase_integrity``). The mock therefore targets the
+        kernel-copy primitive itself.
         """
         from unittest.mock import patch
 
@@ -142,7 +143,7 @@ class TestWriteFlat:
         dest.mkdir()
         with (
             patch(
-                "src.core.phases.local_writer.copy_and_hash",
+                "src.core.phases.local_writer.shutil.copy2",
                 side_effect=PermissionError("Access denied"),
             ),
             pytest.raises(WriteError),

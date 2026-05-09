@@ -66,19 +66,27 @@ class _SkippedPaths:
         logger.debug("Error accessing %s: %s", path, message)
 
     def emit_summary(self, phase_log: PhaseLogger) -> None:
-        """Push one aggregated WARNING per non-empty category to the UI.
+        """Push one aggregated event per non-empty category to the UI.
 
-        Format: ``"Skipped N path(s) — <reason>. First: <samples>(+M more)"``
-        — keeps "permission" and "Skipped" keywords so users grepping
-        the log can still find the info.
+        Permission-denied is the noisy-but-benign case (system caches,
+        files locked by another app). Surfaced at INFO with reassuring
+        wording so a novice user with thousands of these doesn't panic.
+
+        OS errors are rarer and may indicate real disk/filesystem
+        issues, so they stay at WARNING.
+
+        The word ``Skipped`` is preserved in both messages so users
+        searching the log can still find them.
         """
         if self.permission_denied_count:
             sample = "; ".join(self.permission_denied)
             extra = self.permission_denied_count - len(self.permission_denied)
             suffix = f" (+{extra} more)" if extra > 0 else ""
-            phase_log.warning(
-                f"Skipped {self.permission_denied_count} path(s) — "
-                f"permission denied. First: {sample}{suffix}"
+            phase_log.info(
+                f"Skipped {self.permission_denied_count} protected item(s) "
+                f"— typically system caches or files locked by another app "
+                f"(this is normal, no action needed). "
+                f"Examples: {sample}{suffix}"
             )
         if self.os_errors_count:
             sample = "; ".join(f"{p} ({m})" for p, m in self.os_errors)
@@ -142,6 +150,13 @@ def collect_files(
     files: list[FileInfo] = []
     seen: set[str] = set()  # Avoid duplicates
     skipped = _SkippedPaths()
+
+    # Surface the active exclude patterns so a user can audit what
+    # is being filtered out without hunting through the profile dialog.
+    # Helps with the "did my files actually get backed up?" question
+    # raised when novice users see the skip summary.
+    if exclude:
+        phase_log.info(f"Applying exclude patterns: {', '.join(exclude)}")
 
     for source in source_paths:
         source_path = Path(source)

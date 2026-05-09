@@ -5,6 +5,18 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.21] - 2026-05-09
+
+### Changed
+- Permission-denied skip summary in ``src/core/phases/collector.py`` now surfaces at ``INFO`` level with reassuring wording (``"Skipped N protected item(s) — typically system caches or files locked by another app (this is normal, no action needed). Examples: …"``) instead of a yellow ``WARNING`` saying ``"permission denied"``. On workloads with many cache directories the warning was leading novice users to believe their files weren't being backed up — the message is benign in 99 % of cases (``.pytest_cache``, WardSOAR ``volatile`` evidence stores, files locked by Outlook/SQL/etc.) and now reads accordingly.
+- ``OS error`` skip summary stays at ``WARNING`` — those may indicate real disk/filesystem issues and deserve attention.
+
+### Added
+- New ``INFO`` line at the start of every collect phase: ``"Applying exclude patterns: <comma-separated list>"``. Surfaces the active filter list in the run log so a user who sees the skip summary can audit what is being excluded without digging through the profile dialog. Skipped when the exclude list is empty (no noise).
+
+### Tests
+- +5 tests in ``tests/unit/test_collector_skipped_aggregation.py``: ``TestUserFriendlyWording`` (× 3, asserts the level demotion, the reassuring keywords, and that ``OS error`` stays at ``WARNING``) and ``TestExcludePatternsLogged`` (× 2, asserts the new ``Applying exclude patterns`` line and its silence on an empty list). 4 existing tests adapted to the new level/format. Full suite at 1 782 passed / 0 failed.
+
 ## [3.3.20] - 2026-05-09
 
 ### Removed

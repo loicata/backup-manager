@@ -70,9 +70,10 @@ class TestWriteError:
 class TestLocalWriterFailFast:
     """write_flat raises WriteError on any copy failure.
 
-    The single-pass writer routes copies through ``copy_and_hash``
-    (so the manifest is hashed from the bytes actually written, not a
-    second source read). These tests mock the new primitive accordingly.
+    Since v3.3.19 ``write_flat`` is a pure ``shutil.copy2`` loop;
+    the integrity manifest is built upstream by parallel source
+    hashing in ``_phase_integrity``. These tests mock the kernel-copy
+    primitive directly.
     """
 
     def test_permission_error_raises(self, tmp_path):

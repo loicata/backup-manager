@@ -214,3 +214,52 @@ class TestAutoStart:
         absent = tmp_path / "nonexistent.vbs"
         with patch.object(AutoStart, "_LEGACY_VBS", absent):
             AutoStart._cleanup_legacy_vbs()  # Should not raise
+
+    def test_ensure_startup_idempotent_skips_unchanged_value(self, fake_winreg):
+        """Repeated calls with the same args perform exactly one write.
+
+        Regression guard: ``ensure_startup`` is invoked after every
+        ``save_profile``. A write-every-time path was flooding the run
+        log with identical "Auto-start configured" lines. The fix is a
+        read-before-write that no-ops when the registry already holds
+        the desired value.
+        """
+        write_count = {"n": 0}
+
+        def counting_set_value(_key, name, _reserved, _type, value):
+            write_count["n"] += 1
+            _FAKE_STORE[name] = value
+
+        fake_winreg.SetValueEx = counting_set_value
+
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", str(FAKE_EXE)),
+            patch.object(AutoStart, "_cleanup_legacy_vbs"),
+        ):
+            AutoStart.ensure_startup(show_window=True)
+            AutoStart.ensure_startup(show_window=True)
+            AutoStart.ensure_startup(show_window=True)
+
+        assert write_count["n"] == 1
+
+    def test_ensure_startup_writes_when_value_changes(self, fake_winreg):
+        """Switching show_window flips the command and triggers a write."""
+        write_count = {"n": 0}
+
+        def counting_set_value(_key, name, _reserved, _type, value):
+            write_count["n"] += 1
+            _FAKE_STORE[name] = value
+
+        fake_winreg.SetValueEx = counting_set_value
+
+        with (
+            patch.object(sys, "frozen", True, create=True),
+            patch.object(sys, "executable", str(FAKE_EXE)),
+            patch.object(AutoStart, "_cleanup_legacy_vbs"),
+        ):
+            AutoStart.ensure_startup(show_window=True)
+            AutoStart.ensure_startup(show_window=False)
+
+        assert write_count["n"] == 2
+        assert "--minimized" in _FAKE_STORE[AutoStart._REG_VALUE]

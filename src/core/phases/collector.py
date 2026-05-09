@@ -150,7 +150,7 @@ def collect_files(
             continue
 
         if source_path.is_file():
-            if not _is_excluded(source_path, exclude):
+            if not _is_excluded(source_path, exclude, source_path.parent):
                 _add_file(files, seen, source_path, source_path.parent, source)
         elif source_path.is_dir():
             _collect_directory(files, seen, source_path, exclude, source, skipped)
@@ -178,6 +178,7 @@ def _collect_directory(
     warnings.  ``collect_files`` flushes a single aggregated WARNING
     per category once the walk completes.
     """
+    root_path = Path(source_root)
     try:
         for entry in os.scandir(directory):
             try:
@@ -192,13 +193,13 @@ def _collect_directory(
                     if entry.name in _ALWAYS_EXCLUDED_DIRS:
                         continue
                     # Check if directory name matches exclusion
-                    if _is_excluded(path, exclude):
+                    if _is_excluded(path, exclude, root_path):
                         continue
                     _collect_directory(files, seen, path, exclude, source_root, skipped)
 
                 elif entry.is_file(follow_symlinks=False):
-                    if not _is_excluded(path, exclude):
-                        _add_file(files, seen, path, Path(source_root), source_root)
+                    if not _is_excluded(path, exclude, root_path):
+                        _add_file(files, seen, path, root_path, source_root)
 
             except PermissionError:
                 skipped.add_permission(entry.path)
@@ -243,7 +244,43 @@ def _add_file(
         pass
 
 
-def _is_excluded(filepath: Path, patterns: list[str]) -> bool:
-    """Check if a path matches any exclusion pattern."""
+def _is_excluded(
+    filepath: Path,
+    patterns: list[str],
+    source_root: Path | None = None,
+) -> bool:
+    """Check if a path matches any exclusion pattern.
+
+    Two pattern flavours are supported:
+
+    * Patterns WITHOUT ``/`` (e.g. ``__pycache__``, ``*.tmp``) match
+      against the file or directory **basename**, anywhere in the
+      tree. This is the gitignore-style "any subdir called X"
+      behaviour the existing default patterns rely on.
+    * Patterns WITH ``/`` (e.g. ``*/evidence/*/volatile``) match
+      against the **POSIX relative path** below ``source_root``. This
+      lets users target a specific layout instead of every basename.
+      ``fnmatch``'s ``*`` greedily spans path separators, so a
+      pattern like ``*/evidence/*/volatile`` matches the dir
+      ``loicata/WardSOAR/evidence/<uuid>/volatile`` regardless of
+      depth above ``evidence``.
+
+    When ``source_root`` is None, path-style patterns are skipped —
+    callers that don't have a source_root context fall back to the
+    basename-only behaviour.
+    """
     name = filepath.name
-    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+    rel_path: str | None = None
+    if source_root is not None:
+        try:
+            rel_path = filepath.relative_to(source_root).as_posix()
+        except ValueError:
+            rel_path = None
+
+    for pattern in patterns:
+        if "/" in pattern:
+            if rel_path is not None and fnmatch.fnmatch(rel_path, pattern):
+                return True
+        elif fnmatch.fnmatch(name, pattern):
+            return True
+    return False

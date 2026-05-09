@@ -842,6 +842,13 @@ class AutoStart:
     def ensure_startup(cls, show_window: bool = True) -> None:
         """Create or update auto-start registry entry.
 
+        Idempotent: queries the current value first and only writes
+        when it differs from the desired command. ``ensure_startup``
+        is invoked after every ``save_profile`` so a write-every-time
+        path floods the run log with identical "Auto-start configured"
+        lines; the read-before-write keeps the log readable and avoids
+        registry churn.
+
         Args:
             show_window: If False, adds --minimized flag to the command.
         """
@@ -858,6 +865,22 @@ class AutoStart:
 
         try:
             import winreg
+
+            current: str | None = None
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    cls._REG_KEY,
+                    0,
+                    winreg.KEY_READ,
+                ) as key:
+                    current, _ = winreg.QueryValueEx(key, cls._REG_VALUE)
+            except FileNotFoundError:
+                pass
+
+            if current == command:
+                cls._cleanup_legacy_vbs()
+                return
 
             with winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,

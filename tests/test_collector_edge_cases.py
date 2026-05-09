@@ -157,3 +157,102 @@ class TestSymlinksAndJunctions:
         names = [f.relative_path for f in files]
         assert any(n.endswith("/real.txt") for n in names)
         assert not any(n.endswith("/link.txt") for n in names)
+
+
+class TestExcludePatternStyles:
+    """Patterns are matched against the basename by default; patterns
+    containing ``/`` are matched against the source-relative POSIX
+    path so users can target specific layouts (e.g.
+    ``*/evidence/*/volatile``)."""
+
+    def test_basename_pattern_excludes_directory_by_name(self, tmp_path):
+        """``__pycache__``-style patterns (no ``/``) prune any subdir
+        with that basename, anywhere in the tree."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("x", encoding="utf-8")
+        (tmp_path / "src" / "__pycache__").mkdir()
+        (tmp_path / "src" / "__pycache__" / "cache.pyc").write_text("c", encoding="utf-8")
+
+        files = collect_files([str(tmp_path)], exclude_patterns=["__pycache__"])
+        names = [f.relative_path for f in files]
+
+        assert any(n.endswith("/main.py") for n in names)
+        assert not any("__pycache__" in n for n in names)
+
+    def test_basename_pattern_excludes_file_by_glob(self, tmp_path):
+        """``*.tmp``-style patterns match file basenames anywhere."""
+        (tmp_path / "keep.txt").write_text("k", encoding="utf-8")
+        (tmp_path / "drop.tmp").write_text("d", encoding="utf-8")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "also.tmp").write_text("a", encoding="utf-8")
+
+        files = collect_files([str(tmp_path)], exclude_patterns=["*.tmp"])
+        names = [f.relative_path for f in files]
+
+        assert any(n.endswith("/keep.txt") for n in names)
+        assert not any(n.endswith(".tmp") for n in names)
+
+    def test_path_pattern_excludes_specific_layout(self, tmp_path):
+        """Pattern ``*/evidence/*/volatile`` matches any
+        ``<root>/.../evidence/<uuid>/volatile`` directory regardless
+        of depth above ``evidence``."""
+        # Layout: tmp/proj/evidence/abc-uuid/volatile/dump.bin
+        ev_dir = tmp_path / "proj" / "evidence" / "abc-uuid" / "volatile"
+        ev_dir.mkdir(parents=True)
+        (ev_dir / "dump.bin").write_text("vol", encoding="utf-8")
+        # Files we DO want to back up: a peer dir under evidence/<uuid>.
+        peer_dir = tmp_path / "proj" / "evidence" / "abc-uuid" / "metadata"
+        peer_dir.mkdir(parents=True)
+        (peer_dir / "info.json").write_text("info", encoding="utf-8")
+
+        files = collect_files(
+            [str(tmp_path)],
+            exclude_patterns=["*/evidence/*/volatile"],
+        )
+        names = [f.relative_path for f in files]
+
+        assert any(n.endswith("/info.json") for n in names)
+        assert not any("volatile" in n for n in names)
+
+    def test_path_pattern_does_not_match_unrelated_basename(self, tmp_path):
+        """A path-style pattern does NOT exclude a basename that
+        only happens to coincide with the last component."""
+        # ``volatile`` directly under root (no evidence/<uuid> ancestor)
+        # must NOT be pruned by ``*/evidence/*/volatile``.
+        vol_dir = tmp_path / "volatile"
+        vol_dir.mkdir()
+        (vol_dir / "data.txt").write_text("ok", encoding="utf-8")
+
+        files = collect_files(
+            [str(tmp_path)],
+            exclude_patterns=["*/evidence/*/volatile"],
+        )
+        names = [f.relative_path for f in files]
+
+        assert any(n.endswith("/data.txt") for n in names)
+
+    def test_path_and_basename_patterns_can_combine(self, tmp_path):
+        """Both pattern styles can coexist in the same exclude list."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("m", encoding="utf-8")
+        cache = tmp_path / "src" / "__pycache__"
+        cache.mkdir()
+        (cache / "x.pyc").write_text("c", encoding="utf-8")
+        # ``*/evidence/*/volatile`` requires at least one ancestor
+        # component before ``evidence/`` (fnmatch's ``*`` matches ≥1
+        # chars including ``/``). Real-world WardSOAR layouts always
+        # have at least one wrapper directory, so this matches the
+        # production case.
+        ev = tmp_path / "WardSOAR" / "evidence" / "u1" / "volatile"
+        ev.mkdir(parents=True)
+        (ev / "ram.dmp").write_text("v", encoding="utf-8")
+
+        files = collect_files(
+            [str(tmp_path)],
+            exclude_patterns=["__pycache__", "*/evidence/*/volatile"],
+        )
+        names = [f.relative_path for f in files]
+
+        assert any(n.endswith("/main.py") for n in names)
+        assert not any("__pycache__" in n for n in names)
+        assert not any("volatile" in n for n in names)

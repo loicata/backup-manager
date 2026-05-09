@@ -36,11 +36,12 @@ class TestLocalWriterDiskFull:
     """Disk-full errors during flat copy."""
 
     def test_copy2_enospc_raises_write_error(self, tmp_path):
-        """copy_and_hash raises ENOSPC — WriteError raised immediately.
+        """shutil.copy2 raises ENOSPC — WriteError raised immediately.
 
-        The single-pass writer copies via ``copy_and_hash`` (so the
-        manifest hash is bound to the bytes actually written). The
-        ENOSPC injection point follows the writer's I/O path.
+        Since v3.3.19 ``write_flat`` uses ``shutil.copy2`` directly
+        (the integrity manifest is built upstream by parallel hashing
+        in ``_phase_integrity``). The ENOSPC injection point follows
+        the writer's kernel-copy path.
         """
         from src.core.phases.local_writer import write_flat
 

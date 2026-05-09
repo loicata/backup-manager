@@ -94,43 +94,6 @@ def write_flat(
     return backup_dir
 
 
-def write_flat_with_hashes(
-    files: list[FileInfo],
-    destination: Path,
-    backup_name: str,
-    events: EventBus | None = None,
-    cancel_check=None,
-) -> tuple[Path, dict[str, str]]:
-    """Compatibility wrapper kept for callers that pre-date v3.3.19.
-
-    Calls :func:`write_flat` (kernel copy) then rehashes every file
-    from the source. Production pipelines no longer need this —
-    ``_phase_integrity`` builds the manifest in parallel BEFORE the
-    write phase, so the writer does not need to track hashes itself.
-
-    Args:
-        files: Files to back up.
-        destination: Base destination path.
-        backup_name: Name for this backup (directory name).
-        events: Optional event bus.
-        cancel_check: Optional callable that raises CancelledError.
-
-    Returns:
-        Tuple ``(backup_dir, file_hashes)`` where ``file_hashes`` maps
-        each file's ``relative_path`` to its lowercase hex SHA-256.
-    """
-    from src.core.hashing import compute_sha256
-
-    backup_dir = write_flat(
-        files, destination, backup_name, events=events, cancel_check=cancel_check
-    )
-    file_hashes: dict[str, str] = {}
-    for file_info in files:
-        target = backup_dir / file_info.relative_path
-        file_hashes[file_info.relative_path] = compute_sha256(target)
-    return backup_dir, file_hashes
-
-
 class _HashingFileWrapper:
     """Wraps a binary file object and computes SHA-256 of read bytes.
 
@@ -179,8 +142,9 @@ def write_encrypted_tar_with_hashes(
     ``tarfile.addfile``. The integrity manifest is built from those
     hashes and embedded inside the encrypted archive at the end of the
     streaming session, so the manifest describes exactly what was
-    written — closing the same TOCTOU window that ``write_flat_with_hashes``
-    closes for the plain mode.
+    written. The plain (flat) mode achieves the same end via
+    ``_phase_integrity`` (parallel source hash) running BEFORE
+    ``write_flat`` (pure ``shutil.copy2``).
 
     A file that vanishes between collection and write is skipped (its
     relative path does NOT appear in the returned hash dict and is

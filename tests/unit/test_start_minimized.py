@@ -42,6 +42,8 @@ class TestAutoStartRegistry:
         mock_key = MagicMock()
         mock_winreg.OpenKey.return_value.__enter__ = MagicMock(return_value=mock_key)
         mock_winreg.OpenKey.return_value.__exit__ = MagicMock(return_value=False)
+        # No existing entry — exercise the write path.
+        mock_winreg.QueryValueEx.side_effect = FileNotFoundError
 
         with (
             patch.object(sys, "frozen", True, create=True),
@@ -67,6 +69,8 @@ class TestAutoStartRegistry:
         mock_key = MagicMock()
         mock_winreg.OpenKey.return_value.__enter__ = MagicMock(return_value=mock_key)
         mock_winreg.OpenKey.return_value.__exit__ = MagicMock(return_value=False)
+        # No existing entry — exercise the write path.
+        mock_winreg.QueryValueEx.side_effect = FileNotFoundError
 
         with (
             patch.object(sys, "frozen", True, create=True),
@@ -103,6 +107,8 @@ class TestAutoStartRegistry:
         mock_key = MagicMock()
         mock_winreg.OpenKey.return_value.__enter__ = MagicMock(return_value=mock_key)
         mock_winreg.OpenKey.return_value.__exit__ = MagicMock(return_value=False)
+        # No existing entry — exercise the write path.
+        mock_winreg.QueryValueEx.side_effect = FileNotFoundError
 
         with (
             patch.object(sys, "frozen", False, create=True),

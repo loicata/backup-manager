@@ -5,6 +5,28 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.20] - 2026-05-09
+
+### Removed
+- ``copy_and_hash`` (in ``src/core/hashing.py``) and ``write_flat_with_hashes`` (in ``src/core/phases/local_writer.py``). Both were orphaned by the v3.3.19 pipeline rework that moved hashing out of the writer's inner loop into a parallel ``_phase_integrity`` pass. Production callers had already migrated to ``compute_sha256`` + ``write_flat``; the two helpers were kept "for tests" and accumulated documentation that no longer matched the actual code path. Their tests (~140 lines across ``test_hashing.py`` and ``test_local_writer.py``) were removed at the same time — there is no behavioural surface left to cover.
+- Module-level ``shutil`` import in ``src/core/hashing.py`` (was only used by the deleted ``copy_and_hash``).
+
+### Fixed
+- ``AutoStart.ensure_startup`` (Windows registry auto-start) is now idempotent. It is invoked after every ``save_profile`` for a refresh, and the previous code wrote the registry value and emitted ``Auto-start configured via registry: …`` every time even when nothing had changed — flooding the run log with duplicate lines (12 of them in a single morning's logs). The new path queries the existing value first and short-circuits when it already matches the desired command; ``SetValueEx`` and the INFO log are emitted only on actual change.
+
+### Added
+- Two new default exclude patterns on ``BackupProfile``:
+  - ``.pytest_cache`` (basename style) — every Python project drop-zone for pytest's incremental cache, locked while pytest runs and consistently rejected by the collector with "permission denied".
+  - ``*/evidence/*/volatile`` (path style) — WardSOAR-style volatile-memory dumps under ``evidence/<uuid>/volatile``, owned by a live process and always inaccessible during collection.
+- Path-style exclude pattern matching in ``src.core.phases.collector._is_excluded``. Patterns containing ``/`` are matched against the source-relative POSIX path (gitignore-style); patterns without ``/`` keep the legacy basename-anywhere behaviour. The existing default patterns (``__pycache__``, ``*.tmp``, ``.git``, ``node_modules``, …) are unchanged in semantics. ``_is_excluded`` gains a new optional ``source_root`` parameter; callers in ``collect_files`` and ``_collect_directory`` pass it.
+
+### Comments / docs
+- ``src/core/hashing.py`` header and ``HASH_CHUNK_SIZE`` comment block rewritten to describe the v3.3.19 pipeline (parallel source hash in Phase 3, kernel ``shutil.copy2`` in Phase 4) instead of the obsolete "v3.3.18 single-pass ``copy_and_hash``" story.
+- Test docstrings in ``test_disk_full_scenarios.py`` and ``test_write_error_failfast.py`` updated to mock ``shutil.copy2`` (the actual writer primitive) rather than the deleted ``copy_and_hash``.
+
+### Tests
+- +7 tests (idempotence of ``ensure_startup``, default exclude patterns, path-style pattern matching, basename-vs-path coexistence). Net change after the dead-code test cleanup: −280 lines of obsolete coverage, full suite at 1 748 passed / 0 failed.
+
 ## [3.3.19] - 2026-05-09
 
 ### Fixed

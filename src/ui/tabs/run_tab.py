@@ -566,7 +566,13 @@ class RunTab(ttk.Frame):
 
     def _update_phase(self, phase):
         with contextlib.suppress(tk.TclError):
-            self.status_label.config(text=phase, foreground=Colors.ACCENT)
+            # Status messages stay grey throughout the run — only the
+            # final "Backup complete!" pill turns green (success) and
+            # "Backup failed!" red (error). The previous Colors.ACCENT
+            # blue made the user perceive each phase as "highlighted"
+            # which competed with the canonical success / failure
+            # signal at the end.
+            self.status_label.config(text=phase, foreground=Colors.TEXT_SECONDARY)
 
     def _on_log(self, message="", level="info", phase="", details=None, **kw):
         """Schedule log append on the main thread."""

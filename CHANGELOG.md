@@ -5,6 +5,12 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.3] - 2026-05-10
+
+### Changed
+- **Run-tab status label stays grey throughout the run.** ``_update_phase`` used to switch the foreground to ``Colors.ACCENT`` (blue) on every PHASE_CHANGED event, painting "hashing: …", "copying: …", "verifying: …" in blue while only the heartbeat "Scanning… N files in M folders" was grey. The result was a visual inconsistency between phases — the user perceived blue as a state highlight, which competed with the canonical green ``Backup complete!`` / red ``Backup failed!`` end-of-run signals. The label now renders ``Colors.TEXT_SECONDARY`` (grey) for every in-flight phase; only the terminal states keep their colour (green = success, red = failure).
+- **Default ``exclude_patterns`` no longer hides ``*/evidence/*/volatile``.** The path-style pattern was added in 3.3.20 to suppress the permission-denied flood from WardSOAR volatile-memory evidence stores, but cybersecurity evidence is exactly the kind of data the user *wants* to back up — silently filtering it was the wrong default. New profiles created from 3.5.3 onwards have 9 default patterns instead of 10. Existing profiles are not migrated; the user can remove the pattern manually from the General tab if they want the new behaviour. The pattern itself still works when explicitly added to a profile's exclude list.
+
 ## [3.5.2] - 2026-05-10
 
 ### Fixed

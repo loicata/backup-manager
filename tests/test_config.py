@@ -122,12 +122,6 @@ class TestBackupProfile:
         p = BackupProfile()
         assert ".pytest_cache" in p.exclude_patterns
 
-    def test_default_excludes_evidence_volatile(self):
-        """Path-style default catches WardSOAR-style volatile-memory
-        dumps that are always locked by a live process."""
-        p = BackupProfile()
-        assert "*/evidence/*/volatile" in p.exclude_patterns
-
     def test_default_backup_type(self):
         p = BackupProfile()
         assert p.backup_type == BackupType.DIFFERENTIAL

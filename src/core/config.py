@@ -217,13 +217,6 @@ class BackupProfile:
             ".pytest_cache",
             ".git",
             "node_modules",
-            # Path-style pattern (contains "/"): matches the relative
-            # path under the source root, not just the basename.
-            # WardSOAR-style evidence stores keep volatile-memory dumps
-            # under ``evidence/<uuid>/volatile`` — these are owned by a
-            # live process and always trip "permission denied" during
-            # collection.
-            "*/evidence/*/volatile",
         ]
     )
     backup_type: BackupType = BackupType.DIFFERENTIAL

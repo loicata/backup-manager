@@ -5,6 +5,11 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.4] - 2026-05-10
+
+### Changed
+- **Run-tab Log restored to a proper two-column layout (``Message`` / ``Phase``)** — the 3.5.0 build had drifted to a single-column ``show="tree"`` rendering that prefixed messages with ``[phase]`` text, losing the visual alignment between phase identifiers and message bodies. The widget now uses ``show="tree headings"`` with ``columns=("phase",)``: column ``#0`` is the tree column carrying the message text, the caret and the native indentation; the ``Phase`` column is fixed-width (90 px) on the right and shows the phase name only on top-level event rows. Child rows (categories, extensions, paths under Skipped, patterns under Applying exclude patterns) leave the ``Phase`` cell empty — a leaf path has no phase of its own. The caret stays glued to the message it expands, which the previous one-column hack achieved through string concatenation.
+
 ## [3.5.3] - 2026-05-10
 
 ### Changed

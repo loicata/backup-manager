@@ -1,6 +1,7 @@
 """Run tab: backup execution with progress and log display."""
 
 import contextlib
+import re
 import tkinter as tk
 from tkinter import ttk
 
@@ -20,6 +21,35 @@ from src.core.file_categorizer import (
 )
 from src.core.health_checker import DestinationHealth, format_bytes
 from src.ui.theme import Colors, Fonts, Spacing
+
+# PHASE_CHANGED carries the announcement message text rather than a
+# short phase identifier (the engine emits ``"Collecting files..."``
+# as the phase value, not ``"collector"``). We map it back to a short
+# tag for the Log's Phase column so engine-level emits without an
+# explicit phase don't leave the column blank for half the run.
+_PHASE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^Collecting", re.I), "collector"),
+    (re.compile(r"^Filtering", re.I), "filter"),
+    (re.compile(r"manifest", re.I), "manifest"),
+    (re.compile(r"^(?:Copy|Upload).*(?:Storage|to mirror)", re.I), "writer"),
+    (re.compile(r"commit marker", re.I), "commit_marker"),
+    (re.compile(r"^Verifying", re.I), "verifier"),
+    (re.compile(r"^Uploading to mirror", re.I), "mirror"),
+    (re.compile(r"rotat", re.I), "rotator"),
+)
+
+
+def _infer_phase(announcement: str) -> str:
+    """Return the short phase tag for an engine PHASE_CHANGED announcement.
+
+    Empty string when no pattern matches — falls back to the previous
+    phase tag in ``RunTab._current_phase``.
+    """
+    for pattern, phase in _PHASE_PATTERNS:
+        if pattern.search(announcement):
+            return phase
+    return ""
+
 
 # Maximum characters displayed in the "phase: filename" status line.
 # Beyond this length the path is truncated with a leading ellipsis so the
@@ -82,6 +112,11 @@ class RunTab(ttk.Frame):
         self._phase_order: list[str] = []
         self._phase_weights: dict[str, int] = {}
         self._last_pct = 0
+        # Tracks the current pipeline phase as inferred from PHASE_CHANGED
+        # announcements. Used to fill the Phase column for LOG events
+        # that arrive without an explicit phase tag (typically engine-
+        # level emits like "Saving manifest..." or "Backup complete").
+        self._current_phase: str = ""
         # Profile info baseline — so the BACKUP_TYPE_DETERMINED override
         # can be replaced with the canonical configured view once the
         # backup ends (STATUS = success / error / idle).
@@ -152,19 +187,28 @@ class RunTab(ttk.Frame):
         log_frame = ttk.Frame(self)
         log_frame.pack(fill="both", expand=True, padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
-        # Single-column "show=tree" — Tk forces the tree column (#0,
-        # bearing the carets and indentation) to render first. Carrying
-        # both phase and message in #0 (separated by spaces) keeps the
-        # caret next to the message it expands, which is what the
-        # mockup specifies. A real two-column layout would put the
-        # caret on the wrong side because Tk does not let you display
-        # the tree column anywhere except left.
+        # Two-column layout: #0 = Message (tree column with caret +
+        # native indentation for children), "phase" = Phase (fixed
+        # width on the right). Tk forces the tree column to render
+        # first, so Phase ends up on the right — semantically
+        # correct: the caret stays glued to the message it expands,
+        # and child rows (categories / extensions / paths) leave the
+        # Phase column empty (a path has no phase of its own).
         self.log_tree = ttk.Treeview(
             log_frame,
-            show="tree",
+            columns=("phase",),
+            show="tree headings",
             height=15,
             selectmode="browse",
         )
+        # ``anchor="w"`` left-aligns the heading text. The default
+        # is ``tk.CENTER``, which centred "Message" / "Phase" while
+        # the cell content was left-aligned — the visual mismatch
+        # made the columns look off-axis.
+        self.log_tree.heading("#0", text="Message", anchor="w")
+        self.log_tree.heading("phase", text="Phase", anchor="w")
+        self.log_tree.column("#0", stretch=True)
+        self.log_tree.column("phase", width=130, stretch=False, anchor="w")
         scrollbar = ttk.Scrollbar(
             log_frame, orient="vertical", command=self.log_tree.yview
         )
@@ -561,7 +605,16 @@ class RunTab(ttk.Frame):
                 )
 
     def _on_phase(self, phase="", **kw):
-        """Schedule phase label update on the main thread."""
+        """Schedule phase label update on the main thread.
+
+        Also updates ``_current_phase`` so subsequent LOG events
+        without an explicit phase tag inherit it for the Log's
+        Phase column. Falls back to the previous tag when the
+        announcement is unrecognised — better stale than blank.
+        """
+        inferred = _infer_phase(phase)
+        if inferred:
+            self._current_phase = inferred
         self.after(0, self._update_phase, phase)
 
     def _update_phase(self, phase):
@@ -575,61 +628,75 @@ class RunTab(ttk.Frame):
             self.status_label.config(text=phase, foreground=Colors.TEXT_SECONDARY)
 
     def _on_log(self, message="", level="info", phase="", details=None, **kw):
-        """Schedule log append on the main thread."""
+        """Schedule log append on the main thread.
+
+        Engine-level emits (``backup_engine._log`` / ``_phase``) do
+        not carry a phase tag in their LOG event — they would show a
+        blank Phase cell in the tree. We fill the gap two ways:
+
+        1. **Self-detect from the message**: ``_phase()`` emits
+           ``LOG`` with messages like ``"Filtering changed files..."``
+           that match ``_PHASE_PATTERNS``. We update ``_current_phase``
+           BEFORE adding the row so this very announcement carries
+           its own phase tag — without this, the row would be tagged
+           with the previous phase because PHASE_CHANGED always fires
+           AFTER the LOG event in ``backup_engine._phase()``.
+        2. **Inherit current phase**: messages that don't match a
+           phase pattern (``"Backup written: ..."``, ``"Manifest
+           created: ..."``) inherit the last known phase so they
+           stay aligned with their announcing parent.
+        """
+        if not phase:
+            inferred = _infer_phase(message)
+            if inferred:
+                self._current_phase = inferred
+            phase = self._current_phase
         self.after(0, self._append_log, message, level, phase, details)
 
     def _append_log(self, message, level="info", phase="", details=None):
         """Insert a log entry into the Treeview.
 
+        Two columns: ``#0`` (tree column) carries the message + caret
+        + indentation, ``phase`` carries the phase name on the right.
+        Child rows (categories / extensions / paths under Skipped or
+        the patterns under Applying exclude patterns) leave the phase
+        cell empty — a leaf path has no phase of its own.
+
         Three rendering shapes:
 
-        1. **Plain event** (``details is None``): a single row whose
-           visible text is ``"{phase}  {message}"``. Most events take
-           this path.
+        1. **Plain event** (``details is None``): one row.
         2. **Exclude-pattern listing** (``details = {"patterns": [...]}``):
-           parent row with the same prefix, children are the individual
-           patterns. Children are inserted eagerly (cheap — at most a
-           few dozen patterns).
+           parent row + one child per pattern (eager, cheap).
         3. **Skipped summary** (``details`` has ``permission_denied`` /
-           ``os_errors`` / ``excluded_by_pattern`` keys): parent row
-           plus a category placeholder per non-empty category. Each
-           category is a stub at first — its children (extensions, then
-           paths) are materialized lazily when the user expands it,
-           via ``_on_tree_open``. Avoids inserting ~100 k widgets up
-           front on pathological workloads.
+           ``os_errors`` / ``excluded_by_pattern`` keys): parent row +
+           lazy category placeholders. Categories materialize their
+           extension+path children only when the user expands them.
         """
         with contextlib.suppress(tk.TclError):
             tags = self._tags_for(level, message)
-            row_text = self._compose_row_text(phase, message)
+            phase_value = (phase,)
 
             if details is None:
-                self.log_tree.insert("", "end", text=row_text, tags=tags)
+                self.log_tree.insert(
+                    "", "end", text=message, values=phase_value, tags=tags
+                )
             elif "patterns" in details:
                 parent = self.log_tree.insert(
-                    "", "end", text=row_text, tags=tags, open=False
+                    "", "end", text=message, values=phase_value, tags=tags, open=False
                 )
                 for pat in details["patterns"]:
-                    self.log_tree.insert(parent, "end", text=pat, tags=("muted",))
+                    self.log_tree.insert(
+                        parent, "end", text=pat, values=("",), tags=("muted",)
+                    )
             elif self._is_skipped_payload(details):
-                self._insert_skipped_node(row_text, tags, details)
+                self._insert_skipped_node(message, phase, tags, details)
             else:
                 # Unknown payload shape — render as plain row to be safe.
-                self.log_tree.insert("", "end", text=row_text, tags=tags)
+                self.log_tree.insert(
+                    "", "end", text=message, values=phase_value, tags=tags
+                )
 
             self._scroll_to_end()
-
-    @staticmethod
-    def _compose_row_text(phase: str, message: str) -> str:
-        """Build the visible text of a top-level log row.
-
-        ``phase`` is preserved as a left-padded prefix so the user can
-        still scan which pipeline phase emitted the line — the
-        Schedule journal does the equivalent with its ``Profile``
-        column. Empty phase falls back to message-only.
-        """
-        if not phase:
-            return message
-        return f"[{phase}]  {message}"
 
     @staticmethod
     def _tags_for(level: str, message: str) -> tuple[str, ...]:
@@ -657,7 +724,11 @@ class RunTab(ttk.Frame):
         )
 
     def _insert_skipped_node(
-        self, row_text: str, tags: tuple[str, ...], details: dict
+        self,
+        message: str,
+        phase: str,
+        tags: tuple[str, ...],
+        details: dict,
     ) -> None:
         """Create the Skipped parent + lazy category placeholders.
 
@@ -686,8 +757,12 @@ class RunTab(ttk.Frame):
         for path, reason in all_paths:
             buckets[categorize(path)].append((path, reason))
 
-        # Parent node for the whole Skipped summary.
-        parent = self.log_tree.insert("", "end", text=row_text, tags=tags, open=False)
+        # Parent node for the whole Skipped summary. Phase is set on
+        # the parent only — child rows (categories, extensions, paths)
+        # have ``values=("",)`` because they are not pipeline events.
+        parent = self.log_tree.insert(
+            "", "end", text=message, values=(phase,), tags=tags, open=False
+        )
 
         # Insert one stub per non-empty category. The Treeview needs at
         # least one child to render a caret; we add a transient
@@ -698,8 +773,12 @@ class RunTab(ttk.Frame):
             if not entries:
                 continue
             cat_text = f"{category}  ({len(entries)})"
-            cat_node = self.log_tree.insert(parent, "end", text=cat_text)
-            placeholder = self.log_tree.insert(cat_node, "end", text="…")
+            cat_node = self.log_tree.insert(
+                parent, "end", text=cat_text, values=("",)
+            )
+            placeholder = self.log_tree.insert(
+                cat_node, "end", text="…", values=("",)
+            )
             self._lazy_subtrees[cat_node] = {
                 "kind": "category",
                 "entries": entries,
@@ -743,7 +822,9 @@ class RunTab(ttk.Frame):
         )
         for ext, items in sorted_exts:
             ext_text = f"{ext}  ({len(items)})"
-            ext_node = self.log_tree.insert(category_node, "end", text=ext_text)
+            ext_node = self.log_tree.insert(
+                category_node, "end", text=ext_text, values=("",)
+            )
             # Path-level rows are leaves — no further lazy load. We
             # sort alphabetically for stable navigation.
             for path, reason in sorted(items):
@@ -754,7 +835,7 @@ class RunTab(ttk.Frame):
                 # with Schedule journal.
                 leaf_text = f"{path}    {reason}"
                 self.log_tree.insert(
-                    ext_node, "end", text=leaf_text, tags=("muted",)
+                    ext_node, "end", text=leaf_text, values=("",), tags=("muted",)
                 )
 
     def _scroll_to_end(self) -> None:
@@ -851,6 +932,10 @@ class RunTab(ttk.Frame):
         # Drop the lazy-load registry so reopened items don't try to
         # materialize children that no longer exist.
         self._lazy_subtrees.clear()
+        # Reset the current phase tracker so the first row of the
+        # next backup ("Backup type: full" etc.) does not inherit
+        # the previous run's last phase.
+        self._current_phase = ""
         self.progress_bar["value"] = 0
         self.percent_label.config(text="0%")
         self._phase_totals.clear()

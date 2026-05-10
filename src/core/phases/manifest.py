@@ -5,6 +5,7 @@ Two types of manifests:
 2. Integrity manifest (.wbverify for backup verification)
 """
 
+import concurrent.futures
 import hashlib
 import io
 import json
@@ -29,6 +30,21 @@ logger = logging.getLogger(__name__)
 # without throughput. The floor of 1 covers the (rare) case where
 # ``os.cpu_count()`` returns ``None``.
 _HASH_WORKERS_MAX = 8
+
+# Hash-phase timeout. A locked file (antivirus mid-scan, OneDrive
+# placeholder rehydrating, NAS share that drops mid-read) can stall
+# ``open`` or ``read`` indefinitely on Windows — there is no
+# kernel-level deadline on file I/O. Without a timeout the whole
+# manifest phase hangs forever, which the user perceives as a frozen
+# backup and ends up killing manually.
+#
+# We pick a generous per-file budget (a 1 GiB file hashes in ~20 s on
+# a healthy USB SSD; 30 s/file gives a 50 % margin) and a 60 s floor
+# so a tiny workload of one tiny file still tolerates a brief AV stall.
+# The total budget caps the worst case at roughly ``N × 30 s`` even
+# when one stuck file holds all workers.
+_HASH_TIMEOUT_PER_FILE = 30.0
+_HASH_TIMEOUT_MIN_SECONDS = 60.0
 
 
 def _resolve_worker_count() -> int:
@@ -101,39 +117,58 @@ def build_integrity_manifest(
     # Pass 2: parallel hash the cache misses.
     if to_hash:
         workers = _resolve_worker_count()
-        with ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix="manifest-hash",
-        ) as pool:
-            futures = {
-                pool.submit(compute_sha256, fi.source_path): fi for fi in to_hash
-            }
-            for fut in as_completed(futures):
-                # Cancel must be honoured even mid-pool.  Raising here
-                # exits the ``with`` block, which calls
-                # ``ThreadPoolExecutor.shutdown(wait=True, cancel_futures=False)``
-                # — pending futures are cancelled, in-flight ones drain
-                # but their results are discarded.
-                if cancel_check is not None:
-                    cancel_check()
-                file_info = futures[fut]
-                # Fail-fast: if we cannot hash a file at this stage the
-                # resulting manifest would be unverifiable. The filter
-                # phase drops unreadable files from ``changed`` so we
-                # should never end up here for such a file. ``fut.result()``
-                # re-raises the worker's exception.
-                file_hash = fut.result()
-                file_hashes[file_info.relative_path] = {
-                    "hash": file_hash,
-                    "size": file_info.size,
-                }
-                completed += 1
-                phase_log.progress(
-                    current=completed,
-                    total=total,
-                    filename=file_info.relative_path,
-                    phase="hashing",
-                )
+        total_timeout = max(_HASH_TIMEOUT_MIN_SECONDS, len(to_hash) * _HASH_TIMEOUT_PER_FILE)
+
+        # Manage the pool with try/finally rather than ``with`` so we
+        # can shut down without waiting on stuck workers. ``with`` calls
+        # ``shutdown(wait=True)`` on exit, which would block forever if
+        # a hash is stuck on a locked file — the very situation the
+        # timeout is here to break out of. ``cancel_futures=True``
+        # cancels pending submissions; in-flight workers continue in
+        # the background until the OS releases the lock (Python cannot
+        # forcibly kill a thread). The pipeline raises and the user
+        # sees a clear error rather than a frozen UI.
+        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="manifest-hash")
+        try:
+            futures = {pool.submit(compute_sha256, fi.source_path): fi for fi in to_hash}
+            try:
+                for fut in as_completed(futures, timeout=total_timeout):
+                    # Cancel must be honoured even mid-pool.
+                    if cancel_check is not None:
+                        cancel_check()
+                    file_info = futures[fut]
+                    # Fail-fast: if we cannot hash a file at this stage
+                    # the resulting manifest would be unverifiable. The
+                    # filter phase drops unreadable files from
+                    # ``changed`` so we should never end up here for
+                    # such a file. ``fut.result()`` re-raises the
+                    # worker's exception.
+                    file_hash = fut.result()
+                    file_hashes[file_info.relative_path] = {
+                        "hash": file_hash,
+                        "size": file_info.size,
+                    }
+                    completed += 1
+                    phase_log.progress(
+                        current=completed,
+                        total=total,
+                        filename=file_info.relative_path,
+                        phase="hashing",
+                    )
+            except concurrent.futures.TimeoutError:
+                pending = [
+                    futures[f].relative_path for f in futures if not f.done()
+                ]
+                sample = ", ".join(pending[:5])
+                suffix = f" (+{len(pending) - 5} more)" if len(pending) > 5 else ""
+                raise RuntimeError(
+                    f"Hash phase timed out after {total_timeout:.0f}s "
+                    f"with {len(pending)} file(s) still hashing — likely "
+                    f"a file locked by antivirus or an unresponsive "
+                    f"network share. Pending: {sample}{suffix}"
+                ) from None
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     if cache_hits:
         phase_log.info(

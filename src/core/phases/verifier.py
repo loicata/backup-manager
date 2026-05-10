@@ -4,6 +4,7 @@ Compares backup contents against the integrity manifest
 to ensure no corruption occurred during the backup process.
 """
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -23,6 +24,15 @@ logger = logging.getLogger(__name__)
 # extra threads add scheduling overhead without throughput gain.
 # Keep the two constants in sync — if you tune one, tune the other.
 _VERIFY_WORKERS_MAX = 8
+
+# Verify-phase timeout. Mirror of the manifest-phase budget: a locked
+# destination file (antivirus, OneDrive placeholder rehydrating, NAS
+# drop) can stall ``read`` indefinitely on Windows. Without a deadline
+# the verify phase hangs forever AFTER the bytes were already copied,
+# which is the worst possible UX — the backup is intact but the user
+# perceives a frozen UI. Keep these in sync with manifest.py constants.
+_VERIFY_TIMEOUT_PER_FILE = 30.0
+_VERIFY_TIMEOUT_MIN_SECONDS = 60.0
 
 
 def _resolve_worker_count() -> int:
@@ -115,39 +125,61 @@ def verify_backup(
     # the executor overhead entirely.
     if to_hash:
         workers = _resolve_worker_count()
-        with ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix="verifier-hash",
-        ) as pool:
+        total_timeout = max(
+            _VERIFY_TIMEOUT_MIN_SECONDS, len(to_hash) * _VERIFY_TIMEOUT_PER_FILE
+        )
+
+        # try/finally instead of ``with``: ``with`` calls
+        # ``shutdown(wait=True)`` on exit, which would block forever if
+        # a re-hash is stuck on a locked backup file. ``cancel_futures=True``
+        # cancels pending submissions; in-flight workers continue in
+        # the background until the OS releases the lock. The verify
+        # phase surfaces the timeout as a verification failure rather
+        # than a frozen UI.
+        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="verifier-hash")
+        try:
             futures = {
-                pool.submit(compute_sha256, fp): (rel, info)
-                for rel, info, fp in to_hash
+                pool.submit(compute_sha256, fp): (rel, info) for rel, info, fp in to_hash
             }
-            for fut in as_completed(futures):
-                # Cancel must be honoured even mid-pool. Raising here
-                # exits the ``with`` block, which calls
-                # ``ThreadPoolExecutor.shutdown(wait=True, cancel_futures=False)``
-                # — pending futures are cancelled, in-flight ones drain
-                # but their results are discarded.
-                if cancel_check is not None:
-                    cancel_check()
-                rel_path, info = futures[fut]
-                expected_hash = info.get("hash", "")
-                try:
-                    actual_hash = fut.result()
-                    if actual_hash == expected_hash:
-                        ok_count += 1
-                    else:
-                        errors.append(f"Mismatch: {rel_path}")
-                except OSError as e:
-                    errors.append(f"Read error: {rel_path} ({e})")
-                completed += 1
-                phase_log.progress(
-                    current=completed,
-                    total=total,
-                    filename=rel_path,
-                    phase="verification",
+            try:
+                for fut in as_completed(futures, timeout=total_timeout):
+                    # Cancel must be honoured even mid-pool.
+                    if cancel_check is not None:
+                        cancel_check()
+                    rel_path, info = futures[fut]
+                    expected_hash = info.get("hash", "")
+                    try:
+                        actual_hash = fut.result()
+                        if actual_hash == expected_hash:
+                            ok_count += 1
+                        else:
+                            errors.append(f"Mismatch: {rel_path}")
+                    except OSError as e:
+                        errors.append(f"Read error: {rel_path} ({e})")
+                    completed += 1
+                    phase_log.progress(
+                        current=completed,
+                        total=total,
+                        filename=rel_path,
+                        phase="verification",
+                    )
+            except concurrent.futures.TimeoutError:
+                pending = [futures[f][0] for f in futures if not f.done()]
+                sample = ", ".join(pending[:5])
+                suffix = f" (+{len(pending) - 5} more)" if len(pending) > 5 else ""
+                # Surface as a verification error rather than a hard
+                # exception: the destination bytes are already on disk,
+                # the user still has a backup, we just couldn't verify
+                # all of it before the deadline.
+                errors.append(
+                    f"Verify timed out after {total_timeout:.0f}s with "
+                    f"{len(pending)} file(s) still hashing — likely a "
+                    f"locked file or unresponsive share. Pending: "
+                    f"{sample}{suffix}"
                 )
+                completed = total  # stop further progress reporting
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     # Detect unexpected files that the writer left behind but the
     # manifest does not reference. These are typically stale ``.tmp``

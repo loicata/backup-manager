@@ -14,6 +14,7 @@ import threading
 import tkinter as tk
 import uuid
 import webbrowser
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from src.core.config import (
@@ -595,6 +596,27 @@ class SetupWizard:
             side="left",
             padx=2,
         )
+
+        # Common locations: one-click add for the standard Windows user
+        # folders. ``_wizard_add_source`` is already idempotent (no-op if
+        # the path is already in the list) so a second click is harmless.
+        # Paths are resolved via ``Path.home()`` — on Windows the technical
+        # folder names stay English even when Explorer shows a localised
+        # display name, so this works regardless of the system language.
+        ttk.Separator(self._content, orient="horizontal").pack(
+            fill="x", pady=(Spacing.LARGE, Spacing.SMALL)
+        )
+        ttk.Label(self._content, text="Common locations").pack(anchor="w")
+
+        quick = ttk.Frame(self._content)
+        quick.pack(fill="x", pady=(Spacing.SMALL, 0))
+        home = Path.home()
+        for label in ("Documents", "Pictures", "Music", "Videos"):
+            ttk.Button(
+                quick,
+                text=label,
+                command=lambda p=str(home / label): self._wizard_add_source(p),
+            ).pack(side="left", padx=2)
 
     def _wizard_add_folder(self) -> None:
         """Open a directory picker and add the selected folder."""

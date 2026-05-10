@@ -1042,12 +1042,17 @@ class SetupWizard:
     def _step_schedule_frequency(self) -> None:
         """Final personal-mode step: pick how often the scheduler runs.
 
-        Three radio cards: Daily / Weekly / Monthly.  Pre-selects the
-        previous default (Weekly) so a user who blasts through Next
-        gets the same behaviour as before this step existed.
+        Layout mirrors step 3 (Storage) for visual consistency: a
+        ``Frequency`` LabelFrame with vertical radios on top, a
+        ``Configuration`` LabelFrame below whose contents (Time, Day of
+        week, Day of month) adapt to the selected frequency.
 
-        The chosen value is stored as ``self._data["schedule_frequency"]``
-        and consumed by ``_create_profile`` when the wizard finishes.
+        Persisted to ``self._data`` for ``_create_profile``:
+        - ``schedule_frequency`` (str: daily/weekly/monthly)
+        - ``schedule_time`` (str: "HH:MM")
+        - ``schedule_day_of_week`` (int: 0=Monday … 6=Sunday)
+        - ``schedule_day_of_month`` (int: 1–31, scheduler clamps to
+          month length on short months)
         """
         self._set_header("How often should we backup?")
         ttk.Label(
@@ -1059,71 +1064,148 @@ class SetupWizard:
             foreground=Colors.TEXT_SECONDARY,
         ).pack(pady=(0, Spacing.LARGE), anchor="w")
 
-        # Persist current selection across navigation: if the user
-        # comes back from Finish via "Back", the previously chosen
-        # value rehydrates the radio.
-        initial = self._data.get(
+        # ----- State -----
+        # Rehydrate from a previous visit (Back from Finish) so the
+        # user keeps their settings when navigating in either direction.
+        initial_freq = self._data.get(
             "schedule_frequency", ScheduleFrequency.WEEKLY.value
         )
-        self._schedule_var = tk.StringVar(self._win, value=initial)
-        # Record the default eagerly so even a user who never touches
-        # the radio still hits the validate path with a value present.
-        self._data["schedule_frequency"] = initial
+        initial_time = self._data.get("schedule_time", "10:00")
+        initial_dow = self._data.get("schedule_day_of_week", 0)
+        initial_dom = self._data.get("schedule_day_of_month", 1)
 
-        def _on_change(*_args):
-            self._data["schedule_frequency"] = self._schedule_var.get()
+        self._schedule_var = tk.StringVar(self._win, value=initial_freq)
+        self._schedule_time_var = tk.StringVar(self._win, value=initial_time)
+        self._schedule_dow_var = tk.StringVar(self._win, value=str(initial_dow))
+        self._schedule_dom_var = tk.IntVar(self._win, value=initial_dom)
 
-        self._schedule_var.trace_add("write", _on_change)
+        # Eager persistence: even a user who never touches a control
+        # still leaves _data in a consistent state for _create_profile.
+        self._data["schedule_frequency"] = initial_freq
+        self._data["schedule_time"] = initial_time
+        self._data["schedule_day_of_week"] = initial_dow
+        self._data["schedule_day_of_month"] = initial_dom
 
-        cards = ttk.Frame(self._content)
-        cards.pack(fill="both", expand=True, pady=Spacing.MEDIUM)
-        cards.columnconfigure(0, weight=1)
-        cards.columnconfigure(1, weight=1)
-        cards.columnconfigure(2, weight=1)
+        # ----- Frequency LabelFrame -----
+        freq_frame = ttk.LabelFrame(
+            self._content, text="Frequency", padding=Spacing.PAD
+        )
+        freq_frame.pack(fill="x", pady=(0, Spacing.MEDIUM))
 
-        # (value, icon, label, description) — kept compact so a future
-        # locale-switch only needs to translate three short strings each.
-        options = [
-            (
-                ScheduleFrequency.DAILY.value,
-                "\U0001f4c5",  # 📅
-                "Daily",
-                "Every day at the chosen time.\n"
-                "Best for actively-edited files\n(documents, code, mailbox).",
-            ),
-            (
-                ScheduleFrequency.WEEKLY.value,
-                "\U0001f5d3",  # 🗓
-                "Weekly",
-                "Once a week.\n"
-                "Good balance for personal\nphotos and home folders.",
-            ),
-            (
-                ScheduleFrequency.MONTHLY.value,
-                "\U0001f4c6",  # 📆
-                "Monthly",
-                "Once a month.\n"
-                "Best for archive data\nthat rarely changes.",
-            ),
-        ]
-
-        for col, (value, icon, label, description) in enumerate(options):
-            card = ttk.LabelFrame(cards, text="", padding=Spacing.LARGE)
-            card.grid(row=0, column=col, padx=Spacing.SMALL, sticky="nsew")
-
-            tk.Label(card, text=icon, font=("Segoe UI", 36)).pack(
-                pady=(0, Spacing.MEDIUM)
-            )
-            ttk.Label(card, text=label, font=Fonts.title()).pack()
-            ttk.Label(card, text=description, justify="center").pack(
-                pady=Spacing.MEDIUM
-            )
+        for value, label in (
+            (ScheduleFrequency.DAILY.value, "Daily"),
+            (ScheduleFrequency.WEEKLY.value, "Weekly"),
+            (ScheduleFrequency.MONTHLY.value, "Monthly"),
+        ):
             ttk.Radiobutton(
-                card,
-                text=f"Choose {label}",
+                freq_frame,
+                text=label,
                 variable=self._schedule_var,
                 value=value,
-            ).pack(pady=(Spacing.SMALL, 0))
+            ).pack(anchor="w", pady=2)
+
+        # ----- Configuration LabelFrame -----
+        cfg_frame = ttk.LabelFrame(
+            self._content, text="Configuration", padding=Spacing.PAD
+        )
+        cfg_frame.pack(fill="x")
+
+        # Day-of-week row (visible only for Weekly). The combobox is
+        # backed by a StringVar so we can persist the index but display
+        # the localised day name; the conversion happens in
+        # ``_on_dow_change``.
+        dow_row = ttk.Frame(cfg_frame)
+        ttk.Label(dow_row, text="Day:").pack(side="left", padx=(0, Spacing.SMALL))
+        _DAY_NAMES = (
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        )
+        dow_combo = ttk.Combobox(
+            dow_row,
+            values=list(_DAY_NAMES),
+            state="readonly",
+            width=12,
+        )
+        dow_combo.set(_DAY_NAMES[initial_dow])
+        dow_combo.pack(side="left")
+
+        # Day-of-month row (visible only for Monthly). Spinbox 1–31;
+        # the rotator and scheduler already handle short months
+        # (clamped to month length) so we don't second-guess the user
+        # here with an artificial 28-day cap.
+        dom_row = ttk.Frame(cfg_frame)
+        ttk.Label(dom_row, text="Day of month:").pack(
+            side="left", padx=(0, Spacing.SMALL)
+        )
+        ttk.Spinbox(
+            dom_row,
+            from_=1,
+            to=31,
+            textvariable=self._schedule_dom_var,
+            width=5,
+        ).pack(side="left")
+
+        # Time row (visible for all frequencies). Plain Entry rather
+        # than a dedicated time picker — keeps parity with the
+        # Schedule tab and avoids introducing a third widget toolkit.
+        time_row = ttk.Frame(cfg_frame)
+        ttk.Label(time_row, text="Time:").pack(side="left", padx=(0, Spacing.SMALL))
+        ttk.Entry(
+            time_row, textvariable=self._schedule_time_var, width=8
+        ).pack(side="left")
+        ttk.Label(
+            time_row,
+            text="(HH:MM, 24-hour)",
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(side="left", padx=(Spacing.SMALL, 0))
+
+        # ----- Dynamic show/hide based on selected frequency -----
+        def _refresh_cfg(*_args) -> None:
+            for row in (dow_row, dom_row, time_row):
+                row.pack_forget()
+            freq = self._schedule_var.get()
+            if freq == ScheduleFrequency.WEEKLY.value:
+                dow_row.pack(fill="x", pady=2)
+            elif freq == ScheduleFrequency.MONTHLY.value:
+                dom_row.pack(fill="x", pady=2)
+            time_row.pack(fill="x", pady=2)
+
+        # ----- Persistence wiring -----
+        def _on_freq(*_args) -> None:
+            self._data["schedule_frequency"] = self._schedule_var.get()
+            _refresh_cfg()
+
+        def _on_time(*_args) -> None:
+            self._data["schedule_time"] = self._schedule_time_var.get()
+
+        def _on_dow_change(_event=None) -> None:
+            try:
+                self._data["schedule_day_of_week"] = _DAY_NAMES.index(
+                    dow_combo.get()
+                )
+            except ValueError:
+                # Combobox is readonly so this is defensive only.
+                self._data["schedule_day_of_week"] = 0
+
+        def _on_dom(*_args) -> None:
+            try:
+                self._data["schedule_day_of_month"] = int(
+                    self._schedule_dom_var.get()
+                )
+            except (ValueError, tk.TclError):
+                self._data["schedule_day_of_month"] = 1
+
+        self._schedule_var.trace_add("write", _on_freq)
+        self._schedule_time_var.trace_add("write", _on_time)
+        self._schedule_dom_var.trace_add("write", _on_dom)
+        dow_combo.bind("<<ComboboxSelected>>", _on_dow_change)
+
+        _refresh_cfg()
 
     # ------------------------------------------------------------------
     # Professional steps (3-9)
@@ -2081,6 +2163,14 @@ class SetupWizard:
         # avoid changing existing behaviour for non-daily flows.
         gfs_daily_default = 8 if frequency == ScheduleFrequency.DAILY else 1
 
+        # Schedule details: the wizard now collects time + day-of-week
+        # + day-of-month directly (step 4 redesign mirroring step 3).
+        # Defaults match ``ScheduleConfig`` so legacy callers that
+        # bypass the wizard navigation still build a valid profile.
+        schedule_time = d.get("schedule_time", "10:00")
+        schedule_dow = int(d.get("schedule_day_of_week", 0))
+        schedule_dom = int(d.get("schedule_day_of_month", 1))
+
         profile = BackupProfile(
             name=d["name"],
             source_paths=d["sources"],
@@ -2089,7 +2179,9 @@ class SetupWizard:
             schedule=ScheduleConfig(
                 enabled=True,
                 frequency=frequency,
-                time="10:00",
+                time=schedule_time,
+                day_of_week=schedule_dow,
+                day_of_month=schedule_dom,
             ),
             retention=RetentionConfig(
                 gfs_daily=gfs_daily_default,

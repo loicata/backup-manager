@@ -5,6 +5,18 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.1] - 2026-05-10
+
+### Changed
+- **Wizard step 4 ("How often should we backup?") aligned with step 3's layout.** The previous design used three large picture cards (Daily/Weekly/Monthly) with calendar emojis — visually attractive but stylistically inconsistent with the rest of the wizard which uses ``LabelFrame`` + vertical radios everywhere else (``Storage type``, ``Configuration``). The redesign keeps the wizard look coherent end-to-end:
+  - ``Frequency`` ``LabelFrame`` with three vertical radios (``Daily``, ``Weekly``, ``Monthly``).
+  - ``Configuration`` ``LabelFrame`` whose contents adapt to the selected frequency:
+    - **Daily** → ``Time:`` only.
+    - **Weekly** → ``Day:`` (Monday–Sunday combobox) + ``Time:``.
+    - **Monthly** → ``Day of month:`` (spinbox 1–31, scheduler clamps to month length on short months) + ``Time:``.
+  - The ``Time:`` field accepts ``HH:MM`` (24-hour); the scheduler tab already validates the format at apply time so the wizard does not duplicate the check.
+- ``_create_profile`` consumes the new ``schedule_time`` / ``schedule_day_of_week`` / ``schedule_day_of_month`` keys instead of hard-coding ``time="10:00"``. Defaults match ``ScheduleConfig`` so any legacy code path that bypasses the wizard navigation still produces a valid profile.
+
 ## [3.4.0] - 2026-05-10
 
 ### Added

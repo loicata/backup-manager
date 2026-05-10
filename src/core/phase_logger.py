@@ -10,7 +10,6 @@ import time
 
 from src.core.events import LOG, PROGRESS, EventBus
 
-
 # Maximum PROGRESS event rate, in milliseconds between emissions.
 # 100 ms => ~10 Hz, plenty for a smooth bar update and well below
 # what a human can read; the original 1-event-per-file flood (could
@@ -45,11 +44,21 @@ class PhaseLogger:
         # first call always fires.
         self._last_progress_ms: float = 0.0
 
-    def info(self, message: str) -> None:
+    def info(self, message: str, *, details: dict | None = None) -> None:
         """Log at INFO level and emit LOG event.
 
         Args:
             message: Human-readable log message.
+            details: Optional structured payload attached to the event.
+                Used by the Run-tab Log widget to render expandable
+                children under a parent log line — e.g. the collector
+                emits the "Skipped N file(s)" message with
+                ``details = {"permission_denied": [...], "excluded_by_pattern": [...]}``
+                so the UI can group skipped paths by category and
+                extension. ``None`` keeps the legacy flat-line
+                rendering (no caret, no expand). Not logged through
+                the Python logger to keep the .log file readable;
+                only travels on the EventBus.
         """
         self._logger.info(message)
         if self._events:
@@ -58,13 +67,15 @@ class PhaseLogger:
                 message=message,
                 level="info",
                 phase=self._phase_name,
+                details=details,
             )
 
-    def warning(self, message: str) -> None:
+    def warning(self, message: str, *, details: dict | None = None) -> None:
         """Log at WARNING level and emit LOG event.
 
         Args:
             message: Human-readable warning message.
+            details: Optional structured payload (see ``info``).
         """
         self._logger.warning(message)
         if self._events:
@@ -73,13 +84,15 @@ class PhaseLogger:
                 message=message,
                 level="warning",
                 phase=self._phase_name,
+                details=details,
             )
 
-    def error(self, message: str) -> None:
+    def error(self, message: str, *, details: dict | None = None) -> None:
         """Log at ERROR level and emit LOG event.
 
         Args:
             message: Human-readable error message.
+            details: Optional structured payload (see ``info``).
         """
         self._logger.error(message)
         if self._events:
@@ -88,6 +101,7 @@ class PhaseLogger:
                 message=message,
                 level="error",
                 phase=self._phase_name,
+                details=details,
             )
 
     def progress(

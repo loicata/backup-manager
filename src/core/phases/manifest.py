@@ -41,10 +41,21 @@ _HASH_WORKERS_MAX = 8
 # We pick a generous per-file budget (a 1 GiB file hashes in ~20 s on
 # a healthy USB SSD; 30 s/file gives a 50 % margin) and a 60 s floor
 # so a tiny workload of one tiny file still tolerates a brief AV stall.
-# The total budget caps the worst case at roughly ``N × 30 s`` even
-# when one stuck file holds all workers.
+#
+# The MAX cap is critical: ``concurrent.futures.as_completed`` passes
+# the timeout to ``threading.Condition.wait`` which on Windows ends
+# up in ``WaitForMultipleObjectsEx`` whose DWORD millisecond argument
+# saturates at 2**32 ms ≈ 49.7 days. CPython refuses to schedule a
+# wait above ``PY_TIMEOUT_MAX`` and raises
+# ``OverflowError: timeout value is too large`` — which the engine
+# surfaces as ``Backup failed: timeout value is too large`` and
+# blocks every backup with more than ~143 000 files (143 k × 30 s ≈
+# 50 days). 4 hours is a generous absolute ceiling: it dwarfs any
+# realistic hash duration even on multi-million-file workloads, and
+# stays four orders of magnitude below the OS limit.
 _HASH_TIMEOUT_PER_FILE = 30.0
 _HASH_TIMEOUT_MIN_SECONDS = 60.0
+_HASH_TIMEOUT_MAX_SECONDS = 4 * 3600.0  # 4 h hard ceiling
 
 
 def _resolve_worker_count() -> int:
@@ -117,7 +128,10 @@ def build_integrity_manifest(
     # Pass 2: parallel hash the cache misses.
     if to_hash:
         workers = _resolve_worker_count()
-        total_timeout = max(_HASH_TIMEOUT_MIN_SECONDS, len(to_hash) * _HASH_TIMEOUT_PER_FILE)
+        total_timeout = min(
+            _HASH_TIMEOUT_MAX_SECONDS,
+            max(_HASH_TIMEOUT_MIN_SECONDS, len(to_hash) * _HASH_TIMEOUT_PER_FILE),
+        )
 
         # Manage the pool with try/finally rather than ``with`` so we
         # can shut down without waiting on stuck workers. ``with`` calls

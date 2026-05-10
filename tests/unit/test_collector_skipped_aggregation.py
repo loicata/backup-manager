@@ -1,14 +1,22 @@
 """Tests for the collector's skipped-paths aggregation.
 
-Regression: every PermissionError used to fire a separate
-``phase_log.warning`` event. On workloads with thousands of
-restricted directories (.pytest_cache, security-tool ``volatile``
-folders, etc.) the Run-tab log was completely drowned and unusable.
+The collector emits a single aggregated ``Skipped N file(s) not
+backed up`` event at the end of the walk. The event carries a
+structured ``details`` payload with three lists:
 
-The fix collects the failures in ``_SkippedPaths`` and emits a
-single aggregated WARNING per category at the end of ``collect_files``.
-Per-path detail still lands in the file logger at DEBUG so deep
-diagnostic stays available.
+- ``permission_denied``    list[str]              — paths that hit ``PermissionError``
+- ``os_errors``            list[tuple[str, str]]  — paths + error text
+- ``excluded_by_pattern``  list[tuple[str, str]]  — paths + matched pattern
+
+The Run-tab Log widget consumes ``details`` to render an expandable
+hierarchy (Skipped → category-by-file-type → extension → path with
+reason) so the user can verify whether a specific file was backed up.
+The lists are uncapped — the previous ``_SKIPPED_SAMPLE_LIMIT = 5``
+made the in-Log expansion useless on real workloads.
+
+A separate ``Applying exclude patterns (N)`` event is emitted at the
+start of the walk with ``details = {"patterns": [...]}`` so the UI
+can surface the active rule list.
 """
 
 from __future__ import annotations
@@ -17,11 +25,8 @@ import logging
 import os
 from unittest.mock import patch
 
-import pytest
-
 from src.core.events import LOG, EventBus
 from src.core.phases.collector import (
-    _SKIPPED_SAMPLE_LIMIT,
     _SkippedPaths,
     collect_files,
 )
@@ -38,6 +43,14 @@ def _capture_log_events(events: EventBus) -> list[dict]:
     return captured
 
 
+def _skipped_event(captured: list[dict]) -> dict | None:
+    """Return the single 'Skipped N file(s) not backed up' event, if any."""
+    for e in captured:
+        if "Skipped" in e["message"] and "not backed up" in e["message"]:
+            return e
+    return None
+
+
 # ---------------------------------------------------------------------------
 # _SkippedPaths unit behaviour
 # ---------------------------------------------------------------------------
@@ -46,19 +59,34 @@ def _capture_log_events(events: EventBus) -> list[dict]:
 class TestSkippedPathsAccumulator:
     """Pure-data tests on the accumulator class itself."""
 
-    def test_add_permission_increments_count_and_keeps_sample(self) -> None:
+    def test_add_permission_appends_uncapped(self) -> None:
         s = _SkippedPaths()
-        for i in range(20):
+        for i in range(50):
             s.add_permission(f"C:\\restricted\\{i}")
-        assert s.permission_denied_count == 20
-        # Sample is bounded — full list would defeat the purpose.
-        assert len(s.permission_denied) == _SKIPPED_SAMPLE_LIMIT
+        # Every path is retained — the previous ``_SKIPPED_SAMPLE_LIMIT``
+        # cap of 5 is gone so the Run-tab Log expansion is exhaustive.
+        assert len(s.permission_denied) == 50
+        assert s.total_count == 50
 
-    def test_add_os_error_keeps_message_in_sample(self) -> None:
+    def test_add_os_error_keeps_message(self) -> None:
         s = _SkippedPaths()
         s.add_os_error("C:\\foo", "WinError 32 sharing violation")
-        assert s.os_errors_count == 1
-        assert s.os_errors[0] == ("C:\\foo", "WinError 32 sharing violation")
+        assert s.os_errors == [("C:\\foo", "WinError 32 sharing violation")]
+        assert s.total_count == 1
+
+    def test_add_excluded_keeps_pattern(self) -> None:
+        """The matched pattern is recorded so the UI can show it."""
+        s = _SkippedPaths()
+        s.add_excluded("D:\\drafts\\rapport.tmp", "*.tmp")
+        assert s.excluded_by_pattern == [("D:\\drafts\\rapport.tmp", "*.tmp")]
+        assert s.total_count == 1
+
+    def test_total_count_aggregates_three_categories(self) -> None:
+        s = _SkippedPaths()
+        s.add_permission("a")
+        s.add_os_error("b", "boom")
+        s.add_excluded("c", "*.tmp")
+        assert s.total_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -71,11 +99,9 @@ class TestAggregatedEmission:
 
     def test_thousand_failures_emit_one_event(self, tmp_path) -> None:
         """Realistic ``.pytest_cache``-style flood: 1000 denies → 1 event."""
-        # Put one accessible file so the collect actually walks something.
         (tmp_path / "ok.txt").write_text("ok", encoding="utf-8")
 
-        # Generate many sibling directories that all blow up on scandir.
-        blocked_dirs = []
+        blocked_dirs: list[str] = []
         for i in range(1000):
             d = tmp_path / f"blocked_{i:04d}"
             d.mkdir()
@@ -95,24 +121,20 @@ class TestAggregatedEmission:
         with patch("os.scandir", side_effect=patched):
             collect_files([str(tmp_path)], events=events)
 
-        # Count skip-summary events (info for permission, warning for OS).
-        # Must be ≤ 2; without aggregation we would see >= 1000.
+        # Exactly one Skipped summary event regardless of count.
         skip_events = [
-            e for e in captured
-            if e["level"] in ("info", "warning") and "Skipped" in e["message"]
+            e for e in captured if "Skipped" in e["message"] and "not backed up" in e["message"]
         ]
-        assert len(skip_events) <= 2, (
+        assert len(skip_events) == 1, (
             f"UI got {len(skip_events)} skip events — aggregation broken"
         )
 
-    def test_summary_includes_total_count(self, tmp_path) -> None:
-        """User must see the total at a glance — '1000 ...'."""
+    def test_summary_message_includes_total_count(self, tmp_path) -> None:
+        """User must see the total at a glance — '1000' in the message."""
         for i in range(1000):
             (tmp_path / f"d_{i:04d}").mkdir()
 
         original_scandir = os.scandir
-        # Compare via os.fspath so a Path-vs-str argument doesn't fool
-        # the mock and accidentally deny the root scan too.
         root_str = os.fspath(tmp_path)
 
         def always_deny(path):
@@ -126,21 +148,18 @@ class TestAggregatedEmission:
         with patch("os.scandir", side_effect=always_deny):
             collect_files([str(tmp_path)], events=events)
 
-        skip_msgs = [
-            e["message"] for e in captured
-            if "Skipped" in e["message"] and "protected" in e["message"]
-        ]
-        assert any("1000" in m for m in skip_msgs)
+        evt = _skipped_event(captured)
+        assert evt is not None
+        assert "1000" in evt["message"]
 
-    def test_summary_includes_first_paths_as_sample(self, tmp_path) -> None:
-        """A few sample paths help users identify the pattern."""
+    def test_details_payload_lists_all_permission_paths(self, tmp_path) -> None:
+        """The full path list lives in ``details`` for UI expansion."""
         for i in range(10):
             (tmp_path / f"unique_pattern_{i}").mkdir()
 
         events = EventBus()
         captured = _capture_log_events(events)
 
-        # Use a thin wrapper that delegates to the original for the root.
         original_scandir = os.scandir
 
         def patched(path):
@@ -151,14 +170,16 @@ class TestAggregatedEmission:
         with patch("os.scandir", side_effect=patched):
             collect_files([str(tmp_path)], events=events)
 
-        skip_msgs = [
-            e["message"] for e in captured
-            if "Skipped" in e["message"] and "protected" in e["message"]
-        ]
-        assert any("unique_pattern_" in m for m in skip_msgs)
+        evt = _skipped_event(captured)
+        assert evt is not None
+        details = evt["details"]
+        # All 10 paths are present (no cap).
+        assert len(details["permission_denied"]) == 10
+        # Sample check: the unique substring is in the recorded paths.
+        assert all("unique_pattern_" in p for p in details["permission_denied"])
 
-    def test_no_failures_no_warning(self, tmp_path) -> None:
-        """Clean walk → no warning event at all (no false-positive noise)."""
+    def test_no_failures_no_skipped_event(self, tmp_path) -> None:
+        """Clean walk → no Skipped event at all."""
         (tmp_path / "a.txt").write_text("a", encoding="utf-8")
 
         events = EventBus()
@@ -166,100 +187,107 @@ class TestAggregatedEmission:
 
         collect_files([str(tmp_path)], events=events)
 
-        warnings = [e for e in captured if e["level"] == "warning"]
-        assert warnings == []
+        assert _skipped_event(captured) is None
+
+    def test_skipped_event_is_info_level(self, tmp_path) -> None:
+        """The Run-tab now uses the row's tag (warning bg) for visual
+        cue, not the legacy WARNING level — keeps the Run log INFO-only
+        for routine skips so a flood of permission-denied entries does
+        not paint the whole log yellow."""
+        (tmp_path / "blocked").mkdir()
+
+        original_scandir = os.scandir
+
+        def patched(path):
+            if str(path).endswith("blocked"):
+                raise PermissionError("nope")
+            return original_scandir(path)
+
+        events = EventBus()
+        captured = _capture_log_events(events)
+
+        with patch("os.scandir", side_effect=patched):
+            collect_files([str(tmp_path)], events=events)
+
+        evt = _skipped_event(captured)
+        assert evt is not None
+        assert evt["level"] == "info"
 
 
-class TestUserFriendlyWording:
-    """The aggregated message must avoid scaring novice users.
+class TestExcludedByPatternTracking:
+    """Each path skipped by an exclude pattern must record the rule.
 
-    Regression: the v3.3.19 wording was
-    ``"Skipped N path(s) — permission denied. First: …"`` emitted at
-    WARNING level. On a workload with many cache directories, this
-    surfaced thousands of paths in a yellow warning bubble and led
-    users to believe their files weren't being backed up.
-
-    The new wording is INFO-level and explicitly reassuring.
+    The Run-tab Log displays ``excluded: <pattern>`` next to each
+    file so the user can tell which rule caught their file.
     """
 
-    def test_permission_summary_emitted_at_info_not_warning(self, tmp_path) -> None:
-        """Permission-denied is benign (caches, locked files) → INFO."""
-        (tmp_path / "blocked").mkdir()
-
-        original_scandir = os.scandir
-
-        def patched(path):
-            if str(path).endswith("blocked"):
-                raise PermissionError("nope")
-            return original_scandir(path)
+    def test_file_excluded_by_pattern_recorded(self, tmp_path) -> None:
+        (tmp_path / "keep.txt").write_text("keep", encoding="utf-8")
+        (tmp_path / "drop.tmp").write_text("drop", encoding="utf-8")
 
         events = EventBus()
         captured = _capture_log_events(events)
 
-        with patch("os.scandir", side_effect=patched):
-            collect_files([str(tmp_path)], events=events)
+        files = collect_files(
+            [str(tmp_path)], exclude_patterns=["*.tmp"], events=events
+        )
 
-        # The permission summary line must NOT be a warning.
-        warning_msgs = [
-            e["message"] for e in captured if e["level"] == "warning"
-        ]
-        assert not any("protected item" in m for m in warning_msgs)
+        # Only keep.txt actually collected.
+        assert len(files) == 1
+        assert files[0].relative_path.endswith("keep.txt")
 
-        info_msgs = [e["message"] for e in captured if e["level"] == "info"]
-        assert any("protected item" in m for m in info_msgs)
+        evt = _skipped_event(captured)
+        assert evt is not None
+        excluded = evt["details"]["excluded_by_pattern"]
+        # The skipped entry knows which pattern caught it.
+        assert any(
+            path.endswith("drop.tmp") and pattern == "*.tmp"
+            for path, pattern in excluded
+        )
 
-    def test_message_explains_normality(self, tmp_path) -> None:
-        """Wording must reassure — keywords ``normal`` and ``no action``."""
-        (tmp_path / "blocked").mkdir()
-        original_scandir = os.scandir
+    def test_excluded_directory_recorded_once_not_recursively(self, tmp_path) -> None:
+        """A skipped dir is one entry, not N entries for its files.
 
-        def patched(path):
-            if str(path).endswith("blocked"):
-                raise PermissionError("nope")
-            return original_scandir(path)
-
-        events = EventBus()
-        captured = _capture_log_events(events)
-
-        with patch("os.scandir", side_effect=patched):
-            collect_files([str(tmp_path)], events=events)
-
-        all_msgs = " ".join(e["message"] for e in captured)
-        assert "normal" in all_msgs
-        assert "no action" in all_msgs
-
-    def test_os_error_summary_stays_at_warning(self, tmp_path) -> None:
-        """OS errors may be real hardware/filesystem issues → WARNING."""
-        (tmp_path / "broken").mkdir()
-        original_scandir = os.scandir
-
-        def patched(path):
-            if str(path).endswith("broken"):
-                raise OSError("simulated I/O error")
-            return original_scandir(path)
+        Otherwise excluding ``node_modules`` would explode the skipped
+        list with thousands of paths the collector intentionally does
+        not even open.
+        """
+        nm = tmp_path / "node_modules"
+        nm.mkdir()
+        # Populate with many files — none should appear in the skip list.
+        for i in range(50):
+            (nm / f"f_{i}.js").write_text("//", encoding="utf-8")
+        (tmp_path / "keep.txt").write_text("k", encoding="utf-8")
 
         events = EventBus()
         captured = _capture_log_events(events)
 
-        with patch("os.scandir", side_effect=patched):
-            collect_files([str(tmp_path)], events=events)
+        collect_files(
+            [str(tmp_path)],
+            exclude_patterns=["node_modules"],
+            events=events,
+        )
 
-        warning_msgs = [
-            e["message"] for e in captured if e["level"] == "warning"
-        ]
-        assert any("OS error" in m for m in warning_msgs)
+        evt = _skipped_event(captured)
+        assert evt is not None
+        excluded = evt["details"]["excluded_by_pattern"]
+        # Exactly one entry for the directory itself — not 50 file entries.
+        assert len(excluded) == 1
+        path, pattern = excluded[0]
+        assert path.endswith("node_modules")
+        assert pattern == "node_modules"
 
 
 class TestExcludePatternsLogged:
     """The active exclude list must be visible in the run log.
 
-    Rationale: when a user sees thousands of paths skipped, the next
-    natural question is "what is being filtered out?". Logging the
-    pattern list at the start of collect lets them audit without
-    digging through the profile dialog.
+    The new format is a parent log line ``Applying exclude patterns (N)``
+    plus the patterns in ``details["patterns"]`` — the Run-tab Log
+    expands them as children. The legacy comma-joined message lived
+    on a single line that was tronquée beyond 4-5 patterns.
     """
 
-    def test_exclude_patterns_logged_when_present(self, tmp_path) -> None:
+    def test_exclude_patterns_event_has_count_and_payload(self, tmp_path) -> None:
         (tmp_path / "a.txt").write_text("a", encoding="utf-8")
 
         events = EventBus()
@@ -271,14 +299,16 @@ class TestExcludePatternsLogged:
             events=events,
         )
 
-        info_msgs = [e["message"] for e in captured if e["level"] == "info"]
-        pattern_lines = [m for m in info_msgs if "exclude pattern" in m.lower()]
-        assert pattern_lines, "expected an info line listing exclude patterns"
-        # All three patterns must appear in the same line.
-        line = pattern_lines[0]
-        assert "*.tmp" in line
-        assert "node_modules" in line
-        assert ".git" in line
+        applying = [
+            e for e in captured
+            if "exclude pattern" in e["message"].lower() and e["details"]
+        ]
+        assert applying, "expected an event with patterns details"
+        evt = applying[0]
+        # Message states the count.
+        assert "(3)" in evt["message"]
+        # Details carries the full list.
+        assert evt["details"]["patterns"] == ["*.tmp", "node_modules", ".git"]
 
     def test_exclude_patterns_silent_when_empty(self, tmp_path) -> None:
         """No exclusions → no noisy 'Applying ...' line."""
@@ -299,10 +329,9 @@ class TestExcludePatternsLogged:
 
 
 class TestFileLogPreservesDetail:
-    """Aggregation in UI must not lose information from the file log."""
+    """Per-path detail must keep landing in the .log file at DEBUG."""
 
     def test_individual_paths_logged_at_debug(self, tmp_path, caplog) -> None:
-        """Each failure must appear in the file log at DEBUG level."""
         (tmp_path / "blocked").mkdir()
 
         original_scandir = os.scandir
@@ -312,9 +341,11 @@ class TestFileLogPreservesDetail:
                 raise PermissionError("nope")
             return original_scandir(path)
 
-        with caplog.at_level(logging.DEBUG, logger="src.core.phases.collector"):
-            with patch("os.scandir", side_effect=patched):
-                collect_files([str(tmp_path)])
+        with (
+            caplog.at_level(logging.DEBUG, logger="src.core.phases.collector"),
+            patch("os.scandir", side_effect=patched),
+        ):
+            collect_files([str(tmp_path)])
 
         debug_msgs = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
         assert any("Permission denied" in m and "blocked" in m for m in debug_msgs)
@@ -329,7 +360,6 @@ class TestBehaviouralRegression:
     """The aggregation MUST NOT change which files are collected."""
 
     def test_inaccessible_subtree_does_not_block_siblings(self, tmp_path) -> None:
-        """Same scenario as test_collector_edge_cases.py but with the new code."""
         (tmp_path / "ok.txt").write_text("ok", encoding="utf-8")
         blocked = tmp_path / "blocked"
         blocked.mkdir()

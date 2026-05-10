@@ -31,8 +31,13 @@ _VERIFY_WORKERS_MAX = 8
 # the verify phase hangs forever AFTER the bytes were already copied,
 # which is the worst possible UX — the backup is intact but the user
 # perceives a frozen UI. Keep these in sync with manifest.py constants.
+#
+# MAX cap rationale: see manifest.py — Windows DWORD millisecond
+# wait limit forces an absolute ceiling well below 49 days, and
+# 4 h is generous enough for any realistic verify pass.
 _VERIFY_TIMEOUT_PER_FILE = 30.0
 _VERIFY_TIMEOUT_MIN_SECONDS = 60.0
+_VERIFY_TIMEOUT_MAX_SECONDS = 4 * 3600.0  # 4 h hard ceiling
 
 
 def _resolve_worker_count() -> int:
@@ -125,8 +130,12 @@ def verify_backup(
     # the executor overhead entirely.
     if to_hash:
         workers = _resolve_worker_count()
-        total_timeout = max(
-            _VERIFY_TIMEOUT_MIN_SECONDS, len(to_hash) * _VERIFY_TIMEOUT_PER_FILE
+        total_timeout = min(
+            _VERIFY_TIMEOUT_MAX_SECONDS,
+            max(
+                _VERIFY_TIMEOUT_MIN_SECONDS,
+                len(to_hash) * _VERIFY_TIMEOUT_PER_FILE,
+            ),
         )
 
         # try/finally instead of ``with``: ``with`` calls

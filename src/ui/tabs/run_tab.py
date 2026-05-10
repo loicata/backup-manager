@@ -13,9 +13,13 @@ from src.core.events import (
     STATUS,
     EventBus,
 )
+from src.core.file_categorizer import (
+    CATEGORY_ORDER,
+    categorize,
+    extension_of,
+)
 from src.core.health_checker import DestinationHealth, format_bytes
 from src.ui.theme import Colors, Fonts, Spacing
-
 
 # Maximum characters displayed in the "phase: filename" status line.
 # Beyond this length the path is truncated with a leading ellipsis so the
@@ -136,23 +140,54 @@ class RunTab(ttk.Frame):
         )
         self.status_label.pack(side="left", fill="x", expand=True)
 
-        # Log output
-        log_frame = ttk.LabelFrame(self, text="Log", padding=Spacing.PAD)
+        # Log output — Treeview-based to mirror the Schedule journal
+        # styling (clear background, structured rows). Events with a
+        # ``details`` payload (e.g. the collector's "Skipped N file(s)"
+        # summary) are rendered as expandable parents so the user can
+        # drill down to see exactly which files were not backed up,
+        # grouped by file type / extension. Plain events are flat rows.
+        # Frame instead of LabelFrame: the bold "Log" title above the
+        # tree was visually heavy and redundant with the implicit
+        # context — the only multi-row scrollable widget on the tab.
+        log_frame = ttk.Frame(self)
         log_frame.pack(fill="both", expand=True, padx=Spacing.LARGE, pady=Spacing.MEDIUM)
 
-        self.log_text = tk.Text(
+        # Single-column "show=tree" — Tk forces the tree column (#0,
+        # bearing the carets and indentation) to render first. Carrying
+        # both phase and message in #0 (separated by spaces) keeps the
+        # caret next to the message it expands, which is what the
+        # mockup specifies. A real two-column layout would put the
+        # caret on the wrong side because Tk does not let you display
+        # the tree column anywhere except left.
+        self.log_tree = ttk.Treeview(
             log_frame,
-            bg=Colors.LOG_BG,
-            fg=Colors.LOG_TEXT,
-            font=Fonts.mono(),
-            wrap="word",
-            state="disabled",
+            show="tree",
             height=15,
+            selectmode="browse",
         )
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(
+            log_frame, orient="vertical", command=self.log_tree.yview
+        )
+        self.log_tree.configure(yscrollcommand=scrollbar.set)
+        self.log_tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        # Tag styles: warning/error get a discreet background tint,
+        # info stays default. Successful outcomes ("Verification OK",
+        # "Backup complete") are NOT colored — the in-log green tint
+        # was redundant with the green "✓ Success" pill at the top of
+        # the Run tab, which is the canonical success indicator.
+        self.log_tree.tag_configure("warning", background="#fff8e0")
+        self.log_tree.tag_configure("error", background="#fde8e8")
+        self.log_tree.tag_configure("muted", foreground="#666666")
+
+        # Lazy-load state for the Skipped subtree. The full payload
+        # (which can run into hundreds of thousands of paths on a
+        # pathological workload) lives in this dict; widgets are only
+        # created when the user expands a sub-node. Keys are tree item
+        # IDs, values describe what to materialize on demand.
+        self._lazy_subtrees: dict[str, dict] = {}
+        self.log_tree.bind("<<TreeviewOpen>>", self._on_tree_open)
 
         # Buttons
         btn_frame = ttk.Frame(self)
@@ -517,16 +552,202 @@ class RunTab(ttk.Frame):
         with contextlib.suppress(tk.TclError):
             self.status_label.config(text=phase, foreground=Colors.ACCENT)
 
-    def _on_log(self, message="", level="info", **kw):
+    def _on_log(self, message="", level="info", phase="", details=None, **kw):
         """Schedule log append on the main thread."""
-        self.after(0, self._append_log, message)
+        self.after(0, self._append_log, message, level, phase, details)
 
-    def _append_log(self, message):
+    def _append_log(self, message, level="info", phase="", details=None):
+        """Insert a log entry into the Treeview.
+
+        Three rendering shapes:
+
+        1. **Plain event** (``details is None``): a single row whose
+           visible text is ``"{phase}  {message}"``. Most events take
+           this path.
+        2. **Exclude-pattern listing** (``details = {"patterns": [...]}``):
+           parent row with the same prefix, children are the individual
+           patterns. Children are inserted eagerly (cheap — at most a
+           few dozen patterns).
+        3. **Skipped summary** (``details`` has ``permission_denied`` /
+           ``os_errors`` / ``excluded_by_pattern`` keys): parent row
+           plus a category placeholder per non-empty category. Each
+           category is a stub at first — its children (extensions, then
+           paths) are materialized lazily when the user expands it,
+           via ``_on_tree_open``. Avoids inserting ~100 k widgets up
+           front on pathological workloads.
+        """
         with contextlib.suppress(tk.TclError):
-            self.log_text.config(state="normal")
-            self.log_text.insert("end", f"  {message}\n")
-            self.log_text.see("end")
-            self.log_text.config(state="disabled")
+            tags = self._tags_for(level, message)
+            row_text = self._compose_row_text(phase, message)
+
+            if details is None:
+                self.log_tree.insert("", "end", text=row_text, tags=tags)
+            elif "patterns" in details:
+                parent = self.log_tree.insert(
+                    "", "end", text=row_text, tags=tags, open=False
+                )
+                for pat in details["patterns"]:
+                    self.log_tree.insert(parent, "end", text=pat, tags=("muted",))
+            elif self._is_skipped_payload(details):
+                self._insert_skipped_node(row_text, tags, details)
+            else:
+                # Unknown payload shape — render as plain row to be safe.
+                self.log_tree.insert("", "end", text=row_text, tags=tags)
+
+            self._scroll_to_end()
+
+    @staticmethod
+    def _compose_row_text(phase: str, message: str) -> str:
+        """Build the visible text of a top-level log row.
+
+        ``phase`` is preserved as a left-padded prefix so the user can
+        still scan which pipeline phase emitted the line — the
+        Schedule journal does the equivalent with its ``Profile``
+        column. Empty phase falls back to message-only.
+        """
+        if not phase:
+            return message
+        return f"[{phase}]  {message}"
+
+    @staticmethod
+    def _tags_for(level: str, message: str) -> tuple[str, ...]:
+        """Pick Treeview tags based on the log level.
+
+        Only ``warning`` and ``error`` get a colored row. INFO lines —
+        including success outcomes like "Verification OK" or "Backup
+        complete" — stay on the default background because the green
+        "Success" pill at the top of the Run tab already conveys the
+        result and an in-log echo would be visual duplication.
+        """
+        del message  # noqa — kept for API stability if heuristics return later
+        if level == "error":
+            return ("error",)
+        if level == "warning":
+            return ("warning",)
+        return ()
+
+    @staticmethod
+    def _is_skipped_payload(details: dict) -> bool:
+        """True when ``details`` matches the collector's skipped summary."""
+        return any(
+            k in details
+            for k in ("permission_denied", "os_errors", "excluded_by_pattern")
+        )
+
+    def _insert_skipped_node(
+        self, row_text: str, tags: tuple[str, ...], details: dict
+    ) -> None:
+        """Create the Skipped parent + lazy category placeholders.
+
+        We pre-compute the per-category buckets here (cheap categorical
+        partitioning of all the skipped paths) and stash them in
+        ``_lazy_subtrees``. The category nodes are inserted as visible
+        rows; their children (extensions and individual paths) are
+        only materialized when the user expands a category, which
+        happens via ``_on_tree_open``.
+        """
+        # Materialize one entry per skipped path with (path, reason)
+        # so all categories share the same per-row contract downstream.
+        # ``reason`` is what we display in grey at the right of the path.
+        all_paths: list[tuple[str, str]] = []
+        for path in details.get("permission_denied", []):
+            all_paths.append((path, "permission denied"))
+        for path, msg in details.get("os_errors", []):
+            all_paths.append((path, f"OS error: {msg}"))
+        for path, pattern in details.get("excluded_by_pattern", []):
+            all_paths.append((path, f"excluded: {pattern}"))
+
+        # Bucketize by category, preserving display order. Categories
+        # with zero entries are intentionally suppressed at render time
+        # to keep the visual weight proportional to the actual data.
+        buckets: dict[str, list[tuple[str, str]]] = {c: [] for c in CATEGORY_ORDER}
+        for path, reason in all_paths:
+            buckets[categorize(path)].append((path, reason))
+
+        # Parent node for the whole Skipped summary.
+        parent = self.log_tree.insert("", "end", text=row_text, tags=tags, open=False)
+
+        # Insert one stub per non-empty category. The Treeview needs at
+        # least one child to render a caret; we add a transient
+        # placeholder that ``_on_tree_open`` replaces with real content
+        # the first time the category is expanded.
+        for category in CATEGORY_ORDER:
+            entries = buckets[category]
+            if not entries:
+                continue
+            cat_text = f"{category}  ({len(entries)})"
+            cat_node = self.log_tree.insert(parent, "end", text=cat_text)
+            placeholder = self.log_tree.insert(cat_node, "end", text="…")
+            self._lazy_subtrees[cat_node] = {
+                "kind": "category",
+                "entries": entries,
+                "placeholder": placeholder,
+            }
+
+    def _on_tree_open(self, _event=None) -> None:
+        """Materialize lazy subtree contents on first expand."""
+        item = self.log_tree.focus()
+        if not item:
+            return
+        spec = self._lazy_subtrees.pop(item, None)
+        if spec is None:
+            return  # Already materialized or never lazy.
+
+        with contextlib.suppress(tk.TclError):
+            # Drop the placeholder before inserting the real children
+            # so the user does not see a transient "…" + content frame.
+            self.log_tree.delete(spec["placeholder"])
+
+        if spec["kind"] == "category":
+            self._materialize_category(item, spec["entries"])
+
+    def _materialize_category(
+        self, category_node: str, entries: list[tuple[str, str]]
+    ) -> None:
+        """Build extension sub-groups + path leaves under a category.
+
+        Sub-groups are sorted by path count descending so the heaviest
+        offender shows up first when the category is opened — the user
+        is most likely to find their file there.
+        """
+        by_extension: dict[str, list[tuple[str, str]]] = {}
+        for path, reason in entries:
+            ext = extension_of(path) or "(no extension)"
+            by_extension.setdefault(ext, []).append((path, reason))
+
+        sorted_exts = sorted(
+            by_extension.items(),
+            key=lambda kv: (-len(kv[1]), kv[0]),
+        )
+        for ext, items in sorted_exts:
+            ext_text = f"{ext}  ({len(items)})"
+            ext_node = self.log_tree.insert(category_node, "end", text=ext_text)
+            # Path-level rows are leaves — no further lazy load. We
+            # sort alphabetically for stable navigation.
+            for path, reason in sorted(items):
+                # Use multiple spaces so the reason aligns roughly
+                # right of the path on common widths. A monospace font
+                # would do better but we are intentionally on the
+                # standard proportional font for visual consistency
+                # with Schedule journal.
+                leaf_text = f"{path}    {reason}"
+                self.log_tree.insert(
+                    ext_node, "end", text=leaf_text, tags=("muted",)
+                )
+
+    def _scroll_to_end(self) -> None:
+        """Scroll the log tree to the last top-level row.
+
+        Mimics the auto-scroll of the legacy ``tk.Text`` so newly
+        emitted events are always visible. The user can manually scroll
+        up; the next event will tug them back down — same behaviour as
+        before, no surprise.
+        """
+        children = self.log_tree.get_children("")
+        if children:
+            with contextlib.suppress(tk.TclError):
+                self.log_tree.see(children[-1])
+
 
     def _on_status(self, state="", **kw):
         """Schedule status update on the main thread."""
@@ -603,9 +824,11 @@ class RunTab(ttk.Frame):
         return abs((t1 - t2).total_seconds()) < 300.0
 
     def clear_log(self):
-        self.log_text.config(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.config(state="disabled")
+        with contextlib.suppress(tk.TclError):
+            self.log_tree.delete(*self.log_tree.get_children(""))
+        # Drop the lazy-load registry so reopened items don't try to
+        # materialize children that no longer exist.
+        self._lazy_subtrees.clear()
         self.progress_bar["value"] = 0
         self.percent_label.config(text="0%")
         self._phase_totals.clear()

@@ -24,78 +24,92 @@ _ALWAYS_EXCLUDED_DIRS = {
     ".Trash-1000",
 }
 
-# How many sample paths to keep per skipped category for the UI summary.
-# Five is enough to identify the pattern (e.g. ``.pytest_cache``,
-# ``...\evidence\<uuid>\volatile``) without flooding the run-tab log.
-_SKIPPED_SAMPLE_LIMIT = 5
-
-
 @dataclass
 class _SkippedPaths:
-    """Accumulator for paths the collector could not enter.
+    """Accumulator for paths the collector could not (or would not) include.
 
-    The legacy code emitted one ``phase_log.warning`` per failure,
-    which sent thousands of LOG events to the UI on workloads with
-    a lot of restricted directories (``.pytest_cache`` from every
-    Python project, ``volatile`` evidence folders from security
-    tools, etc.). The Run tab became unusable.
+    Tracks three categories of exclusion, all surfaced in the Run-tab
+    Log as a single expandable ``Skipped N file(s) not backed up`` entry
+    so the user can drill down to verify whether a specific file made it
+    into the backup or not.
 
-    This accumulator keeps the per-path detail in the file log
-    (``logger.debug``) so deep diagnostic stays available, but
-    surfaces a single aggregated WARNING per category in the UI
-    once the collect phase finishes.
+    Categories tracked:
+
+    - ``permission_denied``: ``PermissionError`` during ``os.scandir`` —
+      typically locked system caches, files held by another process.
+    - ``os_errors``: generic ``OSError`` during the walk — rarer, may
+      indicate real disk/filesystem issues.
+    - ``excluded_by_pattern``: file or directory that matched one of
+      the user-configured exclude patterns (``*.tmp``, ``__pycache__``,
+      ``node_modules``, etc.). Matched **directories** are recorded as
+      a single entry — the collector does not descend into them, so
+      individual files inside an excluded directory never appear here.
+      The user searching for a specific file inside ``node_modules``
+      finds the parent directory and infers the file is excluded.
+
+    No cap is applied to the lists. The previous ``_SKIPPED_SAMPLE_LIMIT``
+    of 5 made the in-Log expansion useless on real workloads (with one
+    or two large excluded directories you would see "Examples: …" with
+    most of the truth hidden). Memory cost is bounded by the actual
+    filesystem: every path is at most a few hundred bytes; even on a
+    pathological 100 k-skipped scenario the accumulator stays under
+    ~30 MB which we trade for usable diagnostic.
     """
 
     permission_denied: list[str] = field(default_factory=list)
-    permission_denied_count: int = 0
     os_errors: list[tuple[str, str]] = field(default_factory=list)
-    os_errors_count: int = 0
+    excluded_by_pattern: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def total_count(self) -> int:
+        """Total number of skipped paths across all categories."""
+        return (
+            len(self.permission_denied)
+            + len(self.os_errors)
+            + len(self.excluded_by_pattern)
+        )
 
     def add_permission(self, path: str) -> None:
         """Record a PermissionError on ``path``."""
-        self.permission_denied_count += 1
-        if len(self.permission_denied) < _SKIPPED_SAMPLE_LIMIT:
-            self.permission_denied.append(path)
+        self.permission_denied.append(path)
         logger.debug("Permission denied: %s", path)
 
     def add_os_error(self, path: str, message: str) -> None:
         """Record a generic OSError on ``path``."""
-        self.os_errors_count += 1
-        if len(self.os_errors) < _SKIPPED_SAMPLE_LIMIT:
-            self.os_errors.append((path, message))
+        self.os_errors.append((path, message))
         logger.debug("Error accessing %s: %s", path, message)
 
+    def add_excluded(self, path: str, pattern: str) -> None:
+        """Record a path skipped because it matched an exclude pattern."""
+        self.excluded_by_pattern.append((path, pattern))
+        logger.debug("Excluded by %r: %s", pattern, path)
+
     def emit_summary(self, phase_log: PhaseLogger) -> None:
-        """Push one aggregated event per non-empty category to the UI.
+        """Push one aggregated ``Skipped`` event with a structured payload.
 
-        Permission-denied is the noisy-but-benign case (system caches,
-        files locked by another app). Surfaced at INFO with reassuring
-        wording so a novice user with thousands of these doesn't panic.
+        The Run-tab Log widget reads ``details`` to build a hierarchical
+        view (Skipped → category-by-file-type → extension → path with
+        reason). When the bus is hooked to a plain text consumer the
+        ``message`` alone still provides a meaningful one-liner.
 
-        OS errors are rarer and may indicate real disk/filesystem
-        issues, so they stay at WARNING.
-
-        The word ``Skipped`` is preserved in both messages so users
-        searching the log can still find them.
+        OS errors stay at INFO level too (no point alerting the user
+        louder when they cannot act on it from the UI) — the previous
+        WARNING split into two messages is replaced by a single one
+        whose ``details`` contains all three categories.
         """
-        if self.permission_denied_count:
-            sample = "; ".join(self.permission_denied)
-            extra = self.permission_denied_count - len(self.permission_denied)
-            suffix = f" (+{extra} more)" if extra > 0 else ""
-            phase_log.info(
-                f"Skipped {self.permission_denied_count} protected item(s) "
-                f"— typically system caches or files locked by another app "
-                f"(this is normal, no action needed). "
-                f"Examples: {sample}{suffix}"
-            )
-        if self.os_errors_count:
-            sample = "; ".join(f"{p} ({m})" for p, m in self.os_errors)
-            extra = self.os_errors_count - len(self.os_errors)
-            suffix = f" (+{extra} more)" if extra > 0 else ""
-            phase_log.warning(
-                f"Skipped {self.os_errors_count} path(s) — "
-                f"OS error. First: {sample}{suffix}"
-            )
+        total = self.total_count
+        if total == 0:
+            return
+
+        details = {
+            "permission_denied": list(self.permission_denied),
+            "os_errors": list(self.os_errors),
+            "excluded_by_pattern": list(self.excluded_by_pattern),
+        }
+        phase_log.info(
+            f"Skipped {total} file(s) not backed up — click to inspect by category",
+            details=details,
+        )
 
 
 @dataclass
@@ -154,9 +168,15 @@ def collect_files(
     # Surface the active exclude patterns so a user can audit what
     # is being filtered out without hunting through the profile dialog.
     # Helps with the "did my files actually get backed up?" question
-    # raised when novice users see the skip summary.
+    # raised when novice users see the skip summary. The Run-tab Log
+    # widget renders ``details`` as expandable children under this
+    # parent line; consumers without details support still get a
+    # readable summary in ``message``.
     if exclude:
-        phase_log.info(f"Applying exclude patterns: {', '.join(exclude)}")
+        phase_log.info(
+            f"Applying exclude patterns ({len(exclude)})",
+            details={"patterns": list(exclude)},
+        )
 
     for source in source_paths:
         source_path = Path(source)
@@ -165,14 +185,17 @@ def collect_files(
             continue
 
         if source_path.is_file():
-            if not _is_excluded(source_path, exclude, source_path.parent):
+            matched = _match_excluded(source_path, exclude, source_path.parent)
+            if matched is None:
                 _add_file(files, seen, source_path, source_path.parent, source)
+            else:
+                skipped.add_excluded(str(source_path), matched)
         elif source_path.is_dir():
             _collect_directory(files, seen, source_path, exclude, source, skipped)
 
-    # One aggregated WARNING per category beats thousands of per-path
-    # lines that drowned the Run-tab log on workloads with many
-    # restricted directories (.pytest_cache, evidence/<uuid>/volatile…).
+    # Single aggregated event for the whole phase. ``details`` carries
+    # the per-category lists so the Run-tab Log can rebuild the
+    # category-by-extension hierarchy without parsing the message.
     skipped.emit_summary(phase_log)
     phase_log.info(f"Collected {len(files)} files from {len(source_paths)} sources")
     return files
@@ -204,17 +227,29 @@ def _collect_directory(
                     continue
 
                 if entry.is_dir(follow_symlinks=False):
-                    # Skip system/temp directories
+                    # Skip system/temp directories silently — the user
+                    # has no actionable interest in $RECYCLE.BIN etc.
                     if entry.name in _ALWAYS_EXCLUDED_DIRS:
                         continue
-                    # Check if directory name matches exclusion
-                    if _is_excluded(path, exclude, root_path):
+                    # Check if directory name matches exclusion. We do
+                    # NOT descend into excluded directories — the
+                    # accumulator records the directory as a single
+                    # entry rather than enumerating every file inside,
+                    # which would defeat the whole point of an exclude
+                    # pattern (and turn a simple "skip node_modules"
+                    # into a 50 k-row UI dump).
+                    matched = _match_excluded(path, exclude, root_path)
+                    if matched is not None:
+                        skipped.add_excluded(str(path), matched)
                         continue
                     _collect_directory(files, seen, path, exclude, source_root, skipped)
 
                 elif entry.is_file(follow_symlinks=False):
-                    if not _is_excluded(path, exclude, root_path):
+                    matched = _match_excluded(path, exclude, root_path)
+                    if matched is None:
                         _add_file(files, seen, path, root_path, source_root)
+                    else:
+                        skipped.add_excluded(str(path), matched)
 
             except PermissionError:
                 skipped.add_permission(entry.path)
@@ -259,30 +294,28 @@ def _add_file(
         pass
 
 
-def _is_excluded(
+def _match_excluded(
     filepath: Path,
     patterns: list[str],
     source_root: Path | None = None,
-) -> bool:
-    """Check if a path matches any exclusion pattern.
+) -> str | None:
+    """Return the first pattern that matches ``filepath``, else ``None``.
 
-    Two pattern flavours are supported:
+    Two pattern flavours are supported (see ``_is_excluded`` for the
+    semantic detail):
 
-    * Patterns WITHOUT ``/`` (e.g. ``__pycache__``, ``*.tmp``) match
-      against the file or directory **basename**, anywhere in the
-      tree. This is the gitignore-style "any subdir called X"
-      behaviour the existing default patterns rely on.
-    * Patterns WITH ``/`` (e.g. ``*/evidence/*/volatile``) match
-      against the **POSIX relative path** below ``source_root``. This
-      lets users target a specific layout instead of every basename.
-      ``fnmatch``'s ``*`` greedily spans path separators, so a
-      pattern like ``*/evidence/*/volatile`` matches the dir
-      ``loicata/WardSOAR/evidence/<uuid>/volatile`` regardless of
-      depth above ``evidence``.
+    * Patterns WITHOUT ``/`` match against the basename, anywhere.
+    * Patterns WITH ``/`` match against the POSIX relative path
+      below ``source_root``.
 
-    When ``source_root`` is None, path-style patterns are skipped —
-    callers that don't have a source_root context fall back to the
-    basename-only behaviour.
+    When ``source_root`` is None, path-style patterns are skipped.
+
+    Returning the matched pattern (instead of just a bool) lets
+    ``_SkippedPaths.add_excluded`` record the rule that caught the
+    file — the Run-tab Log surfaces this as ``excluded: <pattern>``
+    next to each path so the user can tell which rule sent their
+    file to the skip pile. ``_is_excluded`` is preserved as a thin
+    wrapper for callers that only need the bool.
     """
     name = filepath.name
     rel_path: str | None = None
@@ -295,7 +328,16 @@ def _is_excluded(
     for pattern in patterns:
         if "/" in pattern:
             if rel_path is not None and fnmatch.fnmatch(rel_path, pattern):
-                return True
+                return pattern
         elif fnmatch.fnmatch(name, pattern):
-            return True
-    return False
+            return pattern
+    return None
+
+
+def _is_excluded(
+    filepath: Path,
+    patterns: list[str],
+    source_root: Path | None = None,
+) -> bool:
+    """Backward-compatible bool wrapper around :func:`_match_excluded`."""
+    return _match_excluded(filepath, patterns, source_root) is not None

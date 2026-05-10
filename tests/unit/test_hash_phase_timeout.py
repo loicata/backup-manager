@@ -243,6 +243,51 @@ class TestVerifyHashTimeout:
 # ---------------------------------------------------------------------------
 
 
+class TestTimeoutOverflowCap:
+    """Regression: huge workloads (>143 k files) used to compute a
+    multi-month ``total_timeout`` that Python refused to schedule —
+    ``concurrent.futures.as_completed`` ultimately calls
+    ``threading.Condition.wait`` which on Windows lands in
+    ``WaitForMultipleObjectsEx`` whose DWORD millisecond argument
+    saturates around 49.7 days. CPython surfaces this as an
+    ``OverflowError("timeout value is too large")`` and the engine
+    blocks every backup above that threshold.
+
+    The fix is an absolute ceiling on ``total_timeout`` (4 h) that
+    stays four orders of magnitude below the OS limit while still
+    being generous enough for any realistic hash pass — see the
+    constants block in ``manifest.py`` / ``verifier.py``.
+    """
+
+    def test_manifest_timeout_capped_at_max_for_262k_files(self):
+        """262 k files × 30 s = 7.8 M s ≈ 91 days → must clamp to 4 h."""
+        n = 262_654
+        computed = min(
+            manifest._HASH_TIMEOUT_MAX_SECONDS,
+            max(
+                manifest._HASH_TIMEOUT_MIN_SECONDS,
+                n * manifest._HASH_TIMEOUT_PER_FILE,
+            ),
+        )
+        assert computed == manifest._HASH_TIMEOUT_MAX_SECONDS
+        # Sanity: the cap stays well below the Windows DWORD ms limit
+        # (~49.7 days). Anything below ~30 days is safe.
+        assert computed < 30 * 24 * 3600
+
+    def test_verifier_timeout_capped_at_max_for_huge_workload(self):
+        """Verify mirror of the manifest cap — keep them in sync."""
+        n = 1_000_000
+        computed = min(
+            verifier._VERIFY_TIMEOUT_MAX_SECONDS,
+            max(
+                verifier._VERIFY_TIMEOUT_MIN_SECONDS,
+                n * verifier._VERIFY_TIMEOUT_PER_FILE,
+            ),
+        )
+        assert computed == verifier._VERIFY_TIMEOUT_MAX_SECONDS
+        assert computed < 30 * 24 * 3600
+
+
 class TestPoolShutdownNonBlocking:
     """The exception path must NOT wait for stuck workers to finish.
 

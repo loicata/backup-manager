@@ -199,16 +199,26 @@ def _build_wxs(version: str) -> str:
       otherwise a real-time scan can fire between file creation and the
       exclusion taking effect, causing the same disappearance bug.
     -->
+    <!--
+      ``-WindowStyle Hidden`` keeps the PowerShell host invisible on
+      both branches. Without it the install AND uninstall flash a
+      visible console window for ~200 ms during the deferred action,
+      which the user sees as a brief black rectangle right before
+      "Files installed" / right before file removal during uninstall —
+      looks like the installer is about to crash. ``Hidden`` tells the
+      PowerShell host to start with the window already off-screen so
+      no flicker reaches the desktop.
+    -->
     <CustomAction Id="AddDefenderExclusion"
                   Directory="INSTALLFOLDER"
-                  ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;Add-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
+                  ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command &quot;Add-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />
 
     <CustomAction Id="RemoveDefenderExclusion"
                   Directory="INSTALLFOLDER"
-                  ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;Remove-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
+                  ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command &quot;Remove-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />

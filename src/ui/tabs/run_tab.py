@@ -499,6 +499,22 @@ class RunTab(ttk.Frame):
         self.after(0, self._update_progress, current, total, filename, phase)
 
     def _update_progress(self, current, total, filename, phase):
+        # Indeterminate scan heartbeat (collector walking the source
+        # tree): ``total == 0`` signals "no total yet, just keep the
+        # UI alive". Update the status label only — the determinate
+        # progress bar stays at 0 % until manifest / write / verify
+        # report real ratios. Without this, a 100 k-file walk shows
+        # nothing for ~60 s between the "Applying exclude patterns"
+        # log line and the "Collected N files" one, and the user
+        # legitimately thinks the app froze.
+        if total == 0 and current > 0:
+            with contextlib.suppress(tk.TclError):
+                self.status_label.config(
+                    text=f"Scanning... {filename}" if filename else "Scanning...",
+                    foreground=Colors.TEXT_SECONDARY,
+                )
+            return
+
         if total <= 0:
             return
 

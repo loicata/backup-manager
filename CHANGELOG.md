@@ -5,6 +5,14 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.2] - 2026-05-10
+
+### Fixed
+- **Collector phase silent for ~60 s on large workloads — looked like the app had crashed.** On a 262 654-file profile the recursive walk between ``Applying exclude patterns (10)`` and ``Collected N files from M sources`` ran for a full minute without emitting any event, leaving the Run-tab Log frozen and the progress bar at 0 %. The user had no visible feedback that the app was still working.
+  - New ``_ScanHeartbeat`` class in ``collector.py`` ticks at every scanned file/directory and emits a ``PROGRESS`` event with ``total=0`` (signalling "indeterminate scan" rather than a percentage). ``PhaseLogger.progress`` already throttles to ~10 Hz so the bus only sees a few hundred events even on a 100 k-entry walk — no flooding.
+  - The Run-tab's ``_update_progress`` now interprets ``total == 0`` as a scan heartbeat and updates the status label (``Scanning... 47823 files in 1234 folders``) without touching the determinate progress bar. The bar stays at 0 % until manifest / write / verify report real ratios, which is the expected behaviour for those phases.
+  - Net effect: during a long collect, the user sees the file/folder counts climb in real time. Visible proof of life replaces the apparent freeze.
+
 ## [3.5.1] - 2026-05-10
 
 ### Fixed

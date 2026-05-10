@@ -24,6 +24,50 @@ _ALWAYS_EXCLUDED_DIRS = {
     ".Trash-1000",
 }
 
+class _ScanHeartbeat:
+    """Live progress updates while the collector walks the source tree.
+
+    On large workloads (100 k+ files) the recursive walk can run for
+    a full minute between the ``Applying exclude patterns`` event and
+    the final ``Collected N files`` event. Without an in-flight signal
+    the Run-tab Log shows nothing during that gap and the user
+    legitimately thinks the app has crashed.
+
+    Solution: at every scanned entry call ``tick``; ``PhaseLogger.progress``
+    is already throttled to 10 Hz, so the bus only sees ~10 events per
+    second regardless of how fast the walk runs. ``total=0`` flags
+    these events as "indeterminate scan progress" — the Run-tab
+    interprets that signal to update the status_label only, leaving
+    the determinate progress bar at 0 % until the real phases
+    (manifest, writer, verifier) report actual ratios.
+    """
+
+    __slots__ = ("_phase_log", "_files", "_dirs")
+
+    def __init__(self, phase_log: PhaseLogger):
+        self._phase_log = phase_log
+        self._files = 0
+        self._dirs = 0
+
+    def tick_file(self) -> None:
+        self._files += 1
+        self._emit()
+
+    def tick_dir(self) -> None:
+        self._dirs += 1
+        self._emit()
+
+    def _emit(self) -> None:
+        # ``filename`` carries the human-readable status that the
+        # Run-tab will surface in its status label.
+        self._phase_log.progress(
+            current=self._files + self._dirs,
+            total=0,
+            filename=f"{self._files} files in {self._dirs} folders",
+            phase="collecting",
+        )
+
+
 @dataclass
 class _SkippedPaths:
     """Accumulator for paths the collector could not (or would not) include.
@@ -164,6 +208,7 @@ def collect_files(
     files: list[FileInfo] = []
     seen: set[str] = set()  # Avoid duplicates
     skipped = _SkippedPaths()
+    heartbeat = _ScanHeartbeat(phase_log)
 
     # Surface the active exclude patterns so a user can audit what
     # is being filtered out without hunting through the profile dialog.
@@ -188,10 +233,13 @@ def collect_files(
             matched = _match_excluded(source_path, exclude, source_path.parent)
             if matched is None:
                 _add_file(files, seen, source_path, source_path.parent, source)
+                heartbeat.tick_file()
             else:
                 skipped.add_excluded(str(source_path), matched)
         elif source_path.is_dir():
-            _collect_directory(files, seen, source_path, exclude, source, skipped)
+            _collect_directory(
+                files, seen, source_path, exclude, source, skipped, heartbeat
+            )
 
     # Single aggregated event for the whole phase. ``details`` carries
     # the per-category lists so the Run-tab Log can rebuild the
@@ -208,6 +256,7 @@ def _collect_directory(
     exclude: list[str],
     source_root: str,
     skipped: _SkippedPaths,
+    heartbeat: "_ScanHeartbeat | None" = None,
 ) -> None:
     """Recursively collect files from a directory.
 
@@ -215,6 +264,11 @@ def _collect_directory(
     debug log + count) instead of being emitted as individual UI
     warnings.  ``collect_files`` flushes a single aggregated WARNING
     per category once the walk completes.
+
+    ``heartbeat`` (optional) is ticked after every entry so the
+    Run-tab status label keeps animating during long walks. The
+    PhaseLogger throttles the resulting PROGRESS events to 10 Hz so
+    a 100 k-entry walk emits ~600 events instead of 100 k.
     """
     root_path = Path(source_root)
     try:
@@ -242,12 +296,18 @@ def _collect_directory(
                     if matched is not None:
                         skipped.add_excluded(str(path), matched)
                         continue
-                    _collect_directory(files, seen, path, exclude, source_root, skipped)
+                    if heartbeat is not None:
+                        heartbeat.tick_dir()
+                    _collect_directory(
+                        files, seen, path, exclude, source_root, skipped, heartbeat
+                    )
 
                 elif entry.is_file(follow_symlinks=False):
                     matched = _match_excluded(path, exclude, root_path)
                     if matched is None:
                         _add_file(files, seen, path, root_path, source_root)
+                        if heartbeat is not None:
+                            heartbeat.tick_file()
                     else:
                         skipped.add_excluded(str(path), matched)
 

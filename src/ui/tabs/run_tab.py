@@ -208,7 +208,10 @@ class RunTab(ttk.Frame):
         self.log_tree.heading("#0", text="Message", anchor="w")
         self.log_tree.heading("phase", text="Phase", anchor="w")
         self.log_tree.column("#0", stretch=True)
-        self.log_tree.column("phase", width=130, stretch=False, anchor="w")
+        # 160 px fits the longest tag (``commit_marker``, 13 chars) with
+        # a comfort margin under Win11's default Tk font. 130 px clipped
+        # ``commit_marker`` to ``commit_mark…``.
+        self.log_tree.column("phase", width=160, stretch=False, anchor="w")
         scrollbar = ttk.Scrollbar(
             log_frame, orient="vertical", command=self.log_tree.yview
         )

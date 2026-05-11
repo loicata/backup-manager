@@ -5,6 +5,14 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.5] - 2026-05-11
+
+### Fixed
+- **Retention tab "Days of history" row stayed hidden after a Monthly → Daily schedule switch.** When the user picked Monthly in the Schedule combobox and saved, ``weekly_row`` was ``pack_forget()``-ten. A subsequent switch to Daily called ``daily_row.pack(before=weekly_row)`` before re-packing weekly_row, which raised ``_tkinter.TclError: window isn't packed``. The exception was silently swallowed by the ``StringVar`` trace callback (Tkinter prints it to stderr but does not propagate), so the Daily row never reappeared in the UI even though the saved profile was correctly set to Daily. Monthly → Weekly was unaffected because weekly_row uses ``before=monthly_row`` and monthly_row is never ``pack_forget()``-ten. The fix re-orders the two ``pack``/``pack_forget`` blocks so weekly_row is re-packed *before* daily_row tries to anchor itself to it.
+
+### Tests
+- +7 tests in ``tests/unit/test_retention_frequency_sync.py`` cover every Schedule → Retention frequency transition (3 initial states + Monthly → Daily, Monthly → Weekly, full Save+reload after Monthly → Daily, and a sequence-of-transitions guard that asserts ``_apply_frequency_visibility`` never raises). The Monthly → Daily and Save+reload tests fail on 3.5.4 with the exact ``TclError: window isn't packed`` that produced the original silent bug.
+
 ## [3.5.4] - 2026-05-10
 
 ### Changed

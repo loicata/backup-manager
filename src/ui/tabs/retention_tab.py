@@ -177,26 +177,35 @@ class RetentionTab(ttk.Frame):
         self._apply_frequency_visibility(freq)
 
     def _apply_frequency_visibility(self, freq: ScheduleFrequency) -> None:
-        """Show/hide retention rows based on the given schedule frequency."""
+        """Show/hide retention rows based on the given schedule frequency.
+
+        Order matters: re-pack weekly_row BEFORE daily_row. daily_row uses
+        ``before=weekly_row`` as its anchor, and Tk raises TclError when
+        the anchor is not currently packed — which is exactly the state
+        left by a monthly schedule (weekly_row pack_forget()ten). The
+        exception was swallowed silently by the trace callback, so on a
+        monthly -> daily switch daily_row stayed hidden.
+        """
         self._schedule_freq = freq
 
         daily_row = self._gfs_rows.get("gfs_daily")
         weekly_row = self._gfs_rows.get("gfs_weekly")
         monthly_row = self._gfs_rows.get("gfs_monthly")
 
-        # Daily: hidden when schedule is weekly or monthly
-        if daily_row:
-            if freq in (ScheduleFrequency.WEEKLY, ScheduleFrequency.MONTHLY):
-                daily_row.pack_forget()
-            else:
-                daily_row.pack(fill="x", pady=2, before=weekly_row)
-
-        # Weekly: hidden when schedule is monthly
+        # Weekly: hidden when schedule is monthly. Must run first so that
+        # weekly_row is packed again before daily_row uses it as anchor.
         if weekly_row:
             if freq == ScheduleFrequency.MONTHLY:
                 weekly_row.pack_forget()
             else:
                 weekly_row.pack(fill="x", pady=2, before=monthly_row)
+
+        # Daily: hidden when schedule is weekly or monthly.
+        if daily_row:
+            if freq in (ScheduleFrequency.WEEKLY, ScheduleFrequency.MONTHLY):
+                daily_row.pack_forget()
+            else:
+                daily_row.pack(fill="x", pady=2, before=weekly_row)
 
         self._update_summary()
 

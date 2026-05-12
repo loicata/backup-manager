@@ -170,9 +170,7 @@ def build_integrity_manifest(
                         phase="hashing",
                     )
             except concurrent.futures.TimeoutError:
-                pending = [
-                    futures[f].relative_path for f in futures if not f.done()
-                ]
+                pending = [futures[f].relative_path for f in futures if not f.done()]
                 sample = ", ".join(pending[:5])
                 suffix = f" (+{len(pending) - 5} more)" if len(pending) > 5 else ""
                 raise RuntimeError(

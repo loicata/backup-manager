@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Stable test-only HMAC key. Any 32 bytes will do; this is consistent
 # across the whole session so a marker written in one test can be
 # verified in another (e.g. round-trip through the engine).
-_SESSION_TEST_HMAC_KEY = b"\xAB" * 32
+_SESSION_TEST_HMAC_KEY = b"\xab" * 32
 
 
 @pytest.fixture(autouse=True)

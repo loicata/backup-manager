@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import hashlib
 
-import pytest
 
 from src.core.phases.manifest import (
     _compute_total_checksum,
     prune_manifest_entries,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

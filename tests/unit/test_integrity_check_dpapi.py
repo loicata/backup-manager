@@ -94,22 +94,17 @@ class TestDpapiWrappingOnWindows:
         # ``sys.platform`` patch above forces the function to think it
         # IS Windows but the real ctypes call would fail in CI. Patch
         # the wrap helper to a deterministic transform instead.
-        monkeypatch.setattr(
-            integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data
-        )
+        monkeypatch.setattr(integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data)
 
         key = _real_get_hmac_key()
 
         raw = _key_path(isolated_appdata).read_bytes()
         assert raw.startswith(_DPAPI_MARKER), (
-            "Wrapped key must carry the DPAPI marker so the next read "
-            "knows to call unwrap"
+            "Wrapped key must carry the DPAPI marker so the next read " "knows to call unwrap"
         )
         assert raw[len(_DPAPI_MARKER) :] == b"WRAPPED:" + key
 
-    def test_existing_wrapped_key_is_unwrapped_on_read(
-        self, isolated_appdata, monkeypatch
-    ):
+    def test_existing_wrapped_key_is_unwrapped_on_read(self, isolated_appdata, monkeypatch):
         """Second call reads the marker, unwraps, returns the original key."""
         monkeypatch.setattr(integrity_check.sys, "platform", "win32")
         monkeypatch.setattr(
@@ -190,9 +185,7 @@ class TestDpapiUnwrapFailureRegen:
 
     def test_unwrap_failure_regenerates_key(self, isolated_appdata, monkeypatch):
         monkeypatch.setattr(integrity_check.sys, "platform", "win32")
-        monkeypatch.setattr(
-            integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data
-        )
+        monkeypatch.setattr(integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data)
 
         # Write a file as if a previous Windows user wrapped it; this
         # user can no longer unwrap (different DPAPI scope).
@@ -221,9 +214,7 @@ class TestMalformedFileRegen:
 
     def test_malformed_size_regenerates(self, isolated_appdata, monkeypatch):
         monkeypatch.setattr(integrity_check.sys, "platform", "win32")
-        monkeypatch.setattr(
-            integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data
-        )
+        monkeypatch.setattr(integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data)
 
         # 17 bytes: no marker, wrong size — clearly garbage.
         _key_path(isolated_appdata).parent.mkdir(parents=True, exist_ok=True)
@@ -240,11 +231,9 @@ class TestMalformedFileRegen:
     def test_legacy_plain_32_byte_file_kept(self, isolated_appdata, monkeypatch):
         """A pre-DPAPI 32-byte plain key is accepted and returned as-is."""
         monkeypatch.setattr(integrity_check.sys, "platform", "win32")
-        monkeypatch.setattr(
-            integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data
-        )
+        monkeypatch.setattr(integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data)
 
-        legacy = b"\xAA" * 32
+        legacy = b"\xaa" * 32
         _key_path(isolated_appdata).parent.mkdir(parents=True, exist_ok=True)
         _key_path(isolated_appdata).write_bytes(legacy)
 
@@ -287,17 +276,13 @@ class TestSaveAndLoadRoundTrip:
     correctly without intervening regen.
     """
 
-    def test_save_then_load_returns_same_checksums(
-        self, isolated_appdata, monkeypatch
-    ):
+    def test_save_then_load_returns_same_checksums(self, isolated_appdata, monkeypatch):
         # Restore the real ``_compute_hmac`` path: the conftest only
         # patches ``_get_hmac_key`` itself, but ``_compute_hmac`` is
         # not patched, so it will call the (mocked) ``_get_hmac_key``.
         # Override the module attribute back to the real function for
         # this test only.
-        monkeypatch.setattr(
-            integrity_check, "_get_hmac_key", _real_get_hmac_key
-        )
+        monkeypatch.setattr(integrity_check, "_get_hmac_key", _real_get_hmac_key)
         monkeypatch.setattr(
             integrity_check,
             "_dpapi_wrap",
@@ -325,9 +310,7 @@ class TestSaveAndLoadRoundTrip:
 
     def test_tampered_file_returns_none(self, isolated_appdata, monkeypatch):
         """A flipped byte in the JSON must trip the HMAC verification."""
-        monkeypatch.setattr(
-            integrity_check, "_get_hmac_key", _real_get_hmac_key
-        )
+        monkeypatch.setattr(integrity_check, "_get_hmac_key", _real_get_hmac_key)
         monkeypatch.setattr(integrity_check.sys, "platform", "linux")
         monkeypatch.setattr(
             integrity_check,

@@ -575,9 +575,7 @@ class TestPartialDeleteHandling:
             [{"name": "P_FULL_2026-04-20_100017"}],
             phase_log,
         )
-        assert deleted == 0, (
-            "Counter must reflect reality: the backup was not actually deleted"
-        )
+        assert deleted == 0, "Counter must reflect reality: the backup was not actually deleted"
 
     def test_storage_delete_error_logged_as_partial(self, caplog):
         """The rotator must log a structured 'Partial delete' error.

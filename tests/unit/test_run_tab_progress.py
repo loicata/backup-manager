@@ -10,7 +10,7 @@ update_idletasks() to flush the queue before asserting on _last_pct.
 import pytest
 
 from src.core.events import EventBus
-from src.ui.tabs.run_tab import RunTab
+from src.ui.tabs.run_tab import RunTab, _truncate_status_text
 
 
 @pytest.fixture()
@@ -175,17 +175,13 @@ class TestProgressCalculation:
 # here without needing a Tk root.
 # ---------------------------------------------------------------------
 
-from src.ui.tabs.run_tab import _truncate_status_text
-
 
 class TestTruncateStatusText:
     """Pure-Python helper that bounds the progress status line length."""
 
     def test_short_text_unchanged(self):
         """No truncation when phase + filename fit in budget."""
-        assert _truncate_status_text("hashing", "small.txt", max_chars=80) == (
-            "hashing: small.txt"
-        )
+        assert _truncate_status_text("hashing", "small.txt", max_chars=80) == ("hashing: small.txt")
 
     def test_long_path_truncated_with_leading_ellipsis(self):
         """Long paths must keep the basename visible — start gets clipped."""
@@ -204,9 +200,9 @@ class TestTruncateStatusText:
         """Hard upper bound — the layout reserves a fixed pixel width."""
         for max_chars in (20, 40, 80, 120):
             result = _truncate_status_text("phase", "x" * 500, max_chars=max_chars)
-            assert len(result) <= max_chars, (
-                f"Returned {len(result)} chars for max_chars={max_chars}"
-            )
+            assert (
+                len(result) <= max_chars
+            ), f"Returned {len(result)} chars for max_chars={max_chars}"
 
     def test_empty_filename_returns_phase_only(self):
         """No file → just the phase name (e.g. 'Filtering changed files...')."""

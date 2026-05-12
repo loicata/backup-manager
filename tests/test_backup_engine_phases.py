@@ -30,7 +30,6 @@ import pytest
 from src.core.backup_engine import BackupEngine
 from src.core.config import BackupType, StorageType
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -271,9 +270,7 @@ class TestPhaseOrphanScan:
         # Primary blows up listing; mirror still gets processed.
         primary = MagicMock()
         primary.list_orphan_backups = MagicMock(side_effect=OSError("S3 down"))
-        mirror_backend = self._make_backend_with_orphans(
-            [{"name": "mirror_orphan", "size": 0}]
-        )
+        mirror_backend = self._make_backend_with_orphans([{"name": "mirror_orphan", "size": 0}])
         engine._get_backend = MagicMock(return_value=mirror_backend)
 
         mirror_cfg = MagicMock()

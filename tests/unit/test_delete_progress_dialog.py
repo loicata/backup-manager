@@ -11,10 +11,8 @@ from __future__ import annotations
 import threading
 from unittest.mock import patch
 
-import pytest
 
 from src.ui.delete_progress_dialog import DeleteProgressDialog
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,7 +105,6 @@ class TestDialogUpdate:
             # "…" + 57 chars after the leading "Deleting: " prefix.
             assert "…" in displayed
             assert len(displayed) <= len("Deleting: ") + 60
-
 
         finally:
             dialog.destroy()

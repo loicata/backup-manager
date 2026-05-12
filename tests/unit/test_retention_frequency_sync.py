@@ -100,12 +100,12 @@ def test_monthly_then_daily_reveals_daily_row(tabs):
     # Simulate user picking Daily in the Schedule combobox.
     schedule_tab.freq_var.set("Daily")
 
-    assert _row_packed(retention_tab, "gfs_daily"), (
-        "daily_row should reappear after monthly -> daily switch"
-    )
-    assert _row_packed(retention_tab, "gfs_weekly"), (
-        "weekly_row should reappear after monthly -> daily switch"
-    )
+    assert _row_packed(
+        retention_tab, "gfs_daily"
+    ), "daily_row should reappear after monthly -> daily switch"
+    assert _row_packed(
+        retention_tab, "gfs_weekly"
+    ), "weekly_row should reappear after monthly -> daily switch"
     assert _row_packed(retention_tab, "gfs_monthly")
 
 

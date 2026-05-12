@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import os
 import stat
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,9 +29,7 @@ import pytest
 # Skip readonly-attribute test on POSIX where chmod 0o444 leaves the
 # parent directory writable so unlink succeeds anyway — the scenario
 # we care about is Windows-specific.
-WINDOWS_ONLY = pytest.mark.skipif(
-    os.name != "nt", reason="Windows-specific attribute behavior"
-)
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="Windows-specific attribute behavior")
 
 
 @pytest.fixture
@@ -161,9 +158,9 @@ class TestSafeRemoveTreeLongPath:
 
         # Sanity: the un-prefixed leaf path must exceed MAX_PATH.
         leaf_unprefixed = str(deep_abs / leaf_name)
-        assert len(leaf_unprefixed) > 260, (
-            f"Test fixture must produce >260-char path, got {len(leaf_unprefixed)}"
-        )
+        assert (
+            len(leaf_unprefixed) > 260
+        ), f"Test fixture must produce >260-char path, got {len(leaf_unprefixed)}"
 
         result = safe_remove_tree(root)
         assert result.success is True, f"Residuals: {result.residuals}"

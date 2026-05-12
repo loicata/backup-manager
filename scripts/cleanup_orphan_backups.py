@@ -68,8 +68,7 @@ def remove_one(target: Path) -> bool:
     result = safe_remove_tree(target)
     if result.success:
         print(
-            f"  ok — {result.removed_files} file(s), "
-            f"{result.removed_dirs} dir(s) removed",
+            f"  ok — {result.removed_files} file(s), " f"{result.removed_dirs} dir(s) removed",
             flush=True,
         )
         return True
@@ -114,7 +113,7 @@ def main(argv: list[str]) -> int:
         print()
         print(
             "Re-run with names to delete, e.g.:\n"
-            f"  python {Path(__file__).name} \"{destination}\" "
+            f'  python {Path(__file__).name} "{destination}" '
             f"{orphans[0].name}"
         )
         return 0

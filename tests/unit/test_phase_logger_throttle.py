@@ -13,10 +13,8 @@ still hits its boundaries.
 
 from __future__ import annotations
 
-import time
 from unittest.mock import patch
 
-import pytest
 
 from src.core.events import PROGRESS, EventBus
 from src.core.phase_logger import _PROGRESS_THROTTLE_MS, PhaseLogger
@@ -72,9 +70,9 @@ class TestThrottleRate:
             log.progress(current=5, total=10, filename="b", phase="x")  # throttled
             log.progress(current=10, total=10, filename="z", phase="x")  # terminal
 
-        assert any(e["current"] == 10 for e in captured), (
-            "Terminal event was throttled — bar would never reach 100%"
-        )
+        assert any(
+            e["current"] == 10 for e in captured
+        ), "Terminal event was throttled — bar would never reach 100%"
 
     def test_first_event_always_emitted(self) -> None:
         """current == 1 must reach the UI even right after another phase."""

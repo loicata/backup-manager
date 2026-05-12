@@ -24,6 +24,7 @@ _ALWAYS_EXCLUDED_DIRS = {
     ".Trash-1000",
 }
 
+
 class _ScanHeartbeat:
     """Live progress updates while the collector walks the source tree.
 
@@ -107,11 +108,7 @@ class _SkippedPaths:
     @property
     def total_count(self) -> int:
         """Total number of skipped paths across all categories."""
-        return (
-            len(self.permission_denied)
-            + len(self.os_errors)
-            + len(self.excluded_by_pattern)
-        )
+        return len(self.permission_denied) + len(self.os_errors) + len(self.excluded_by_pattern)
 
     def add_permission(self, path: str) -> None:
         """Record a PermissionError on ``path``."""
@@ -237,9 +234,7 @@ def collect_files(
             else:
                 skipped.add_excluded(str(source_path), matched)
         elif source_path.is_dir():
-            _collect_directory(
-                files, seen, source_path, exclude, source, skipped, heartbeat
-            )
+            _collect_directory(files, seen, source_path, exclude, source, skipped, heartbeat)
 
     # Single aggregated event for the whole phase. ``details`` carries
     # the per-category lists so the Run-tab Log can rebuild the
@@ -298,9 +293,7 @@ def _collect_directory(
                         continue
                     if heartbeat is not None:
                         heartbeat.tick_dir()
-                    _collect_directory(
-                        files, seen, path, exclude, source_root, skipped, heartbeat
-                    )
+                    _collect_directory(files, seen, path, exclude, source_root, skipped, heartbeat)
 
                 elif entry.is_file(follow_symlinks=False):
                     matched = _match_excluded(path, exclude, root_path)

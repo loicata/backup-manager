@@ -137,9 +137,7 @@ class TestMtimeIsNotConsulted:
     changes — the only safe signal is the hash itself.
     """
 
-    def test_mtime_moved_backwards_with_changed_content_still_reincluded(
-        self, tmp_path: Path
-    ):
+    def test_mtime_moved_backwards_with_changed_content_still_reincluded(self, tmp_path: Path):
         src = tmp_path / "src"
         src.mkdir()
         f = src / "doc.txt"
@@ -304,9 +302,7 @@ class TestManifestCorruption:
 class TestManifestEntryMissingHash:
     """A manifest entry without ``hash`` falls back to re-hashing live."""
 
-    def test_missing_hash_field_triggers_rehash_and_inclusion(
-        self, tmp_path: Path
-    ):
+    def test_missing_hash_field_triggers_rehash_and_inclusion(self, tmp_path: Path):
         src = tmp_path / "src"
         src.mkdir()
         f = src / "x.txt"
@@ -350,9 +346,7 @@ class TestUnreadableFileDuringFilter:
     logs a WARNING so operators can see the recurring skip.
     """
 
-    def test_oserror_during_hash_drops_file_silently(
-        self, tmp_path: Path, caplog
-    ):
+    def test_oserror_during_hash_drops_file_silently(self, tmp_path: Path, caplog):
         src = tmp_path / "src"
         src.mkdir()
         good = src / "good.txt"
@@ -391,9 +385,12 @@ class TestUnreadableFileDuringFilter:
 
         files = [_file_info(good, src), _file_info(broken, src)]
 
-        with caplog.at_level(logging.WARNING), patch(
-            "src.core.phases.filter.compute_sha256",
-            side_effect=selective_fail,
+        with (
+            caplog.at_level(logging.WARNING),
+            patch(
+                "src.core.phases.filter.compute_sha256",
+                side_effect=selective_fail,
+            ),
         ):
             changed, computed = filter_changed_files(files, manifest_path)
 
@@ -427,9 +424,12 @@ class TestUnreadableFileDuringManifestBuild:
                 raise OSError(13, "Access denied during manifest build")
             return original(path)
 
-        with caplog.at_level(logging.WARNING), patch(
-            "src.core.phases.filter.compute_sha256",
-            side_effect=selective_fail,
+        with (
+            caplog.at_level(logging.WARNING),
+            patch(
+                "src.core.phases.filter.compute_sha256",
+                side_effect=selective_fail,
+            ),
         ):
             manifest = build_updated_manifest(files)
 

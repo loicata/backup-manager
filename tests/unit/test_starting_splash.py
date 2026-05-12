@@ -77,9 +77,9 @@ class TestStartingSplash:
                 if isinstance(w, tk.Misc) and "label" in w.winfo_class().lower():
                     with __import__("contextlib").suppress(tk.TclError):
                         labels.append(str(w.cget("text")))
-        assert any("Starting" in t for t in labels), (
-            f"Expected a label containing 'Starting', got: {labels}"
-        )
+        assert any(
+            "Starting" in t for t in labels
+        ), f"Expected a label containing 'Starting', got: {labels}"
 
     def test_destroy_removes_window(self, tk_root):
         """Caller's ``splash.destroy()`` must actually tear down the

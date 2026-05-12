@@ -125,9 +125,7 @@ class TestAggregatedEmission:
         skip_events = [
             e for e in captured if "Skipped" in e["message"] and "not backed up" in e["message"]
         ]
-        assert len(skip_events) == 1, (
-            f"UI got {len(skip_events)} skip events — aggregation broken"
-        )
+        assert len(skip_events) == 1, f"UI got {len(skip_events)} skip events — aggregation broken"
 
     def test_summary_message_includes_total_count(self, tmp_path) -> None:
         """User must see the total at a glance — '1000' in the message."""
@@ -228,9 +226,7 @@ class TestExcludedByPatternTracking:
         events = EventBus()
         captured = _capture_log_events(events)
 
-        files = collect_files(
-            [str(tmp_path)], exclude_patterns=["*.tmp"], events=events
-        )
+        files = collect_files([str(tmp_path)], exclude_patterns=["*.tmp"], events=events)
 
         # Only keep.txt actually collected.
         assert len(files) == 1
@@ -240,10 +236,7 @@ class TestExcludedByPatternTracking:
         assert evt is not None
         excluded = evt["details"]["excluded_by_pattern"]
         # The skipped entry knows which pattern caught it.
-        assert any(
-            path.endswith("drop.tmp") and pattern == "*.tmp"
-            for path, pattern in excluded
-        )
+        assert any(path.endswith("drop.tmp") and pattern == "*.tmp" for path, pattern in excluded)
 
     def test_excluded_directory_recorded_once_not_recursively(self, tmp_path) -> None:
         """A skipped dir is one entry, not N entries for its files.
@@ -300,8 +293,7 @@ class TestExcludePatternsLogged:
         )
 
         applying = [
-            e for e in captured
-            if "exclude pattern" in e["message"].lower() and e["details"]
+            e for e in captured if "exclude pattern" in e["message"].lower() and e["details"]
         ]
         assert applying, "expected an event with patterns details"
         evt = applying[0]

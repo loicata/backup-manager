@@ -119,9 +119,7 @@ class TestNoFalseWakeAfterLongBackup:
         """
         profile = _make_profile()
         scheduler._test_profiles.append(profile)
-        scheduler._state.set_last_trigger(
-            profile.id, datetime.now() - timedelta(days=10)
-        )
+        scheduler._state.set_last_trigger(profile.id, datetime.now() - timedelta(days=10))
         # Align the scheduler's reference timestamp to our fake clock.
         scheduler._last_check_time = fake_monotonic.value
 
@@ -179,9 +177,7 @@ class TestNoFalseWakeAfterLongBackup:
         """
         profile = _make_profile()
         scheduler._test_profiles.append(profile)
-        scheduler._state.set_last_trigger(
-            profile.id, datetime.now() - timedelta(days=10)
-        )
+        scheduler._state.set_last_trigger(profile.id, datetime.now() - timedelta(days=10))
         scheduler._last_check_time = fake_monotonic.value
 
         def slow_backup(_p):

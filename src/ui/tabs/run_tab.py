@@ -212,9 +212,7 @@ class RunTab(ttk.Frame):
         # a comfort margin under Win11's default Tk font. 130 px clipped
         # ``commit_marker`` to ``commit_mark…``.
         self.log_tree.column("phase", width=160, stretch=False, anchor="w")
-        scrollbar = ttk.Scrollbar(
-            log_frame, orient="vertical", command=self.log_tree.yview
-        )
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_tree.yview)
         self.log_tree.configure(yscrollcommand=scrollbar.set)
         self.log_tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -603,9 +601,7 @@ class RunTab(ttk.Frame):
             self.progress_bar["value"] = self._last_pct
             self.percent_label.config(text=f"{self._last_pct}%")
             if filename:
-                self.status_label.config(
-                    text=_truncate_status_text(phase, filename)
-                )
+                self.status_label.config(text=_truncate_status_text(phase, filename))
 
     def _on_phase(self, phase="", **kw):
         """Schedule phase label update on the main thread.
@@ -680,24 +676,18 @@ class RunTab(ttk.Frame):
             phase_value = (phase,)
 
             if details is None:
-                self.log_tree.insert(
-                    "", "end", text=message, values=phase_value, tags=tags
-                )
+                self.log_tree.insert("", "end", text=message, values=phase_value, tags=tags)
             elif "patterns" in details:
                 parent = self.log_tree.insert(
                     "", "end", text=message, values=phase_value, tags=tags, open=False
                 )
                 for pat in details["patterns"]:
-                    self.log_tree.insert(
-                        parent, "end", text=pat, values=("",), tags=("muted",)
-                    )
+                    self.log_tree.insert(parent, "end", text=pat, values=("",), tags=("muted",))
             elif self._is_skipped_payload(details):
                 self._insert_skipped_node(message, phase, tags, details)
             else:
                 # Unknown payload shape — render as plain row to be safe.
-                self.log_tree.insert(
-                    "", "end", text=message, values=phase_value, tags=tags
-                )
+                self.log_tree.insert("", "end", text=message, values=phase_value, tags=tags)
 
             self._scroll_to_end()
 
@@ -721,10 +711,7 @@ class RunTab(ttk.Frame):
     @staticmethod
     def _is_skipped_payload(details: dict) -> bool:
         """True when ``details`` matches the collector's skipped summary."""
-        return any(
-            k in details
-            for k in ("permission_denied", "os_errors", "excluded_by_pattern")
-        )
+        return any(k in details for k in ("permission_denied", "os_errors", "excluded_by_pattern"))
 
     def _insert_skipped_node(
         self,
@@ -776,12 +763,8 @@ class RunTab(ttk.Frame):
             if not entries:
                 continue
             cat_text = f"{category}  ({len(entries)})"
-            cat_node = self.log_tree.insert(
-                parent, "end", text=cat_text, values=("",)
-            )
-            placeholder = self.log_tree.insert(
-                cat_node, "end", text="…", values=("",)
-            )
+            cat_node = self.log_tree.insert(parent, "end", text=cat_text, values=("",))
+            placeholder = self.log_tree.insert(cat_node, "end", text="…", values=("",))
             self._lazy_subtrees[cat_node] = {
                 "kind": "category",
                 "entries": entries,
@@ -805,9 +788,7 @@ class RunTab(ttk.Frame):
         if spec["kind"] == "category":
             self._materialize_category(item, spec["entries"])
 
-    def _materialize_category(
-        self, category_node: str, entries: list[tuple[str, str]]
-    ) -> None:
+    def _materialize_category(self, category_node: str, entries: list[tuple[str, str]]) -> None:
         """Build extension sub-groups + path leaves under a category.
 
         Sub-groups are sorted by path count descending so the heaviest
@@ -825,9 +806,7 @@ class RunTab(ttk.Frame):
         )
         for ext, items in sorted_exts:
             ext_text = f"{ext}  ({len(items)})"
-            ext_node = self.log_tree.insert(
-                category_node, "end", text=ext_text, values=("",)
-            )
+            ext_node = self.log_tree.insert(category_node, "end", text=ext_text, values=("",))
             # Path-level rows are leaves — no further lazy load. We
             # sort alphabetically for stable navigation.
             for path, reason in sorted(items):
@@ -837,9 +816,7 @@ class RunTab(ttk.Frame):
                 # standard proportional font for visual consistency
                 # with Schedule journal.
                 leaf_text = f"{path}    {reason}"
-                self.log_tree.insert(
-                    ext_node, "end", text=leaf_text, values=("",), tags=("muted",)
-                )
+                self.log_tree.insert(ext_node, "end", text=leaf_text, values=("",), tags=("muted",))
 
     def _scroll_to_end(self) -> None:
         """Scroll the log tree to the last top-level row.
@@ -853,7 +830,6 @@ class RunTab(ttk.Frame):
         if children:
             with contextlib.suppress(tk.TclError):
                 self.log_tree.see(children[-1])
-
 
     def _on_status(self, state="", **kw):
         """Schedule status update on the main thread."""

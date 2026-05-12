@@ -38,11 +38,30 @@ class TestDocuments:
     @pytest.mark.parametrize(
         "ext",
         [
-            ".docx", ".doc", ".odt", ".pages", ".pdf", ".epub", ".mobi",
-            ".txt", ".rtf", ".markdown", ".csv", ".tsv",
-            ".xlsx", ".xls", ".ods", ".numbers",
-            ".pptx", ".ppt", ".key", ".odp",
-            ".vsdx", ".pub", ".mpp", ".mdb",
+            ".docx",
+            ".doc",
+            ".odt",
+            ".pages",
+            ".pdf",
+            ".epub",
+            ".mobi",
+            ".txt",
+            ".rtf",
+            ".markdown",
+            ".csv",
+            ".tsv",
+            ".xlsx",
+            ".xls",
+            ".ods",
+            ".numbers",
+            ".pptx",
+            ".ppt",
+            ".key",
+            ".odp",
+            ".vsdx",
+            ".pub",
+            ".mpp",
+            ".mdb",
         ],
     )
     def test_extension_routes_to_documents(self, ext: str) -> None:
@@ -55,9 +74,22 @@ class TestPhotos:
     @pytest.mark.parametrize(
         "ext",
         [
-            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff",
-            ".webp", ".avif", ".heic", ".heif", ".jxl",
-            ".svg", ".eps", ".ai", ".psd", ".xcf",
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".bmp",
+            ".tiff",
+            ".webp",
+            ".avif",
+            ".heic",
+            ".heif",
+            ".jxl",
+            ".svg",
+            ".eps",
+            ".ai",
+            ".psd",
+            ".xcf",
         ],
     )
     def test_common_image_formats(self, ext: str) -> None:
@@ -67,15 +99,27 @@ class TestPhotos:
         "ext",
         [
             # Canon
-            ".cr2", ".cr3", ".crw",
+            ".cr2",
+            ".cr3",
+            ".crw",
             # Nikon
-            ".nef", ".nrw",
+            ".nef",
+            ".nrw",
             # Sony
-            ".arw", ".srf", ".sr2",
+            ".arw",
+            ".srf",
+            ".sr2",
             # Adobe (universal)
             ".dng",
             # Other makers (Fuji, Olympus, Pentax, Hasselblad, Phase One...)
-            ".raf", ".orf", ".pef", ".rw2", ".x3f", ".3fr", ".iiq", ".srw",
+            ".raf",
+            ".orf",
+            ".pef",
+            ".rw2",
+            ".x3f",
+            ".3fr",
+            ".iiq",
+            ".srw",
         ],
     )
     def test_raw_formats_all_map_to_photos(self, ext: str) -> None:
@@ -94,10 +138,23 @@ class TestVideos:
     @pytest.mark.parametrize(
         "ext",
         [
-            ".mp4", ".mov", ".mkv", ".avi", ".webm", ".wmv",
-            ".mpg", ".mpeg", ".m2ts", ".mts",
-            ".vob", ".3gp", ".ogv",
-            ".mxf", ".braw", ".r3d", ".ari",
+            ".mp4",
+            ".mov",
+            ".mkv",
+            ".avi",
+            ".webm",
+            ".wmv",
+            ".mpg",
+            ".mpeg",
+            ".m2ts",
+            ".mts",
+            ".vob",
+            ".3gp",
+            ".ogv",
+            ".mxf",
+            ".braw",
+            ".r3d",
+            ".ari",
         ],
     )
     def test_common_video_formats(self, ext: str) -> None:
@@ -111,19 +168,36 @@ class TestMusic:
         "ext",
         [
             # Lossy
-            ".mp3", ".aac", ".m4a", ".ogg", ".opus", ".wma",
+            ".mp3",
+            ".aac",
+            ".m4a",
+            ".ogg",
+            ".opus",
+            ".wma",
             # Lossless
-            ".flac", ".alac", ".ape",
+            ".flac",
+            ".alac",
+            ".ape",
             # Uncompressed
-            ".wav", ".aiff",
+            ".wav",
+            ".aiff",
             # DSD / MIDI
-            ".dsd", ".mid", ".midi",
+            ".dsd",
+            ".mid",
+            ".midi",
             # Tracker
-            ".mod", ".it", ".s3m",
+            ".mod",
+            ".it",
+            ".s3m",
             # Playlists
-            ".m3u", ".m3u8", ".pls",
+            ".m3u",
+            ".m3u8",
+            ".pls",
             # DAW projects
-            ".als", ".flp", ".cpr", ".rpp",
+            ".als",
+            ".flp",
+            ".cpr",
+            ".rpp",
             # Audio book
             ".aax",
         ],
@@ -144,9 +218,25 @@ class TestCodeData:
     @pytest.mark.parametrize(
         "ext",
         [
-            ".py", ".js", ".tsx", ".java", ".c", ".cpp", ".cs", ".go", ".rs",
-            ".html", ".css", ".json", ".yml", ".toml", ".xml", ".md",
-            ".sh", ".bat", ".ps1",
+            ".py",
+            ".js",
+            ".tsx",
+            ".java",
+            ".c",
+            ".cpp",
+            ".cs",
+            ".go",
+            ".rs",
+            ".html",
+            ".css",
+            ".json",
+            ".yml",
+            ".toml",
+            ".xml",
+            ".md",
+            ".sh",
+            ".bat",
+            ".ps1",
         ],
     )
     def test_source_files_route_to_code_data(self, ext: str) -> None:

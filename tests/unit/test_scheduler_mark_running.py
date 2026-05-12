@@ -142,9 +142,7 @@ class TestSchedulerSkipsMarkedProfile:
 
         # Force the profile to look "due" so the only thing that could
         # save us is the in-progress guard.
-        scheduler._state.set_last_trigger(
-            profile.id, datetime.now() - timedelta(days=10)
-        )
+        scheduler._state.set_last_trigger(profile.id, datetime.now() - timedelta(days=10))
 
         scheduler.mark_profile_running(profile.id)
         scheduler._check_schedules()
@@ -156,9 +154,7 @@ class TestSchedulerSkipsMarkedProfile:
         """Sanity check: after unmark, the same profile fires normally."""
         profile = _make_profile()
         scheduler._test_profiles.append(profile)
-        scheduler._state.set_last_trigger(
-            profile.id, datetime.now() - timedelta(days=10)
-        )
+        scheduler._state.set_last_trigger(profile.id, datetime.now() - timedelta(days=10))
 
         scheduler.mark_profile_running(profile.id)
         scheduler.unmark_profile_running(profile.id)
@@ -170,9 +166,7 @@ class TestSchedulerSkipsMarkedProfile:
         """The wake-from-sleep path uses the same guard."""
         profile = _make_profile()
         scheduler._test_profiles.append(profile)
-        scheduler._state.set_last_trigger(
-            profile.id, datetime.now() - timedelta(days=10)
-        )
+        scheduler._state.set_last_trigger(profile.id, datetime.now() - timedelta(days=10))
 
         scheduler.mark_profile_running(profile.id)
         scheduler._check_missed_backups(datetime.now())
@@ -183,9 +177,7 @@ class TestSchedulerSkipsMarkedProfile:
         """The cold-boot recovery path uses the same guard."""
         profile = _make_profile()
         scheduler._test_profiles.append(profile)
-        scheduler._state.set_last_trigger(
-            profile.id, datetime.now() - timedelta(days=10)
-        )
+        scheduler._state.set_last_trigger(profile.id, datetime.now() - timedelta(days=10))
 
         scheduler.mark_profile_running(profile.id)
         scheduler._check_startup_missed()
@@ -211,14 +203,10 @@ class TestPostBackupNoRefire:
     unmark) and assert the scheduler stays quiet afterwards.
     """
 
-    def test_no_refire_after_unmark_when_triggered_now_was_called(
-        self, scheduler
-    ) -> None:
+    def test_no_refire_after_unmark_when_triggered_now_was_called(self, scheduler) -> None:
         profile = _make_profile()
         scheduler._test_profiles.append(profile)
-        scheduler._state.set_last_trigger(
-            profile.id, datetime.now() - timedelta(days=10)
-        )
+        scheduler._state.set_last_trigger(profile.id, datetime.now() - timedelta(days=10))
 
         # Simulate the full UI flow:
         #   1. user clicks Start backup → mark + mark_triggered_now
@@ -233,18 +221,14 @@ class TestPostBackupNoRefire:
         scheduler._check_schedules()
         scheduler._test_callback.assert_not_called()
 
-    def test_refire_DOES_happen_without_triggered_now_call(
-        self, scheduler
-    ) -> None:
+    def test_refire_DOES_happen_without_triggered_now_call(self, scheduler) -> None:
         """Regression contract: removing ``mark_triggered_now`` from the
         UI flow must produce the bug — proves this test would catch
         a future revert.
         """
         profile = _make_profile()
         scheduler._test_profiles.append(profile)
-        scheduler._state.set_last_trigger(
-            profile.id, datetime.now() - timedelta(days=10)
-        )
+        scheduler._state.set_last_trigger(profile.id, datetime.now() - timedelta(days=10))
 
         # NOTE: we deliberately omit ``mark_triggered_now`` to simulate
         # the pre-fix behaviour. After unmark the scheduler should

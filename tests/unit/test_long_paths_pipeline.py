@@ -29,9 +29,7 @@ from src.core.phases.collector import FileInfo
 from src.core.phases.local_writer import write_flat
 from src.core.phases.manifest import build_integrity_manifest
 
-WINDOWS_ONLY = pytest.mark.skipif(
-    os.name != "nt", reason="MAX_PATH limit is Windows-specific"
-)
+WINDOWS_ONLY = pytest.mark.skipif(os.name != "nt", reason="MAX_PATH limit is Windows-specific")
 
 # A path long enough to be unambiguously past MAX_PATH once the temp
 # root prefix is added. 8 segments of ~30 chars + ~200-char filename
@@ -41,9 +39,7 @@ _DEEP_SEGMENTS = [f"segment_{i:02d}_" + "x" * 22 for i in range(8)]
 _LEAF_NAME = "leaf_" + "y" * 200 + ".txt"
 
 
-def _build_long_tree(
-    root: Path, content: bytes = b"long-path payload"
-) -> tuple[Path, int, float]:
+def _build_long_tree(root: Path, content: bytes = b"long-path payload") -> tuple[Path, int, float]:
     r"""Create a >260-char file under ``root``.
 
     Uses the ``\\?\`` long-path prefix to bypass MAX_PATH during creation
@@ -65,9 +61,9 @@ def _build_long_tree(
     leaf_abs = deep_abs / _LEAF_NAME
     # Sanity: the un-prefixed leaf path must exceed MAX_PATH or the test
     # is not actually testing what it claims to test.
-    assert len(str(leaf_abs)) > 260, (
-        f"Test fixture must produce >260-char path, got {len(str(leaf_abs))}"
-    )
+    assert (
+        len(str(leaf_abs)) > 260
+    ), f"Test fixture must produce >260-char path, got {len(str(leaf_abs))}"
     st = os.stat(leaf_long)
     return leaf_abs, st.st_size, st.st_mtime
 

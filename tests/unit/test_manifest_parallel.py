@@ -217,9 +217,7 @@ class TestParallelism:
         # (no parallelism possible).  Skip the assertion in that
         # degenerate case rather than failing the test.
         if _resolve_worker_count() > 1:
-            assert active["peak"] >= 2, (
-                f"Expected concurrent execution, got peak={active['peak']}"
-            )
+            assert active["peak"] >= 2, f"Expected concurrent execution, got peak={active['peak']}"
 
 
 # ---------------------------------------------------------------------------

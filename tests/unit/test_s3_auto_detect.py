@@ -9,7 +9,6 @@ because the wizard runs offline-tolerant.
 
 from __future__ import annotations
 
-import io
 import json
 from unittest.mock import MagicMock, patch
 
@@ -24,7 +23,6 @@ from src.storage.s3_setup import (
     detect_nearest_region,
     format_cost,
 )
-
 
 # ---------------------------------------------------------------------------
 # _region_from_coords

@@ -56,10 +56,10 @@ def wizard(tk_root):
 class TestStepWiring:
     """The new step must be reachable from the personal-mode flow."""
 
-    def test_personal_mode_has_four_steps(self, wizard) -> None:
-        """Adding the schedule step must extend ``_total_steps`` from 3 to 4."""
+    def test_personal_mode_has_five_steps(self, wizard) -> None:
+        """Personal mode now ends with a Retention step (5/5)."""
         wizard._select_mode(MODE_PERSONAL)
-        assert wizard._total_steps == 4
+        assert wizard._total_steps == 5
 
     def test_step_four_builder_is_schedule_frequency(self, wizard) -> None:
         """``_show_step`` must dispatch step 4 to the new builder method."""
@@ -223,33 +223,42 @@ class TestRetentionAdaptsToFrequency:
         assert wizard.result_profile.retention.gfs_daily == 1
 
     @pytest.mark.parametrize(
-        "freq",
+        "freq,expected_daily,expected_weekly,expected_monthly",
         [
-            ScheduleFrequency.DAILY.value,
-            ScheduleFrequency.WEEKLY.value,
-            ScheduleFrequency.MONTHLY.value,
+            # Daily schedule → all three tiers visible, all three set to
+            # the user-friendly defaults (display 7/3/6 → internal 8/4/7).
+            (ScheduleFrequency.DAILY.value, 8, 4, 7),
+            # Weekly schedule → daily row hidden, weekly + monthly active.
+            (ScheduleFrequency.WEEKLY.value, 1, 4, 7),
+            # Monthly schedule → only monthly active.
+            (ScheduleFrequency.MONTHLY.value, 1, 1, 7),
         ],
     )
-    def test_weekly_and_monthly_unchanged_regardless_of_frequency(
-        self, wizard, freq: str
+    def test_retention_defaults_match_visible_tiers(
+        self,
+        wizard,
+        freq: str,
+        expected_daily: int,
+        expected_weekly: int,
+        expected_monthly: int,
     ) -> None:
-        """gfs_weekly / gfs_monthly stay at their historical defaults
-        for ALL frequencies — only the daily row was in scope for
-        this fix.
+        """Hidden tiers stay at their internal default of 1 (which the
+        Retention tab renders as 0). Visible tiers get the friendly
+        out-of-the-box value — wrapping +1 to convert display →
+        internal.
 
-        Parametrised (rather than looped) so each iteration gets a
-        fresh wizard fixture; ``_create_profile`` destroys the
-        Toplevel, so a single wizard can only complete one round.
+        Parametrised so each iteration gets a fresh wizard fixture;
+        ``_create_profile`` destroys the Toplevel, so a single wizard
+        can only complete one round.
         """
         wizard._select_mode(MODE_PERSONAL)
         _seed_required_data(wizard, freq)
         wizard._create_profile()
-        assert wizard.result_profile.retention.gfs_weekly == 4
-        assert wizard.result_profile.retention.gfs_monthly == 7
+        assert wizard.result_profile.retention.gfs_daily == expected_daily
+        assert wizard.result_profile.retention.gfs_weekly == expected_weekly
+        assert wizard.result_profile.retention.gfs_monthly == expected_monthly
 
-    def test_corrupted_frequency_falls_back_to_weekly_default(
-        self, wizard
-    ) -> None:
+    def test_corrupted_frequency_falls_back_to_weekly_default(self, wizard) -> None:
         """Defensive: a bogus stored frequency must NOT trigger the
         Daily branch (which would silently bump retention)."""
         wizard._select_mode(MODE_PERSONAL)
@@ -261,9 +270,7 @@ class TestRetentionAdaptsToFrequency:
         assert wizard.result_profile.schedule.frequency == ScheduleFrequency.WEEKLY
         assert wizard.result_profile.retention.gfs_daily == 1
 
-    def test_missing_frequency_falls_back_to_weekly_default(
-        self, wizard
-    ) -> None:
+    def test_missing_frequency_falls_back_to_weekly_default(self, wizard) -> None:
         """Same defensive guard for a missing key (path that bypasses
         the wizard navigation entirely)."""
         wizard._select_mode(MODE_PERSONAL)
@@ -311,7 +318,11 @@ class TestNextButtonLabel:
 
     def test_next_says_finish_on_last_step(self, wizard) -> None:
         wizard._select_mode(MODE_PERSONAL)
-        wizard._step = 4
+        # Step 5 (retention) is the new last step. ``_show_step`` needs
+        # ``schedule_frequency`` populated so the retention step can
+        # decide which rows to render — seed a weekly default.
+        wizard._data["schedule_frequency"] = ScheduleFrequency.WEEKLY.value
+        wizard._step = 5
         wizard._show_step()
         assert str(wizard._next_btn.cget("text")) == "Finish"
 
@@ -322,3 +333,166 @@ class TestNextButtonLabel:
         # Encoded with the right-arrow so str(...) compares accurately.
         assert "Next" in str(wizard._next_btn.cget("text"))
         assert "Finish" not in str(wizard._next_btn.cget("text"))
+
+
+# ---------------------------------------------------------------------------
+# Step 5 — Retention step
+# ---------------------------------------------------------------------------
+
+
+class TestRetentionStepWiring:
+    """The new retention step must be reachable from the personal-mode flow."""
+
+    def test_step_five_builder_is_retention(self, wizard) -> None:
+        """``_show_step`` must dispatch step 5 to the retention builder."""
+        wizard._select_mode(MODE_PERSONAL)
+        wizard._data["schedule_frequency"] = ScheduleFrequency.WEEKLY.value
+        wizard._step = 5
+
+        called = {"hit": False}
+        original = wizard._step_retention
+
+        def wrapper():
+            called["hit"] = True
+            return original()
+
+        wizard._step_retention = wrapper
+        wizard._show_step()
+        assert called["hit"], "Step 5 did not dispatch to _step_retention"
+
+
+class TestRetentionStepAdaptsToFrequency:
+    """The step's visible rows must match the frequency chosen at step 4."""
+
+    def test_daily_shows_all_three_tiers(self, wizard) -> None:
+        """Daily schedule → all three GFS rows populate ``_data``."""
+        wizard._select_mode(MODE_PERSONAL)
+        wizard._data["schedule_frequency"] = ScheduleFrequency.DAILY.value
+        wizard._step = 5
+        wizard._show_step()
+
+        assert "retention_gfs_daily" in wizard._data
+        assert "retention_gfs_weekly" in wizard._data
+        assert "retention_gfs_monthly" in wizard._data
+        # Defaults are the user-facing display values.
+        assert wizard._data["retention_gfs_daily"] == 7
+        assert wizard._data["retention_gfs_weekly"] == 3
+        assert wizard._data["retention_gfs_monthly"] == 6
+
+    def test_weekly_hides_daily_row(self, wizard) -> None:
+        """Weekly schedule → daily tier removed from ``_data`` so
+        ``_create_profile`` reuses the historical default for it."""
+        wizard._select_mode(MODE_PERSONAL)
+        wizard._data["schedule_frequency"] = ScheduleFrequency.WEEKLY.value
+        # Pre-seed a stale daily value to prove the step strips it.
+        wizard._data["retention_gfs_daily"] = 99
+        wizard._step = 5
+        wizard._show_step()
+
+        assert "retention_gfs_daily" not in wizard._data
+        assert wizard._data["retention_gfs_weekly"] == 3
+        assert wizard._data["retention_gfs_monthly"] == 6
+
+    def test_monthly_hides_daily_and_weekly_rows(self, wizard) -> None:
+        """Monthly schedule → only the monthly row stays in ``_data``."""
+        wizard._select_mode(MODE_PERSONAL)
+        wizard._data["schedule_frequency"] = ScheduleFrequency.MONTHLY.value
+        # Pre-seed stale values to prove the step strips them.
+        wizard._data["retention_gfs_daily"] = 99
+        wizard._data["retention_gfs_weekly"] = 99
+        wizard._step = 5
+        wizard._show_step()
+
+        assert "retention_gfs_daily" not in wizard._data
+        assert "retention_gfs_weekly" not in wizard._data
+        assert wizard._data["retention_gfs_monthly"] == 6
+
+
+class TestRetentionStepRehydration:
+    """User edits at step 5 must survive a Back → Forward navigation."""
+
+    def test_user_value_preserved_across_revisits(self, wizard) -> None:
+        wizard._select_mode(MODE_PERSONAL)
+        wizard._data["schedule_frequency"] = ScheduleFrequency.DAILY.value
+        wizard._step = 5
+        wizard._show_step()
+
+        # Simulate the user editing the spinbox.
+        wizard._data["retention_gfs_daily"] = 14
+        wizard._data["retention_gfs_weekly"] = 8
+        wizard._data["retention_gfs_monthly"] = 12
+
+        # Rebuild the step (Back → Forward round-trip).
+        wizard._show_step()
+
+        # Rebuilt UI must reflect the user's prior edits, not the
+        # 7/3/6 defaults.
+        assert wizard._data["retention_gfs_daily"] == 14
+        assert wizard._data["retention_gfs_weekly"] == 8
+        assert wizard._data["retention_gfs_monthly"] == 12
+
+
+class TestRetentionStepValidation:
+    """The validation guard for step 5 rejects non-numeric or negative
+    entries so a corrupted ``_data`` cannot reach ``_create_profile``."""
+
+    def test_validate_passes_with_defaults(self, wizard) -> None:
+        wizard._select_mode(MODE_PERSONAL)
+        wizard._data["schedule_frequency"] = ScheduleFrequency.DAILY.value
+        wizard._step = 5
+        wizard._show_step()  # Populates _data with valid defaults.
+        assert wizard._validate_personal_step() is None
+
+    def test_validate_rejects_negative_value(self, wizard) -> None:
+        wizard._select_mode(MODE_PERSONAL)
+        wizard._data["schedule_frequency"] = ScheduleFrequency.DAILY.value
+        wizard._step = 5
+        wizard._show_step()
+        wizard._data["retention_gfs_daily"] = -1
+        msg = wizard._validate_personal_step()
+        assert msg is not None
+        assert "retention" in msg.lower()
+
+    def test_validate_rejects_non_integer(self, wizard) -> None:
+        wizard._select_mode(MODE_PERSONAL)
+        wizard._data["schedule_frequency"] = ScheduleFrequency.DAILY.value
+        wizard._step = 5
+        wizard._show_step()
+        wizard._data["retention_gfs_monthly"] = "not-a-number"
+        msg = wizard._validate_personal_step()
+        assert msg is not None
+        assert "retention" in msg.lower()
+
+
+class TestRetentionStepFlowsIntoCreateProfile:
+    """User-edited values at step 5 must land in ``RetentionConfig``."""
+
+    def test_custom_daily_values_flow_through(self, wizard) -> None:
+        wizard._select_mode(MODE_PERSONAL)
+        _seed_required_data(wizard, ScheduleFrequency.DAILY.value)
+        # Simulate the user lowering retention from the defaults.
+        wizard._data["retention_gfs_daily"] = 2  # display 2 → internal 3
+        wizard._data["retention_gfs_weekly"] = 1
+        wizard._data["retention_gfs_monthly"] = 12
+
+        wizard._create_profile()
+
+        # +1 conversion: display N maps to internal N+1.
+        assert wizard.result_profile.retention.gfs_daily == 3
+        assert wizard.result_profile.retention.gfs_weekly == 2
+        assert wizard.result_profile.retention.gfs_monthly == 13
+
+    def test_hidden_tier_falls_back_to_historical_default(self, wizard) -> None:
+        """When the step hides a tier, ``_create_profile`` must reuse
+        the legacy internal value (1) for it — preserving the look of
+        existing Weekly/Monthly profiles."""
+        wizard._select_mode(MODE_PERSONAL)
+        _seed_required_data(wizard, ScheduleFrequency.MONTHLY.value)
+        # Hidden tiers: daily + weekly absent from _data.
+        wizard._data["retention_gfs_monthly"] = 24
+
+        wizard._create_profile()
+
+        assert wizard.result_profile.retention.gfs_daily == 1
+        assert wizard.result_profile.retention.gfs_weekly == 1
+        assert wizard.result_profile.retention.gfs_monthly == 25

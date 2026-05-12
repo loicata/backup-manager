@@ -3,10 +3,13 @@
 Shown on first launch when no profiles exist.
 
 Two paths:
-  - **Personal**: 3-step local/network/SFTP/S3 backup (unchanged).
-  - **Professional**: 9-step S3 Object Lock anti-ransomware setup with
-    guided AWS account creation, cost simulation, disclaimers, and
-    automatic bucket provisioning.
+  - **Personal**: 5-step local/network/SFTP/S3 backup
+    (name → sources → storage → schedule frequency → retention).
+    The retention step adapts its visible rows to the frequency
+    chosen at the previous step.
+  - **Professional**: 11-step S3 Object Lock anti-ransomware setup
+    with guided AWS account creation, cost simulation, disclaimers,
+    and automatic bucket provisioning.
 """
 
 import logging
@@ -290,6 +293,7 @@ class SetupWizard:
                 2: self._step_sources,
                 3: self._step_storage,
                 4: self._step_schedule_frequency,
+                5: self._step_retention,
             }
         else:
             builders = {
@@ -356,6 +360,22 @@ class SetupWizard:
             # fallback to the WEEKLY default in ``_create_profile``.
             if not self._data.get("schedule_frequency"):
                 return "Please choose a backup frequency."
+        elif self._step == 5:
+            # Retention values are user-facing (internal = displayed + 1
+            # to account for "today is always kept"). 0 is allowed
+            # (means "no history at this tier") so the only invalid
+            # state is a non-numeric value, which Tk Spinbox normally
+            # filters but we double-check defensively.
+            for key in (
+                "retention_gfs_daily",
+                "retention_gfs_weekly",
+                "retention_gfs_monthly",
+            ):
+                value = self._data.get(key)
+                if value is None:
+                    continue  # Hidden row, kept at its default.
+                if not isinstance(value, int) or value < 0:
+                    return "Retention values must be zero or positive integers."
         return None
 
     def _validate_personal_storage(self) -> str | None:
@@ -518,8 +538,11 @@ class SetupWizard:
         """Set the wizard mode and start the flow."""
         self._mode = mode
         if mode == MODE_PERSONAL:
-            # 4 steps: name → sources → storage → schedule frequency
-            self._total_steps = 4
+            # 5 steps: name → sources → storage → schedule frequency
+            # → retention. The retention step adapts its visible rows to
+            # the frequency picked in step 4 (Daily shows all three GFS
+            # tiers, Weekly hides daily, Monthly hides daily+weekly).
+            self._total_steps = 5
         else:
             self._total_steps = 11
             # Auto-detect nearest AWS region in background (no UI freeze)
@@ -1057,19 +1080,14 @@ class SetupWizard:
         self._set_header("How often should we backup?")
         ttk.Label(
             self._content,
-            text=(
-                "Pick a default cadence — you can change it any time "
-                "from the Schedule tab."
-            ),
+            text=("Pick a default cadence — you can change it any time " "from the Schedule tab."),
             foreground=Colors.TEXT_SECONDARY,
         ).pack(pady=(0, Spacing.LARGE), anchor="w")
 
         # ----- State -----
         # Rehydrate from a previous visit (Back from Finish) so the
         # user keeps their settings when navigating in either direction.
-        initial_freq = self._data.get(
-            "schedule_frequency", ScheduleFrequency.WEEKLY.value
-        )
+        initial_freq = self._data.get("schedule_frequency", ScheduleFrequency.WEEKLY.value)
         initial_time = self._data.get("schedule_time", "10:00")
         initial_dow = self._data.get("schedule_day_of_week", 0)
         initial_dom = self._data.get("schedule_day_of_month", 1)
@@ -1087,9 +1105,7 @@ class SetupWizard:
         self._data["schedule_day_of_month"] = initial_dom
 
         # ----- Frequency LabelFrame -----
-        freq_frame = ttk.LabelFrame(
-            self._content, text="Frequency", padding=Spacing.PAD
-        )
+        freq_frame = ttk.LabelFrame(self._content, text="Frequency", padding=Spacing.PAD)
         freq_frame.pack(fill="x", pady=(0, Spacing.MEDIUM))
 
         for value, label in (
@@ -1105,9 +1121,7 @@ class SetupWizard:
             ).pack(anchor="w", pady=2)
 
         # ----- Configuration LabelFrame -----
-        cfg_frame = ttk.LabelFrame(
-            self._content, text="Configuration", padding=Spacing.PAD
-        )
+        cfg_frame = ttk.LabelFrame(self._content, text="Configuration", padding=Spacing.PAD)
         cfg_frame.pack(fill="x")
 
         # Day-of-week row (visible only for Weekly). The combobox is
@@ -1139,9 +1153,7 @@ class SetupWizard:
         # (clamped to month length) so we don't second-guess the user
         # here with an artificial 28-day cap.
         dom_row = ttk.Frame(cfg_frame)
-        ttk.Label(dom_row, text="Day of month:").pack(
-            side="left", padx=(0, Spacing.SMALL)
-        )
+        ttk.Label(dom_row, text="Day of month:").pack(side="left", padx=(0, Spacing.SMALL))
         ttk.Spinbox(
             dom_row,
             from_=1,
@@ -1155,9 +1167,7 @@ class SetupWizard:
         # Schedule tab and avoids introducing a third widget toolkit.
         time_row = ttk.Frame(cfg_frame)
         ttk.Label(time_row, text="Time:").pack(side="left", padx=(0, Spacing.SMALL))
-        ttk.Entry(
-            time_row, textvariable=self._schedule_time_var, width=8
-        ).pack(side="left")
+        ttk.Entry(time_row, textvariable=self._schedule_time_var, width=8).pack(side="left")
         ttk.Label(
             time_row,
             text="(HH:MM, 24-hour)",
@@ -1185,18 +1195,14 @@ class SetupWizard:
 
         def _on_dow_change(_event=None) -> None:
             try:
-                self._data["schedule_day_of_week"] = _DAY_NAMES.index(
-                    dow_combo.get()
-                )
+                self._data["schedule_day_of_week"] = _DAY_NAMES.index(dow_combo.get())
             except ValueError:
                 # Combobox is readonly so this is defensive only.
                 self._data["schedule_day_of_week"] = 0
 
         def _on_dom(*_args) -> None:
             try:
-                self._data["schedule_day_of_month"] = int(
-                    self._schedule_dom_var.get()
-                )
+                self._data["schedule_day_of_month"] = int(self._schedule_dom_var.get())
             except (ValueError, tk.TclError):
                 self._data["schedule_day_of_month"] = 1
 
@@ -1206,6 +1212,203 @@ class SetupWizard:
         dow_combo.bind("<<ComboboxSelected>>", _on_dow_change)
 
         _refresh_cfg()
+
+    # ------------------------------------------------------------------
+    # Step 5: Retention (GFS) — Classic mode only
+    # ------------------------------------------------------------------
+
+    # User-facing retention defaults. The displayed value is ``internal
+    # - 1`` because "today" is always kept on top of the configured
+    # history depth (see RetentionTab._update_summary). 7 / 3 / 6 are
+    # the same defaults the Retention tab shows when a new profile is
+    # created on the historical 4-step Classic flow, so adding the
+    # wizard step does not change the out-of-the-box behaviour — it
+    # just lets the user adjust them up front.
+    _DEFAULT_DAILY_DISPLAY = 7  # "Today + 7 days of history"
+    _DEFAULT_WEEKLY_DISPLAY = 3
+    _DEFAULT_MONTHLY_DISPLAY = 6
+
+    def _step_retention(self) -> None:
+        """Final personal-mode step: pick the GFS retention depth.
+
+        Adapts to the frequency chosen in step 4:
+
+        * Daily   → Days + Weeks + Months rows visible (full GFS pyramid).
+        * Weekly  → Weeks + Months only — keeping a daily-history dial
+          is meaningless when no daily backup ever runs.
+        * Monthly → Months only — same reasoning, one tier up.
+
+        Persisted to ``self._data`` so ``_create_profile`` can build
+        ``RetentionConfig`` from the user's choices instead of the
+        hard-coded constants the pre-step flow used:
+
+        * ``retention_gfs_daily`` (int, display value — internal +1)
+        * ``retention_gfs_weekly`` (int)
+        * ``retention_gfs_monthly`` (int)
+
+        Hidden rows leave their corresponding ``_data`` key absent so
+        ``_create_profile`` falls back to the historical default for
+        that tier (matching the RetentionTab "row hidden = field
+        invisible" semantic).
+        """
+        self._set_header("How long should we keep your backups?")
+
+        freq_value = self._data.get("schedule_frequency", ScheduleFrequency.WEEKLY.value)
+        try:
+            freq = ScheduleFrequency(freq_value)
+        except ValueError:
+            # Defensive: a corrupted ``schedule_frequency`` falls back
+            # to WEEKLY so the user still sees a sensible UI rather
+            # than an empty step.
+            freq = ScheduleFrequency.WEEKLY
+
+        show_daily = freq == ScheduleFrequency.DAILY
+        show_weekly = freq in (
+            ScheduleFrequency.DAILY,
+            ScheduleFrequency.WEEKLY,
+        )
+
+        ttk.Label(
+            self._content,
+            text=(
+                "Pick how many backups to keep at each tier. You can "
+                "fine-tune this any time from the Retention tab."
+            ),
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(pady=(0, Spacing.LARGE), anchor="w")
+
+        # ----- State -----
+        # Rehydrate from a previous visit (Back from Finish) so the
+        # user's tweaks survive a round-trip through the navigation.
+        initial_daily = self._data.get("retention_gfs_daily", self._DEFAULT_DAILY_DISPLAY)
+        initial_weekly = self._data.get("retention_gfs_weekly", self._DEFAULT_WEEKLY_DISPLAY)
+        initial_monthly = self._data.get("retention_gfs_monthly", self._DEFAULT_MONTHLY_DISPLAY)
+
+        daily_var = tk.IntVar(self._win, value=initial_daily)
+        weekly_var = tk.IntVar(self._win, value=initial_weekly)
+        monthly_var = tk.IntVar(self._win, value=initial_monthly)
+
+        # ----- GFS LabelFrame -----
+        gfs_frame = ttk.LabelFrame(self._content, text="Retention depth", padding=Spacing.PAD)
+        gfs_frame.pack(fill="x", pady=(0, Spacing.MEDIUM))
+
+        def _add_row(label_text: str, var: tk.IntVar) -> ttk.Frame:
+            row = ttk.Frame(gfs_frame)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=label_text).pack(side="left")
+            ttk.Spinbox(
+                row,
+                from_=0,
+                to=998,
+                textvariable=var,
+                width=8,
+            ).pack(side="right")
+            return row
+
+        # Always pack the rows we want visible, in user-friendly order
+        # (shortest period first).  Hidden tiers are simply not added
+        # to the UI — there is no pack_forget / pack(before=…) dance,
+        # which means we sidestep the trace-callback footgun that bit
+        # RetentionTab in v3.5.5.
+        if show_daily:
+            _add_row("Days of history:", daily_var)
+        if show_weekly:
+            _add_row("Weeks of history:", weekly_var)
+        _add_row("Months of history:", monthly_var)
+
+        # ----- Summary -----
+        summary = tk.Label(
+            self._content,
+            text="",
+            justify="left",
+            anchor="w",
+            fg=Colors.TEXT_SECONDARY,
+        )
+        summary.pack(fill="x", pady=(Spacing.SMALL, 0))
+
+        def _refresh_summary(*_args) -> None:
+            try:
+                d = daily_var.get() if show_daily else 0
+                w = weekly_var.get() if show_weekly else 0
+                m = monthly_var.get()
+            except (tk.TclError, ValueError):
+                return
+
+            lines = ["Retention summary:"]
+            if show_daily:
+                if d == 0:
+                    lines.append("  • Today only (no daily history)")
+                elif d == 1:
+                    lines.append("  • Today + yesterday")
+                else:
+                    lines.append(f"  • Today + {d} days of history")
+            if show_weekly:
+                if w == 0:
+                    lines.append("  • No weekly history")
+                elif w == 1:
+                    lines.append("  • 1 weekly backup kept")
+                else:
+                    lines.append(f"  • {w} weekly backups kept")
+            if m == 0:
+                lines.append("  • No monthly history")
+            elif m == 1:
+                lines.append("  • 1 monthly backup kept")
+            else:
+                lines.append(f"  • {m} monthly backups kept")
+
+            # Total kept = (display + 1) summed over visible tiers,
+            # minus the implicit "today" overlap with daily/weekly so
+            # we don't triple-count the same restore point.
+            total = m + 1
+            if show_weekly:
+                total += w
+            if show_daily:
+                total += d
+            lines.append(f"Backups kept: {total}")
+            summary.config(text="\n".join(lines))
+
+        # ----- Eager persistence -----
+        # Even a user who never touches a spinbox leaves ``_data`` in a
+        # consistent state for ``_create_profile``. Hidden tiers stay
+        # absent from ``_data`` so the historical default is reused.
+        if show_daily:
+            self._data["retention_gfs_daily"] = initial_daily
+        else:
+            self._data.pop("retention_gfs_daily", None)
+        if show_weekly:
+            self._data["retention_gfs_weekly"] = initial_weekly
+        else:
+            self._data.pop("retention_gfs_weekly", None)
+        self._data["retention_gfs_monthly"] = initial_monthly
+
+        def _on_daily(*_args) -> None:
+            try:
+                self._data["retention_gfs_daily"] = int(daily_var.get())
+            except (tk.TclError, ValueError):
+                pass
+            _refresh_summary()
+
+        def _on_weekly(*_args) -> None:
+            try:
+                self._data["retention_gfs_weekly"] = int(weekly_var.get())
+            except (tk.TclError, ValueError):
+                pass
+            _refresh_summary()
+
+        def _on_monthly(*_args) -> None:
+            try:
+                self._data["retention_gfs_monthly"] = int(monthly_var.get())
+            except (tk.TclError, ValueError):
+                pass
+            _refresh_summary()
+
+        if show_daily:
+            daily_var.trace_add("write", _on_daily)
+        if show_weekly:
+            weekly_var.trace_add("write", _on_weekly)
+        monthly_var.trace_add("write", _on_monthly)
+
+        _refresh_summary()
 
     # ------------------------------------------------------------------
     # Professional steps (3-9)
@@ -2153,15 +2356,28 @@ class SetupWizard:
             # creation — degrade gracefully to the historical default.
             frequency = ScheduleFrequency.WEEKLY
 
-        # ``gfs_daily`` displays in the Retention tab as ``internal - 1``
-        # ("today" is always kept on top of the configured days).  When
-        # the user picks DAILY in the wizard, default to 8 so the tab
-        # shows "Days of history: 7" — a week of restorable points
-        # matches what most users expect from a daily schedule.  For
-        # WEEKLY/MONTHLY the daily row is hidden in the Retention tab
-        # so the field's value is invisible — keep the historical 1 to
-        # avoid changing existing behaviour for non-daily flows.
-        gfs_daily_default = 8 if frequency == ScheduleFrequency.DAILY else 1
+        # Retention values: the wizard's step 5 collects user-facing
+        # values (internal = display + 1, to account for the always-kept
+        # "today" entry). When a tier is hidden (Weekly hides daily,
+        # Monthly hides daily+weekly), the corresponding ``_data`` key
+        # is intentionally absent so we fall back to the historical
+        # default for that tier — avoids surprising the user with a
+        # value they could not see or set.
+        if frequency == ScheduleFrequency.DAILY:
+            daily_default_display = self._DEFAULT_DAILY_DISPLAY
+        else:
+            # Hidden row: the legacy ``_create_profile`` shipped 1 here,
+            # which displays as 0 in the Retention tab. Preserve it so
+            # existing profiles created via Weekly/Monthly look the same.
+            daily_default_display = 0
+        weekly_default_display = (
+            self._DEFAULT_WEEKLY_DISPLAY if frequency != ScheduleFrequency.MONTHLY else 0
+        )
+        # +1 converts user-facing display → internal value
+        # (RetentionConfig fields are internal-only).
+        gfs_daily = d.get("retention_gfs_daily", daily_default_display) + 1
+        gfs_weekly = d.get("retention_gfs_weekly", weekly_default_display) + 1
+        gfs_monthly = d.get("retention_gfs_monthly", self._DEFAULT_MONTHLY_DISPLAY) + 1
 
         # Schedule details: the wizard now collects time + day-of-week
         # + day-of-month directly (step 4 redesign mirroring step 3).
@@ -2184,9 +2400,9 @@ class SetupWizard:
                 day_of_month=schedule_dom,
             ),
             retention=RetentionConfig(
-                gfs_daily=gfs_daily_default,
-                gfs_weekly=4,
-                gfs_monthly=7,
+                gfs_daily=gfs_daily,
+                gfs_weekly=gfs_weekly,
+                gfs_monthly=gfs_monthly,
             ),
         )
 

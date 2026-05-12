@@ -520,10 +520,27 @@ class DecryptingReader(io.RawIOBase):
         self._buf = bytearray()
         self._eof = False
         self._hmac_verified = False
+        # Tracks whether any user-visible bytes have been delivered.
+        # If a caller constructs the reader and closes it without
+        # ever reading, there is no extracted data on disk to protect
+        # and skipping HMAC verification at close is benign. As soon
+        # as ``read`` (or ``readinto``) is called, the reader switches
+        # to fail-closed mode: ``close`` will refuse to silently drop
+        # an unverified stream.
+        self._read_called = False
+        # Opt-out for callers that explicitly accept an unverified
+        # close (cancel path, error recovery). See ``release_unverified``.
+        self._released_unverified = False
+        # Sticky flag: once ``verify_complete`` raises, the decryptor
+        # state is too corrupt to retry, and ``close`` must not run a
+        # second verification that would just raise again (masking the
+        # original error or producing a confusing double exception).
+        self._verification_failed = False
         self._dec.read_header(source)
 
     def read(self, n: int = -1) -> bytes:
         """Read up to *n* decrypted bytes."""
+        self._read_called = True
         if n == -1:
             # Read everything remaining
             while not self._eof:
@@ -565,30 +582,106 @@ class DecryptingReader(io.RawIOBase):
         early (on a tar-level error, or just because it thinks it saw
         enough members) leaves the HMAC unverified, and a truncated
         archive would deliver its first N files on disk before anyone
-        notices the tamper. Call this at the end of every restore
-        pipeline; it's a no-op if the stream was already consumed to
-        EOF.
+        notices the tamper.
+
+        Since v3.5.6 this is also invoked automatically from ``close``
+        on any reader that delivered at least one byte to the consumer.
+        Calling it explicitly remains correct (the second call is a
+        no-op once the HMAC has been verified) and surfaces the
+        truncation error at a more readable callsite than the
+        ``with`` block exit.
 
         Raises:
             ValueError: If the trailing HMAC does not match (truncation
                 or tamper).
         """
-        if self._hmac_verified:
+        if self._hmac_verified or self._verification_failed:
             return
         # Drain any remaining chunks — this will either reach the EOF
         # sentinel (which verifies the HMAC) or raise on a HMAC
         # mismatch / corrupt chunk.
-        while not self._eof:
-            self._fill_buffer()
+        try:
+            while not self._eof:
+                self._fill_buffer()
+        except Exception:
+            # Sticky: a subsequent call (including the implicit one in
+            # ``close``) must not retry and produce a second exception.
+            self._verification_failed = True
+            raise
 
-    def close(self) -> None:
-        """Close the reader. Does NOT force HMAC verification —
-        callers must invoke ``verify_complete()`` explicitly before
-        treating extracted data as trustworthy."""
+    def release_unverified(self) -> None:
+        """Suppress the close-time HMAC verification.
+
+        Intended for cancel and error-recovery paths where the caller
+        knowingly aborts decryption and accepts that the trailer was
+        not validated. Without this opt-out, ``close`` raises on any
+        reader that delivered bytes without reaching EOF.
+        """
+        self._released_unverified = True
+
+    def __del__(self) -> None:
+        """GC finaliser — never raises.
+
+        ``__del__`` runs at unspecified times during garbage
+        collection: the underlying source may already be closed,
+        making any further read both unreliable and a source of
+        spurious noise (``Exception ignored in ...`` warnings).
+        Production code MUST call ``close()`` (or use ``with``) to
+        get the integrity check; this hook only guarantees we
+        release the source handle.
+        """
         import contextlib
 
+        # ``_released_unverified`` may not exist if __init__ failed
+        # before assigning it — guard against attribute errors so
+        # __del__ stays safe under exception-during-construction.
+        try:
+            self._released_unverified = True
+        except Exception:
+            return
+        with contextlib.suppress(Exception):
+            super().__del__()
+
+    def close(self) -> None:
+        """Close the reader, enforcing the HMAC trailer by default.
+
+        If any plaintext was delivered to the caller and the HMAC
+        trailer has not been verified, this method forces a final
+        drain via ``verify_complete``. A trailing-HMAC mismatch — the
+        signature of a truncated or tampered archive — therefore
+        becomes a hard error on close instead of silently slipping
+        past a consumer that exited early.
+
+        Callers that explicitly accept an unverified close (cancel,
+        error path) must call ``release_unverified`` first.
+
+        Raises:
+            ValueError: If the trailing HMAC does not match.
+        """
+        import contextlib
+
+        if self.closed:
+            return
+
+        verify_error: Exception | None = None
+        if (
+            self._read_called
+            and not self._hmac_verified
+            and not self._released_unverified
+            and not self._verification_failed
+        ):
+            try:
+                self.verify_complete()
+            except Exception as e:
+                verify_error = e
+
+        # Always release the underlying source, even if verification
+        # raised — a leaked file handle is worse than a missing close.
         with contextlib.suppress(Exception):
             super().close()
+
+        if verify_error is not None:
+            raise verify_error
 
     def readable(self) -> bool:
         return True

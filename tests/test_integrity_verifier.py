@@ -600,3 +600,115 @@ class TestConfigManagerVerifyHashes:
 
         hashes = mgr.load_verify_hashes()
         assert hashes["a.tar.wbenc"]["sha256"] == "new"
+
+
+class TestVerifyHashesHmacEnvelope:
+    """``verify_hashes.json`` is wrapped in an HMAC envelope so an
+    attacker who can write the file cannot silently rewrite the
+    reference hash. These tests pin the envelope contract."""
+
+    def test_file_is_written_as_signed_envelope(self, tmp_path: Path) -> None:
+        """The on-disk file must contain ``version``, ``hashes``, and
+        ``hmac`` fields — never the bare dict format that lets an
+        attacker substitute any hash."""
+        import json
+
+        from src.core.config import _VERIFY_HASHES_ENVELOPE_VERSION
+
+        mgr = ConfigManager(config_dir=tmp_path)
+        mgr.save_verify_hash("a.tar.wbenc", "hash_a", 100)
+
+        on_disk = json.loads((tmp_path / "verify_hashes.json").read_text(encoding="utf-8"))
+        assert on_disk.get("version") == _VERIFY_HASHES_ENVELOPE_VERSION
+        assert "hashes" in on_disk
+        assert "hmac" in on_disk
+        # The hash payload is nested INSIDE ``hashes``, never at the
+        # top level (which is the legacy unsigned format).
+        assert "a.tar.wbenc" not in on_disk
+        assert "a.tar.wbenc" in on_disk["hashes"]
+
+    def test_tampered_hashes_dict_rejected(self, tmp_path: Path) -> None:
+        """An attacker who edits a stored hash but cannot forge the
+        HMAC must have their tamper detected: load returns ``{}`` and
+        a structured error is logged."""
+        import json
+
+        mgr = ConfigManager(config_dir=tmp_path)
+        mgr.save_verify_hash("a.tar.wbenc", "original_hash", 100)
+
+        path = tmp_path / "verify_hashes.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        # Swap the recorded hash for a value that matches a hypothetical
+        # malicious archive. Keep the (now-stale) HMAC.
+        doc["hashes"]["a.tar.wbenc"]["sha256"] = "attacker_chosen_hash"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+        # Load MUST refuse the tampered file rather than return the
+        # poisoned hash that an integrity verifier would then trust.
+        loaded = mgr.load_verify_hashes()
+        assert loaded == {}
+
+    def test_tampered_hmac_rejected(self, tmp_path: Path) -> None:
+        """Flipping the HMAC alone (without touching the payload) must
+        also fail the check — defense in depth on every envelope
+        field."""
+        import json
+
+        mgr = ConfigManager(config_dir=tmp_path)
+        mgr.save_verify_hash("a.tar.wbenc", "hash_a", 100)
+
+        path = tmp_path / "verify_hashes.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc["hmac"] = "0" * 64  # invalid signature
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+        assert mgr.load_verify_hashes() == {}
+
+    def test_legacy_v1_unsigned_format_accepted_with_warning(self, tmp_path: Path, caplog) -> None:
+        """Installs upgrading from a previous release have an unsigned
+        v1 file on disk. ``load`` must accept it (so history is not
+        lost) and log a warning so the operator knows it was unsigned.
+        The next ``save`` rewrites it as v2."""
+        import json
+        import logging
+
+        path = tmp_path / "verify_hashes.json"
+        legacy = {
+            "old.tar.wbenc": {"sha256": "legacy", "size": 50},
+        }
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        mgr = ConfigManager(config_dir=tmp_path)
+        with caplog.at_level(logging.WARNING):
+            loaded = mgr.load_verify_hashes()
+        assert "old.tar.wbenc" in loaded
+        assert any(
+            "legacy unsigned" in rec.message.lower() for rec in caplog.records
+        ), "Expected a warning about the unsigned legacy format"
+
+        # Saving anew migrates the file to v2 transparently.
+        mgr.save_verify_hash("new.tar.wbenc", "new", 100)
+        on_disk = json.loads(path.read_text(encoding="utf-8"))
+        assert "hashes" in on_disk
+        assert "hmac" in on_disk
+
+    def test_corrupt_file_returns_empty(self, tmp_path: Path) -> None:
+        """A truncated / non-JSON file must yield ``{}`` and not crash
+        the periodic integrity verifier."""
+        path = tmp_path / "verify_hashes.json"
+        path.write_text("not even JSON", encoding="utf-8")
+
+        mgr = ConfigManager(config_dir=tmp_path)
+        assert mgr.load_verify_hashes() == {}
+
+    def test_write_is_atomic(self, tmp_path: Path) -> None:
+        """``save_verify_hash`` must go through ``_atomic_write`` so a
+        crash mid-save leaves either the prior good file OR the new
+        one, never a truncated artefact."""
+        mgr = ConfigManager(config_dir=tmp_path)
+        mgr.save_verify_hash("first.tar.wbenc", "h1", 1)
+        # The .tmp file must not survive a normal save.
+        assert not (tmp_path / "verify_hashes.json.tmp").exists()
+        # And a .bak should appear once a previous version existed.
+        mgr.save_verify_hash("second.tar.wbenc", "h2", 2)
+        assert (tmp_path / "verify_hashes.json.bak").exists()

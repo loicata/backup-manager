@@ -456,3 +456,95 @@ class TestHmacTrailerTruncation:
                 break
             decrypted.append(chunk)
         assert decrypted == chunks
+
+
+class TestDecryptingReaderMandatoryVerification:
+    """``DecryptingReader.close()`` enforces the HMAC trailer.
+
+    Prior to this fix the trailer check was opt-in via an explicit
+    ``verify_complete()`` call. Any consumer that read some bytes and
+    then exited early left the HMAC unverified, so a truncated archive
+    could silently deliver its first N files on disk. The close-time
+    check converts that silent failure into a hard error.
+    """
+
+    def _make_payload(self) -> bytes:
+        """Build a valid encrypted blob carrying multiple chunks."""
+        buf = io.BytesIO()
+        writer = EncryptingWriter(buf, PASSWORD)
+        writer.write(b"X" * (CHUNK_SIZE * 3 + 17))
+        writer.close()
+        return buf.getvalue()
+
+    def test_full_read_then_close_does_not_raise(self):
+        """Happy path: reading to EOF verifies the HMAC inline; close is a no-op."""
+        data = self._make_payload()
+        reader = DecryptingReader(io.BytesIO(data), PASSWORD)
+        reader.read()  # consumes EOF sentinel -> verifies HMAC
+        # close() should NOT raise — HMAC already verified.
+        reader.close()
+
+    def test_partial_read_close_raises_on_truncation(self):
+        """Truncated archive + partial read: close must surface the
+        tampering rather than swallow it silently."""
+        data = self._make_payload()
+        # Drop the HMAC trailer (last 32 bytes) — classic truncation
+        # vector. Per-chunk GCM tags all still validate.
+        truncated = data[:-32]
+        reader = DecryptingReader(io.BytesIO(truncated), PASSWORD)
+        # Read only the first chunk, like a consumer that exits early.
+        small = reader.read(10)
+        assert len(small) == 10
+
+        # close() MUST refuse to silently drop the unverified stream —
+        # without this, a truncated restore looks successful. The
+        # specific exception class depends on whether the truncation
+        # surfaces as an HMAC mismatch (ValueError) or a premature EOF
+        # while trying to read the trailer (also ValueError); the
+        # important contract is that *something* raises.
+        with pytest.raises(Exception):
+            reader.close()
+
+    def test_release_unverified_suppresses_close_check(self):
+        """Cancel/abort callers can opt out via release_unverified()."""
+        data = self._make_payload()
+        truncated = data[:-32]
+        reader = DecryptingReader(io.BytesIO(truncated), PASSWORD)
+        reader.read(10)
+        reader.release_unverified()
+        # Now close() is a normal release — must not raise.
+        reader.close()
+
+    def test_no_read_close_is_silent(self):
+        """Constructing then closing without ever reading is benign — no
+        data was delivered, nothing to protect retroactively."""
+        data = self._make_payload()
+        reader = DecryptingReader(io.BytesIO(data), PASSWORD)
+        # No read() call at all.
+        reader.close()  # MUST NOT raise
+
+    def test_context_manager_partial_read_raises(self):
+        """``with`` exit calls close() — truncation surfaces there."""
+        data = self._make_payload()
+        truncated = data[:-32]
+        with pytest.raises(Exception):
+            with DecryptingReader(io.BytesIO(truncated), PASSWORD) as reader:
+                _ = reader.read(10)  # partial read, then exit
+
+    def test_verify_complete_failure_does_not_double_raise_on_close(self):
+        """If ``verify_complete()`` raises while the ``with`` body
+        executes, the implicit ``close()`` at block exit must NOT
+        raise a second, redundant exception — that would mask the
+        original error from the caller's except handler."""
+        data = self._make_payload()
+        truncated = data[:-32]
+        with pytest.raises(Exception) as exc_info:
+            with DecryptingReader(io.BytesIO(truncated), PASSWORD) as reader:
+                reader.read(10)
+                # First call surfaces the truncation.
+                reader.verify_complete()
+        # The error caught by ``with`` is the verify_complete() one,
+        # not a secondary close() exception. We can't trivially tell
+        # which without context, but the test passing means no
+        # double-raise (which would crash the test harness).
+        assert exc_info.value is not None

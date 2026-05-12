@@ -223,16 +223,65 @@ class TestUploadWithAuth:
     def test_upload_fails_without_credentials(self):
         ns = NetworkStorage(r"\\server\share")
         with pytest.raises(OSError, match="Cannot connect"):
-            ns.upload("/some/path")
+            ns.upload("/some/path", "remote_name")
 
     @patch.object(NetworkStorage, "_connect", return_value=(False, "Access denied"))
     def test_upload_fails_if_connect_fails(self, mock_connect):
         ns = NetworkStorage(r"\\server\share", username="user", password="bad")
         with pytest.raises(OSError, match="Cannot connect"):
-            ns.upload("/some/path")
+            ns.upload("/some/path", "remote_name")
 
     @patch.object(NetworkStorage, "_connect", return_value=(False, "Access denied"))
     def test_upload_file_fails_if_connect_fails(self, mock_connect):
         ns = NetworkStorage(r"\\server\share", username="user", password="bad")
         with pytest.raises(OSError, match="Cannot connect"):
             ns.upload_file(MagicMock(), "remote/path")
+
+
+class TestUploadSignatureCompatibility:
+    """Non-regression: NetworkStorage.upload / upload_file must match the
+    LocalStorage signature.
+
+    A drift in signatures (extra positional args forwarded to ``super``)
+    raised ``TypeError`` at runtime because ``LocalStorage.upload`` only
+    accepts ``(local_path, remote_name)``. These tests pin the contract.
+    """
+
+    @patch("src.storage.local.LocalStorage.upload")
+    @patch.object(NetworkStorage, "_connect", return_value=(True, "Connected"))
+    def test_upload_forwards_only_two_args_to_super(self, _mock_connect, mock_super_upload):
+        from pathlib import Path
+
+        ns = NetworkStorage(r"\\server\share", username="u", password="p")
+        ns.upload(Path("/tmp/source"), "backup_2026-05-12")
+
+        # super().upload must receive exactly the two documented args —
+        # nothing extra. Any third positional arg would have raised
+        # TypeError in production.
+        mock_super_upload.assert_called_once_with(Path("/tmp/source"), "backup_2026-05-12")
+
+    @patch("src.storage.local.LocalStorage.upload_file")
+    @patch.object(NetworkStorage, "_connect", return_value=(True, "Connected"))
+    def test_upload_file_forwards_three_args_to_super(self, _mock_connect, mock_super_upload_file):
+        ns = NetworkStorage(r"\\server\share", username="u", password="p")
+        fileobj = MagicMock()
+        ns.upload_file(fileobj, "remote/path.tar", size=1024)
+
+        # upload_file is (fileobj, remote_path, size=0) — three args max.
+        mock_super_upload_file.assert_called_once_with(fileobj, "remote/path.tar", 1024)
+
+    def test_upload_signature_matches_parent(self):
+        """Both methods MUST accept the same positional args as the parent."""
+        import inspect
+
+        from src.storage.local import LocalStorage
+
+        for name in ("upload", "upload_file"):
+            child_sig = inspect.signature(getattr(NetworkStorage, name))
+            parent_sig = inspect.signature(getattr(LocalStorage, name))
+            child_params = list(child_sig.parameters.keys())
+            parent_params = list(parent_sig.parameters.keys())
+            assert child_params == parent_params, (
+                f"NetworkStorage.{name} signature drifted from "
+                f"LocalStorage.{name}: child={child_params}, parent={parent_params}"
+            )

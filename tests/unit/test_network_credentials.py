@@ -141,6 +141,75 @@ class TestProtectUnprotectSecrets:
         assert data["storage"]["network_password"] == ""
 
 
+class TestProtectSecretsFatalOnFailure:
+    """Non-regression: a DPAPI/AES failure MUST abort the save, never
+    silently write the plaintext password to disk."""
+
+    def test_protect_raises_on_store_password_failure(self, tmp_config_dir):
+        """When store_password fails the helper must raise, not just log."""
+        from unittest.mock import patch
+
+        from src.core.exceptions import SecretsProtectionError
+
+        cm = ConfigManager(tmp_config_dir)
+        data = {
+            "storage": {
+                "storage_type": "network",
+                "destination_path": r"\\server\share",
+                "network_username": "admin",
+                "network_password": "mysecret",
+            },
+        }
+
+        with patch(
+            "src.core.config.store_password",
+            side_effect=OSError("DPAPI unavailable"),
+        ):
+            with pytest.raises(SecretsProtectionError) as exc_info:
+                cm._protect_secrets(data)
+
+        assert "storage.network_password" in str(exc_info.value)
+        # Plaintext must NOT have been mutated to a bogus value either.
+        assert data["storage"]["network_password"] == "mysecret"
+
+    def test_save_profile_aborts_on_secrets_failure(self, tmp_config_dir):
+        """save_profile must raise and NOT create a profile JSON when
+        secrets cannot be encrypted."""
+        from unittest.mock import patch
+
+        from src.core.config import BackupProfile, StorageConfig
+        from src.core.exceptions import SecretsProtectionError
+
+        cm = ConfigManager(tmp_config_dir)
+        profile = BackupProfile(
+            name="TestProfile",
+            source_paths=["C:\\src"],
+            storage=StorageConfig(
+                storage_type=StorageType.NETWORK,
+                destination_path=r"\\server\share",
+                network_username="admin",
+                network_password="leakable",
+            ),
+        )
+
+        profile_path = tmp_config_dir / "profiles" / f"{profile.id}.json"
+
+        with patch(
+            "src.core.config.store_password",
+            side_effect=RuntimeError("DPAPI broken + AES fallback broken"),
+        ):
+            with pytest.raises(SecretsProtectionError):
+                cm.save_profile(profile)
+
+        # Critical: the JSON file must not exist on disk after a
+        # protect failure. Writing the plaintext password to disk is
+        # exactly the failure mode this whole change prevents.
+        assert not profile_path.exists(), (
+            "Profile file was written despite secrets-encryption failure — "
+            "would have leaked the plaintext password to disk."
+        )
+
+
 class TestBuildNetwork:
     """Tests for create_backend passing network credentials."""
 

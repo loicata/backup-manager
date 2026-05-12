@@ -14,6 +14,7 @@ from pathlib import Path
 from src.core.events import EventBus
 from src.core.hashing import compute_sha256
 from src.core.phase_logger import PhaseLogger
+from src.core.phases.manifest import _compute_total_checksum
 from src.storage.base import long_path_str
 
 logger = logging.getLogger(__name__)
@@ -147,9 +148,7 @@ def verify_backup(
         # than a frozen UI.
         pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="verifier-hash")
         try:
-            futures = {
-                pool.submit(compute_sha256, fp): (rel, info) for rel, info, fp in to_hash
-            }
+            futures = {pool.submit(compute_sha256, fp): (rel, info) for rel, info, fp in to_hash}
             try:
                 for fut in as_completed(futures, timeout=total_timeout):
                     # Cancel must be honoured even mid-pool.
@@ -238,6 +237,26 @@ def verify_backup(
                 errors.append(f"Extra: {rel}")
             if len(extras) > 10:
                 errors.append(f"... {len(extras) - 10} more extras")
+
+    # Recompute the manifest's global ``total_checksum`` and compare it
+    # against the value stored in the file. Without this step, an
+    # attacker who edits a backup file AND its entry in ``.wbverify``
+    # passes the per-file hash comparison silently — the per-file loop
+    # only proves the manifest is self-consistent with the bytes on
+    # disk, not that the manifest itself was not tampered with. The
+    # ``.wbcommit`` HMAC binds ``total_checksum``; recomputing it here
+    # closes the loop and turns ``verify_backup`` into a proper
+    # end-to-end integrity check rather than a self-attesting one.
+    stored_checksum = manifest.get("total_checksum", "")
+    if stored_checksum:
+        skipped = manifest.get("skipped_files", []) or None
+        recomputed = _compute_total_checksum(files, skipped)
+        if recomputed != stored_checksum:
+            errors.append(
+                "Manifest total_checksum mismatch — the .wbverify file "
+                "appears to have been edited after the backup was "
+                "committed. Refusing to trust per-file results."
+            )
 
     if errors:
         msg = f"Verification failed: {len(errors)}/{total} errors"

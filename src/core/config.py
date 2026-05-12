@@ -7,6 +7,7 @@ before writing to disk.
 
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -18,9 +19,21 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
+from src.core.exceptions import SecretsProtectionError
 from src.security.encryption import retrieve_password, store_password
 
 logger = logging.getLogger(__name__)
+
+
+# Bumped to 2 when ``verify_hashes.json`` switched to a signed envelope
+# (see ``save_verify_hash`` / ``load_verify_hashes``). Version 1 was a
+# plain dict mapping archive name → metadata, unsigned: an attacker
+# who could write into ``%APPDATA%/BackupManager`` could swap the
+# reference hash for any archive and the periodic integrity verifier
+# would happily accept tampered data. v2 wraps the dict in an HMAC
+# envelope keyed by ``get_app_hmac_key()`` (DPAPI-wrapped on Windows),
+# the same key used to sign ``app_checksums.json`` and ``.wbcommit``.
+_VERIFY_HASHES_ENVELOPE_VERSION = 2
 
 
 # --- Enums ---
@@ -490,19 +503,75 @@ class ConfigManager:
     def load_verify_hashes(self) -> dict:
         """Load stored SHA-256 hashes of encrypted archives.
 
+        The on-disk format is an HMAC-signed envelope since v3.5.6.
+        Older unsigned (v1) files written by prior releases are still
+        accepted with a warning so existing installs keep working
+        through the upgrade; the next ``save_verify_hash`` call
+        rewrites the file in the signed v2 format.
+
         Returns:
             Dict mapping archive_name to {sha256, size, created_at}.
+            Returns an empty dict if the file is missing, corrupt, or
+            its signature fails.
         """
         path = self._verify_hashes_path()
-        if path.exists():
-            try:
-                return json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                logger.warning("Failed to load verify hashes")
-        return {}
+        if not path.exists():
+            return {}
+
+        try:
+            raw = path.read_text(encoding="utf-8")
+            doc = json.loads(raw)
+        except Exception:
+            # Truncated / non-JSON / unreadable: refuse to trust it and
+            # let the caller proceed with no reference hashes (the
+            # integrity verifier will surface "warning" status for the
+            # affected backups, which is the correct fail-closed
+            # outcome — better than returning a half-parsed dict).
+            logger.error("verify_hashes.json could not be parsed; ignoring stored hashes")
+            return {}
+
+        # Legacy v1 path: a bare dict of archive name → metadata, no
+        # envelope, no signature. Accept it for one more launch (so
+        # the user does not lose history) but log loudly so the
+        # operator knows the file is unsigned.
+        if isinstance(doc, dict) and "hashes" not in doc and "hmac" not in doc:
+            logger.warning(
+                "verify_hashes.json is in the legacy unsigned format. "
+                "It will be re-saved with an HMAC signature on the next write."
+            )
+            return doc
+
+        # v2 envelope: verify the HMAC before trusting the payload.
+        if not isinstance(doc, dict) or "hashes" not in doc or "hmac" not in doc:
+            logger.error("verify_hashes.json has an unrecognised structure; ignoring")
+            return {}
+
+        hashes = doc.get("hashes", {})
+        stored_hmac = doc.get("hmac", "")
+        if not isinstance(hashes, dict) or not isinstance(stored_hmac, str):
+            logger.error("verify_hashes.json envelope fields have wrong types")
+            return {}
+
+        expected_hmac = self._compute_verify_hashes_hmac(hashes)
+        if not hmac.compare_digest(expected_hmac, stored_hmac):
+            logger.error(
+                "verify_hashes.json HMAC mismatch — file has been tampered "
+                "with or the per-install key changed. Ignoring stored hashes."
+            )
+            return {}
+
+        return hashes
 
     def save_verify_hash(self, archive_name: str, sha256: str, size: int) -> None:
         """Store the SHA-256 hash of an encrypted archive for later verification.
+
+        Writes through ``_atomic_write_bytes`` to avoid leaving a
+        truncated file on a crash, and wraps the dict in an HMAC
+        envelope so an attacker who can write into
+        ``%APPDATA%/BackupManager`` cannot silently rewrite the
+        reference hash. The HMAC uses the per-install key from
+        :func:`src.security.integrity_check.get_app_hmac_key`, which
+        is DPAPI-wrapped on disk.
 
         Args:
             archive_name: Name of the .tar.wbenc file.
@@ -515,11 +584,45 @@ class ConfigManager:
             "size": size,
             "created_at": datetime.now().isoformat(),
         }
+
+        envelope = {
+            "version": _VERIFY_HASHES_ENVELOPE_VERSION,
+            "hashes": hashes,
+            "hmac": self._compute_verify_hashes_hmac(hashes),
+        }
         path = self._verify_hashes_path()
-        path.write_text(
-            json.dumps(hashes, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        self._atomic_write(path, envelope)
+
+    @staticmethod
+    def _serialise_for_hmac(hashes: dict) -> bytes:
+        """Serialise the hashes dict deterministically for HMAC input.
+
+        The HMAC must be reproducible byte-for-byte across saves and
+        loads, so we serialise with ``sort_keys=True`` and no extra
+        whitespace. Any drift in this format would invalidate every
+        previously-signed file, so it MUST stay stable.
+        """
+        return json.dumps(
+            hashes,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+    def _compute_verify_hashes_hmac(self, hashes: dict) -> str:
+        """Compute the hex HMAC-SHA256 of the canonical hashes blob.
+
+        Imported lazily so that ``src.core.config`` does not pull in
+        ``src.security.integrity_check`` at import time — the latter
+        touches DPAPI on Windows, which is slow and serialises across
+        the test suite without the autouse ``_isolate_hmac_key``
+        fixture in ``tests/conftest.py``.
+        """
+        from src.security.integrity_check import get_app_hmac_key
+
+        key = get_app_hmac_key()
+        payload = self._serialise_for_hmac(hashes)
+        return hmac.new(key, payload, hashlib.sha256).hexdigest()
 
     # --- App settings ---
 
@@ -625,37 +728,39 @@ class ConfigManager:
         return self._safe_construct(BackupProfile, data)
 
     def _protect_secrets(self, data: dict) -> None:
-        """Encrypt sensitive fields in profile dict before save."""
+        """Encrypt sensitive fields in profile dict before save.
+
+        Raises:
+            SecretsProtectionError: If any secret cannot be encrypted.
+                The save MUST be aborted in this case — silently writing
+                the plaintext to disk would defeat the whole point of
+                the encrypted-at-rest profile format.
+        """
+
+        def _encrypt(container: dict, key: str, field_label: str) -> None:
+            value = container.get(key)
+            if not value:
+                return
+            try:
+                container[key] = store_password(value)
+            except Exception as exc:
+                logger.error("Failed to encrypt secret field %s: %s", field_label, exc)
+                raise SecretsProtectionError(field_label, exc) from exc
+
         storage = data.get("storage", {})
         for key in _STORAGE_SECRET_FIELDS:
-            if storage.get(key):
-                try:
-                    storage[key] = store_password(storage[key])
-                except Exception:
-                    logger.warning("Failed to encrypt storage field %s", key)
+            _encrypt(storage, key, f"storage.{key}")
 
-        for mirror in data.get("mirror_destinations", []):
+        for idx, mirror in enumerate(data.get("mirror_destinations", [])):
             for key in _STORAGE_SECRET_FIELDS:
-                if mirror.get(key):
-                    try:
-                        mirror[key] = store_password(mirror[key])
-                    except Exception:
-                        logger.warning("Failed to encrypt mirror field %s", key)
+                _encrypt(mirror, key, f"mirror_destinations[{idx}].{key}")
 
         email = data.get("email", {})
         for key in _EMAIL_SECRET_FIELDS:
-            if email.get(key):
-                try:
-                    email[key] = store_password(email[key])
-                except Exception:
-                    logger.warning("Failed to encrypt email field %s", key)
+            _encrypt(email, key, f"email.{key}")
 
         enc = data.get("encryption", {})
-        if enc.get("stored_password"):
-            try:
-                enc["stored_password"] = store_password(enc["stored_password"])
-            except Exception:
-                logger.warning("Failed to encrypt backup password")
+        _encrypt(enc, "stored_password", "encryption.stored_password")
 
     def _unprotect_secrets(self, data: dict) -> None:
         """Decrypt sensitive fields in profile dict after load."""

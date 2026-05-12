@@ -179,11 +179,12 @@ class TestVerifyHashTimeout:
         (backup / "x.txt").write_text("data", encoding="utf-8")
 
         # A minimal manifest that references the file we just wrote.
+        # ``total_checksum`` omitted so verify_backup skips the global
+        # recomputation (this test focuses on the timeout path).
         manifest_doc = {
             "version": 1,
             "algorithm": "sha256",
             "files": {"x.txt": {"hash": "0" * 64, "size": 4}},
-            "total_checksum": "0" * 64,
         }
         manifest_path = tmp_path / "backup.wbverify"
         manifest_path.write_text(json.dumps(manifest_doc), encoding="utf-8")
@@ -207,9 +208,7 @@ class TestVerifyHashTimeout:
         assert "timed out" in msg
         assert "x.txt" in msg
 
-    def test_happy_path_returns_success(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_happy_path_returns_success(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """A fast-completing verify must return ``(True, ...)`` even
         with a tight timeout — confirms the budget logic is not eating
         legitimate runs."""
@@ -221,11 +220,12 @@ class TestVerifyHashTimeout:
         f.write_text("data", encoding="utf-8")
         real_hash = compute_sha256(f)
 
+        # ``total_checksum`` omitted: this test exercises the happy-path
+        # timeout logic, not the manifest-tamper detection added later.
         manifest_doc = {
             "version": 1,
             "algorithm": "sha256",
             "files": {"x.txt": {"hash": real_hash, "size": 4}},
-            "total_checksum": "0" * 64,
         }
         manifest_path = tmp_path / "backup.wbverify"
         manifest_path.write_text(json.dumps(manifest_doc), encoding="utf-8")
@@ -300,9 +300,7 @@ class TestPoolShutdownNonBlocking:
     the configured timeout (not the worker's blocking duration).
     """
 
-    def test_runtime_error_returned_promptly(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_runtime_error_returned_promptly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         import time
 
         files = _make_files(tmp_path, count=2)
@@ -329,6 +327,4 @@ class TestPoolShutdownNonBlocking:
         # Generous: timeout is 0.3 s, allow up to 3 s for scheduling
         # overhead. A ``shutdown(wait=True)`` regression would push
         # this to ~10 s (the worker's full block).
-        assert elapsed < 3.0, (
-            f"Pool shutdown blocked on stuck workers: {elapsed:.1f}s"
-        )
+        assert elapsed < 3.0, f"Pool shutdown blocked on stuck workers: {elapsed:.1f}s"

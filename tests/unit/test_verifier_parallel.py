@@ -59,7 +59,11 @@ def _build_backup(tmp_path: Path, file_count: int = 10) -> tuple[Path, Path]:
         "version": 1,
         "algorithm": "sha256",
         "files": files,
-        "total_checksum": "deadbeef" * 8,  # value not checked by verify
+        # ``total_checksum`` deliberately omitted: verify_backup
+        # recomputes it and rejects manifests whose stored value does
+        # not match. Tests that don't care about the global checksum
+        # leave it absent and exercise the "no stored checksum" branch
+        # (legacy manifest compatibility).
     }
     manifest_path = tmp_path / "backup.wbverify"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -116,17 +120,13 @@ class TestParallelMatchesSequentialContract:
 class TestMissingFilesBypassPool:
     """Existence check is cheap — must NOT pay pool overhead for it."""
 
-    def test_all_missing_does_not_invoke_compute_sha256(
-        self, tmp_path: Path
-    ) -> None:
+    def test_all_missing_does_not_invoke_compute_sha256(self, tmp_path: Path) -> None:
         backup, manifest = _build_backup(tmp_path, file_count=5)
         # Wipe every file referenced by the manifest.
         for entry in backup.iterdir():
             entry.unlink()
 
-        with patch(
-            "src.core.phases.verifier.compute_sha256"
-        ) as mock_hash:
+        with patch("src.core.phases.verifier.compute_sha256") as mock_hash:
             ok, msg = verify_backup(backup, manifest)
             mock_hash.assert_not_called()
 
@@ -232,22 +232,16 @@ class TestParallelism:
                 active["now"] -= 1
             # Return the matching expected hash so the verify reports
             # success — we want to test concurrency, not correctness.
-            return next(iter(json.loads(manifest.read_text())["files"].values()))[
-                "hash"
-            ]
+            return next(iter(json.loads(manifest.read_text())["files"].values()))["hash"]
 
-        with patch(
-            "src.core.phases.verifier.compute_sha256", side_effect=slow_hash
-        ):
+        with patch("src.core.phases.verifier.compute_sha256", side_effect=slow_hash):
             verify_backup(backup, manifest)
 
         # On a single-CPU container _resolve_worker_count() may be 1
         # (no parallelism possible). Skip the assertion in that
         # degenerate case rather than failing the test.
         if _resolve_worker_count() > 1:
-            assert active["peak"] >= 2, (
-                f"Expected concurrent execution, got peak={active['peak']}"
-            )
+            assert active["peak"] >= 2, f"Expected concurrent execution, got peak={active['peak']}"
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +287,9 @@ class TestEdgeCases:
         backup.mkdir()
         manifest_path = tmp_path / "backup.wbverify"
         manifest_path.write_text(
-            json.dumps({"version": 1, "files": {}, "total_checksum": "x"}),
+            # No total_checksum field: empty manifest = no recomputation
+            # needed. verify_backup must short-circuit on the empty case.
+            json.dumps({"version": 1, "files": {}}),
             encoding="utf-8",
         )
 

@@ -28,6 +28,29 @@ class WriteError(Exception):
         super().__init__(f"Failed to write {file_path}: {original}")
 
 
+class SecretsProtectionError(Exception):
+    """Raised when a profile secret cannot be encrypted before persistence.
+
+    Refusing to save is the only safe response: silently logging a
+    warning and writing the plaintext to disk (the previous behaviour)
+    would leak the password into a JSON profile file that the user
+    reasonably assumes is encrypted.
+
+    Args:
+        field: Dotted path identifying the field that failed, e.g.
+            ``storage.password`` or ``email.smtp_password``.
+        original: The underlying exception raised by ``store_password``.
+    """
+
+    def __init__(self, field: str, original: Exception):
+        self.field = field
+        self.original = original
+        super().__init__(
+            f"Failed to encrypt secret field {field!r}: {original}. "
+            f"Profile NOT saved to disk to avoid leaking plaintext."
+        )
+
+
 class StorageDeleteError(Exception):
     """Raised when a storage backend cannot fully delete a backup.
 

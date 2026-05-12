@@ -122,3 +122,64 @@ class TestVerifyBackup:
         ok, msg = verify_backup(backup, manifest_path)
         assert ok is True
         assert "OK" in msg
+
+
+class TestVerifyBackupTotalChecksum:
+    """``verify_backup`` MUST recompute the manifest's ``total_checksum``
+    and reject mismatches.
+
+    Without that step, an attacker who edits a backup file AND its
+    entry in ``.wbverify`` (recomputing the per-file hash) passes
+    verification silently. The ``.wbcommit`` HMAC binds the
+    ``total_checksum`` separately, but only the commit-marker check
+    catches the tamper — ``verify_backup`` on its own used to be a
+    self-attesting no-op. This test pins the closed loop.
+    """
+
+    def test_tampered_manifest_with_matching_file_fails(self, verified_backup):
+        """Edit one file and update its manifest entry so per-file hashes
+        match — the global ``total_checksum`` should still flag the
+        tamper."""
+        backup, manifest_path = verified_backup
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        # The first hashed file in the manifest, whichever it is.
+        rel_to_tamper = next(iter(manifest_data["files"].keys()))
+        target_file = backup / rel_to_tamper
+        assert target_file.exists(), f"Sanity: {rel_to_tamper} should be in the backup"
+
+        # Replace the file content AND patch the manifest entry so the
+        # per-file hash matches the new content. This is exactly the
+        # attack vector the fix is designed to catch.
+        import hashlib
+
+        new_content = b"COORDINATED TAMPER - payload bytes have been swapped"
+        target_file.write_bytes(new_content)
+        new_hash = hashlib.sha256(new_content).hexdigest()
+        manifest_data["files"][rel_to_tamper]["hash"] = new_hash
+        manifest_data["files"][rel_to_tamper]["size"] = len(new_content)
+
+        # The total_checksum field is STILL the original — the attacker
+        # did not bother to recompute it (or could not, because it's
+        # bound by .wbcommit). The verifier must catch this.
+        manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+        ok, msg = verify_backup(backup, manifest_path)
+        assert ok is False
+        assert "total_checksum mismatch" in msg or "tampered" in msg.lower()
+
+    def test_legacy_manifest_without_total_checksum_still_verifies(self, verified_backup):
+        """Manifests written before the total_checksum field existed
+        must still be honoured by the per-file loop — the recomputation
+        is a strict upgrade, not a hard requirement that breaks old
+        backups."""
+        backup, manifest_path = verified_backup
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        # Strip the total_checksum entirely (simulating a pre-3.3 manifest).
+        manifest_data.pop("total_checksum", None)
+        manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+        ok, msg = verify_backup(backup, manifest_path)
+        assert ok is True
+        assert "OK" in msg

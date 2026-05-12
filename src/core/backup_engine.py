@@ -893,7 +893,31 @@ class BackupEngine:
 
         self._phase("Saving manifest...")
         if ctx.backup_path and ctx.backup_path.exists():
-            save_integrity_manifest(ctx.integrity_manifest, ctx.backup_path)
+            try:
+                save_integrity_manifest(ctx.integrity_manifest, ctx.backup_path)
+            except (OSError, PermissionError) as e:
+                # Local manifest write failure (disk full, read-only,
+                # permission denied) used to abort the whole pipeline
+                # AFTER the backup bytes were already on disk — the
+                # orphan scan would then delete the backup at the next
+                # run because no ``.wbcommit`` had been written. Match
+                # the remote-upload path's behaviour: record a warning,
+                # let the run continue, surface the loss of verifiability
+                # in the result.
+                message = (
+                    f"Integrity manifest could not be saved locally next to "
+                    f"{ctx.backup_path} ({type(e).__name__}: {e}); "
+                    f"post-restore verification for this backup will not be "
+                    f"available."
+                )
+                self._log(f"Warning: {message}")
+                logger.warning("Failed to save local manifest: %s", e)
+                ctx.result.add_warning(
+                    phase="manifest",
+                    file_path=f"{ctx.backup_name}.wbverify",
+                    message=message,
+                    exception=e,
+                )
 
         if ctx.backup_remote_name and ctx.backend is not None:
             try:

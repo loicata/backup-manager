@@ -143,6 +143,72 @@ class TestMirrorTargetCollision:
         assert (orphans[0] / "PRECIOUS.txt").read_text(encoding="utf-8") == ("do not lose me")
 
 
+class TestMirrorLongPathSupport:
+    """``_copy_local_mirror`` must route file copies through
+    ``long_path_str`` so Windows backups beyond MAX_PATH (260 chars)
+    succeed. Without it, the mirror fails on deep trees while the
+    primary writer (which DOES use long_path_str) succeeds."""
+
+    def test_copy_routes_through_long_path_str(self, tmp_path, source_files):
+        """Verify that ``shutil.copy2`` receives the long-path-wrapped
+        source and destination strings, not raw Path objects."""
+        import os
+        from unittest.mock import patch
+
+        from src.core.phase_logger import PhaseLogger
+        from src.core.phases.local_writer import write_flat
+        from src.core.phases.mirror import _copy_local_mirror
+
+        files, _ = source_files
+
+        primary = tmp_path / "primary"
+        primary.mkdir()
+        backup_path = write_flat(files, primary, "bk_longpath")
+
+        mirror_root = tmp_path / "mirror"
+        mirror_root.mkdir()
+
+        backend = LocalStorage(str(mirror_root))
+        phase_log = PhaseLogger("test", None)
+
+        copy_calls: list[tuple[str, str]] = []
+
+        def _capture(src, dst):
+            # Record the arguments; touch the destination so the
+            # progress loop can proceed. We intentionally do NOT call
+            # the real copy — it would recurse through the patched
+            # symbol. This is a structural test on the args, not an
+            # end-to-end copy test (covered by other tests).
+            copy_calls.append((src, dst))
+            # Strip the long-path prefix for the real write so the
+            # placeholder file lands at a normal path.
+            real_dst = dst[4:] if isinstance(dst, str) and dst.startswith("\\\\?\\") else dst
+            with open(real_dst, "wb") as fh:
+                fh.write(b"placeholder")
+
+        with patch("src.core.phases.mirror.shutil.copy2", side_effect=_capture):
+            _copy_local_mirror(backup_path, backend, "bk_longpath", phase_log)
+
+        # At least one file was copied.
+        assert copy_calls, "No files were copied"
+
+        # On Windows, both src and dst MUST be wrapped with the long
+        # path prefix. On other platforms ``long_path_str`` returns the
+        # path unchanged, so the assertion is Windows-specific.
+        if os.name == "nt":
+            for src, dst in copy_calls:
+                assert isinstance(src, str), f"src was not stringified: {src!r}"
+                assert isinstance(dst, str), f"dst was not stringified: {dst!r}"
+                assert src.startswith("\\\\?\\"), (
+                    f"Mirror source missing long-path prefix: {src!r} — "
+                    "deep NTFS trees would fail without it."
+                )
+                assert dst.startswith("\\\\?\\"), (
+                    f"Mirror destination missing long-path prefix: {dst!r} — "
+                    "deep NTFS trees would fail without it."
+                )
+
+
 # ---------------------------------------------------------------------------
 # LOCAL primary → LOCAL mirror(s)
 # ---------------------------------------------------------------------------

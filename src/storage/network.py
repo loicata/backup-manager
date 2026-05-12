@@ -280,19 +280,30 @@ class NetworkStorage(LocalStorage):
 
         return result[0], result[1]
 
-    def upload(self, local_path, remote_name=None, progress_callback=None, cancel_check=None):
-        """Upload with SMB authentication."""
-        ok, msg = self._connect()
-        if not ok:
-            raise OSError(f"Cannot connect to network share: {msg}")
-        return super().upload(local_path, remote_name, progress_callback, cancel_check)
+    def upload(self, local_path: Path, remote_name: str) -> None:
+        """Upload with SMB authentication.
 
-    def upload_file(self, fileobj, remote_path, size=0, progress_callback=None):
-        """Upload single file with SMB authentication."""
+        Signature must match ``LocalStorage.upload`` exactly. Progress
+        and cancel callbacks travel via ``set_progress_callback`` /
+        ``set_cancel_check`` on the base class — passing them here would
+        trip a ``TypeError`` because ``LocalStorage.upload`` only takes
+        two positional args.
+        """
         ok, msg = self._connect()
         if not ok:
             raise OSError(f"Cannot connect to network share: {msg}")
-        return super().upload_file(fileobj, remote_path, size, progress_callback)
+        return super().upload(local_path, remote_name)
+
+    def upload_file(self, fileobj, remote_path: str, size: int = 0) -> None:
+        """Upload a single file-like with SMB authentication.
+
+        Signature must match ``LocalStorage.upload_file``. See ``upload``
+        above for the rationale on no extra callback args.
+        """
+        ok, msg = self._connect()
+        if not ok:
+            raise OSError(f"Cannot connect to network share: {msg}")
+        return super().upload_file(fileobj, remote_path, size)
 
     def list_backups(self) -> list[dict]:
         """List backups after mounting the share.

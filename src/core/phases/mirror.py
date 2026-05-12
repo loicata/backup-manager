@@ -21,7 +21,7 @@ from src.core.phases.collector import FileInfo
 from src.core.phases.manifest import save_integrity_manifest, upload_manifest_to_remote
 from src.core.phases.remote_writer import write_remote
 from src.security.encryption import EncryptingWriter
-from src.storage.base import long_path_str
+from src.storage.base import long_path_mkdir, long_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -364,7 +364,11 @@ def _copy_local_mirror(
             orphan.name,
         )
         target.rename(orphan)
-    target.mkdir(parents=True, exist_ok=True)
+    # Use long_path_mkdir so the mirror tolerates destination trees
+    # beyond Windows' 260-char MAX_PATH. ``write_flat`` already does
+    # this on the primary path; without parity here a backup that
+    # succeeds on the primary writer fails on the mirror.
+    long_path_mkdir(target)
 
     # Collect all files to copy
     source_files = [f for f in backup_path.rglob("*") if f.is_file()]
@@ -376,8 +380,14 @@ def _copy_local_mirror(
 
         rel = src_file.relative_to(backup_path)
         dst_file = target / rel
-        dst_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_file, dst_file)
+        long_path_mkdir(dst_file.parent)
+        # INVARIANT: kernel copy via long-path wrappers. Both source and
+        # destination MUST go through long_path_str so the underlying
+        # ``CopyFileExW`` syscall accepts paths above MAX_PATH.
+        shutil.copy2(
+            long_path_str(src_file),
+            long_path_str(dst_file),
+        )
 
         phase_log.progress(
             current=i + 1,

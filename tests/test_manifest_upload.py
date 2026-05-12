@@ -238,6 +238,77 @@ class TestPhaseSaveManifestRemote:
 
         mock_upload.assert_called_once()
 
+    @patch("src.core.backup_engine.save_integrity_manifest")
+    def test_local_save_failure_does_not_raise(self, mock_save, tmp_path):
+        """A failure to save the local manifest must not abort the pipeline.
+
+        Previously this call was unguarded — a disk-full or read-only
+        target would raise out of ``_phase_save_manifest`` AFTER the
+        backup bytes were on disk, leaving the orphan-scan to delete
+        the just-written backup at the next run. Mirror the remote
+        path's behaviour: log a warning, keep the backup.
+        """
+        from src.core.backup_engine import BackupEngine
+        from src.core.backup_result import BackupResult
+
+        mock_save.side_effect = OSError("disk full")
+
+        engine = BackupEngine.__new__(BackupEngine)
+        engine._events = MagicMock()
+        engine._cancelled = False
+
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+
+        ctx = MagicMock()
+        ctx.profile.encrypt_primary = False
+        ctx.backup_path = backup_dir
+        ctx.backup_remote_name = ""
+        ctx.backup_name = "backup"
+        ctx.backend = MagicMock()
+        ctx.integrity_manifest = {"version": 1, "files": {}, "total_checksum": "abc"}
+        ctx.result = BackupResult()
+
+        # MUST NOT raise — the previous code did.
+        engine._phase_save_manifest(ctx)
+
+        mock_save.assert_called_once()
+
+    @patch("src.core.backup_engine.save_integrity_manifest")
+    def test_local_save_failure_records_warning_on_result(self, mock_save, tmp_path):
+        """Local manifest save failure adds a structured warning to the result."""
+        from src.core.backup_engine import BackupEngine
+        from src.core.backup_result import BackupResult, ErrorSeverity
+
+        mock_save.side_effect = PermissionError("read-only filesystem")
+
+        engine = BackupEngine.__new__(BackupEngine)
+        engine._events = MagicMock()
+        engine._cancelled = False
+
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+
+        ctx = MagicMock()
+        ctx.profile.encrypt_primary = False
+        ctx.backup_path = backup_dir
+        ctx.backup_remote_name = ""
+        ctx.backup_name = "backup_local"
+        ctx.backend = MagicMock()
+        ctx.integrity_manifest = {"version": 1, "files": {}, "total_checksum": "abc"}
+        ctx.result = BackupResult()
+
+        engine._phase_save_manifest(ctx)
+
+        assert ctx.result.warnings == 1
+        warning = ctx.result.phase_errors[0]
+        assert warning.severity == ErrorSeverity.WARNING
+        assert warning.phase == "manifest"
+        assert warning.file_path == "backup_local.wbverify"
+        assert "post-restore verification" in warning.message
+        # Backup itself is not marked as failed.
+        assert ctx.result.success is True
+
     @patch("src.core.backup_engine.upload_manifest_to_remote")
     def test_remote_upload_failure_records_warning_on_result(self, mock_upload):
         """Manifest upload failure surfaces a warning via ctx.result.

@@ -193,16 +193,39 @@ class TestWriteFailures:
 class TestManifestFailures:
 
     def test_cannot_write_manifest_file(self, env, profile):
-        """Pipeline should raise when integrity manifest write fails."""
+        """Pipeline should NOT raise when integrity manifest write fails.
+
+        Previously, an OSError from ``save_integrity_manifest`` aborted
+        the run AFTER the backup bytes were already on disk; the orphan
+        scan would then delete the just-written backup at the next
+        startup, losing the user's data over a transient I/O glitch
+        (locked file, antivirus, NAS hiccup).
+
+        The contract since v3.5.6 mirrors the remote-upload path: log a
+        structured warning on the result so the user knows
+        post-restore verification is no longer available, but keep the
+        backup. This test pins that contract — a regression toward
+        "raise and lose the backup" would be a data-loss bug.
+        """
         engine = _engine(env)
-        with (
-            patch(
-                "src.core.backup_engine.save_integrity_manifest",
-                side_effect=OSError("Permission denied"),
-            ),
-            pytest.raises(OSError, match="Permission denied"),
+        with patch(
+            "src.core.backup_engine.save_integrity_manifest",
+            side_effect=OSError("Permission denied"),
         ):
-            engine.run_backup(profile)
+            # MUST NOT raise — the backup is intact, only the
+            # manifest sidecar failed.
+            result = engine.run_backup(profile)
+
+        # The warning must be surfaced on the result for the report
+        # generator and the UI to display.
+        assert result.warnings >= 1
+        manifest_warnings = [
+            w for w in result.phase_errors if w.phase == "manifest" and "verification" in w.message
+        ]
+        assert manifest_warnings, (
+            "Expected a structured 'manifest could not be saved' warning "
+            f"on the result, got: {[w.message for w in result.phase_errors]}"
+        )
 
 
 # ---------------------------------------------------------------------------

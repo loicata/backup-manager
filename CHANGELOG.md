@@ -5,6 +5,16 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.9] - 2026-05-13
+
+### Changed
+- **Run-tab Log "Backup complete" line is shorter and reads in minutes.** The final summary used to read ``Backup complete: 231908 files in 7831.8s → Storage (Start SSH server cipango56@192.168.2.149:22)``. The ``→ Storage (…)`` tail repeated information already visible on the Storage tab and in the History row; on narrow windows it pushed the file count + duration off-screen. The duration in seconds was also hard to read at a glance — ``7831.8s`` requires a mental division to mean anything, whereas ``130.5 min`` is immediately parseable. The new shape is ``Backup complete: 231908 files in 130.5 min``. The History tab's status classifier (``_extract_status``) still keys on the substring ``"Backup complete:"`` so the format change is backward-compatible with old log files.
+- **Run-tab Log Phase column is now blank on the terminal "Backup complete / failed / cancelled" row.** Previously this row inherited the last seen phase tag (``rotator`` on the success path, an earlier one on a mid-pipeline failure) because the engine emits the line through ``_log()`` without a fresh ``PHASE_CHANGED`` and ``RunTab._on_log`` falls back to ``_current_phase``. The terminal messages now match a dedicated regex (``^Backup (complete|failed|cancelled)``) that explicitly clears the column — semantically correct (nothing is running) and prevents the stale tag from leaking into a follow-up run via ``_current_phase``.
+
+### Tests
+- +5 tests in ``tests/unit/test_backup_complete_summary.py`` pin both contracts: the minutes-format conversion (``7831.8s → "130.5 min"``), the absence of ``→`` and ``Storage (`` in the summary, and the terminal-message detection across 5 positive and 7 negative cases. The ``test_terminal_messages_have_no_inferred_phase`` guard ensures a future ``_PHASE_PATTERNS`` entry that accidentally matches ``Backup …`` won't restore the stale-tag behaviour.
+- ``tests/test_build_msi.py::TestDefenderExclusion`` updated to slice on ``SetAddDefenderCmd`` / ``SetRemoveDefenderCmd`` instead of the old executor IDs — the 3.5.8 ``WixQuietExec64`` migration moved the PowerShell ``-ErrorAction SilentlyContinue`` from the executor CA into a paired setter CA.
+
 ## [3.5.8] - 2026-05-13
 
 ### Fixed

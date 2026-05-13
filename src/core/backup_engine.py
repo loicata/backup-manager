@@ -325,14 +325,15 @@ class BackupEngine:
             ctx.result.duration_seconds = time.monotonic() - start_time
             self._emit_status("success")
             self._events.emit(BACKUP_DONE, stats=ctx.result)
-            # Summary with all destinations
-            destinations = [f"Storage ({self._describe_target(profile.storage)})"]
-            for i, mirror in enumerate(profile.mirror_destinations):
-                destinations.append(f"Mirror {i + 1} ({self._describe_target(mirror)})")
-            dest_summary = ", ".join(destinations)
+            # Final summary. The destination list was previously appended
+            # after a ``→`` arrow — useful only on the very first run, and
+            # noisy on every subsequent one since the destinations are
+            # visible in the profile / Storage tab. The duration is shown
+            # in minutes (with one decimal) because ``7831.8s`` is harder
+            # to read at a glance than ``130.5 min``.
             self._log(
                 f"Backup complete: {ctx.result.files_processed} files "
-                f"in {ctx.result.duration_seconds:.1f}s → {dest_summary}"
+                f"in {ctx.result.duration_seconds / 60:.1f} min"
             )
             return ctx.result
 

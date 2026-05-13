@@ -88,18 +88,24 @@ class TestDefenderExclusion:
     """
 
     def _add_block(self, wxs: str) -> str:
-        """Slice of the WXS containing the AddDefenderExclusion CustomAction.
+        """Slice spanning the Add* CustomAction pair.
 
-        The slice is delimited by the next CustomAction so attribute
-        assertions don't accidentally match the Remove counterpart.
+        Since the 3.5.8 cmd-flash fix the install path uses TWO
+        CustomActions: ``SetAddDefenderCmd`` (immediate setter that
+        populates ``WixQuietExec64CmdLine`` — this is where the
+        PowerShell command string with ``-ErrorAction SilentlyContinue``
+        lives) and ``AddDefenderExclusion`` (deferred WixQuietExec64
+        executor — where ``Execute="deferred"``, ``Impersonate="no"``
+        and ``Return="ignore"`` live). Both are required for the action
+        to work, so the test slice covers them as a unit.
         """
-        start = wxs.index('Id="AddDefenderExclusion"')
-        end = wxs.index('Id="RemoveDefenderExclusion"')
+        start = wxs.index('Id="SetAddDefenderCmd"')
+        end = wxs.index('Id="SetRemoveDefenderCmd"')
         return wxs[start:end]
 
     def _remove_block(self, wxs: str) -> str:
-        """Slice for the RemoveDefenderExclusion CustomAction."""
-        start = wxs.index('Id="RemoveDefenderExclusion"')
+        """Slice spanning the Remove* CustomAction pair (setter + executor)."""
+        start = wxs.index('Id="SetRemoveDefenderCmd"')
         end = wxs.index("<InstallExecuteSequence>")
         return wxs[start:end]
 

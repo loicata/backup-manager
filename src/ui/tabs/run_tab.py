@@ -51,6 +51,20 @@ def _infer_phase(announcement: str) -> str:
     return ""
 
 
+# Terminal messages close the backup run. The fallback-to-previous-phase
+# rule used elsewhere is misleading here because the last seen phase
+# (``rotator`` in the success path, an earlier one if the run failed
+# mid-pipeline) is not the *current* phase — nothing is running. We
+# match these messages explicitly so the Phase column on the final
+# row stays blank, signalling "done" without dragging a stale tag.
+_TERMINAL_LOG_PATTERN: re.Pattern[str] = re.compile(r"^Backup (complete|failed|cancelled)", re.I)
+
+
+def _is_terminal_log_message(message: str) -> bool:
+    """True for the engine's final summary line of a run."""
+    return bool(_TERMINAL_LOG_PATTERN.match(message))
+
+
 # Maximum characters displayed in the "phase: filename" status line.
 # Beyond this length the path is truncated with a leading ellipsis so the
 # percent label on the right of the same row stays visible.  Calibrated
@@ -646,10 +660,17 @@ class RunTab(ttk.Frame):
            stay aligned with their announcing parent.
         """
         if not phase:
-            inferred = _infer_phase(message)
-            if inferred:
-                self._current_phase = inferred
-            phase = self._current_phase
+            if _is_terminal_log_message(message):
+                # Backup is finished: no phase is active any more. Reset
+                # ``_current_phase`` so we don't leak a stale tag into a
+                # follow-up run, and force the column blank for this row.
+                self._current_phase = ""
+                phase = ""
+            else:
+                inferred = _infer_phase(message)
+                if inferred:
+                    self._current_phase = inferred
+                phase = self._current_phase
         self.after(0, self._append_log, message, level, phase, details)
 
     def _append_log(self, message, level="info", phase="", details=None):

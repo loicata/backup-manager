@@ -138,6 +138,15 @@ def build():
     else:
         print("WARNING: report_signing_key.pem not found — reports won't be signed")
 
+    # Server-side hash-during-upload helper (v3.6 PoC C). Bundled so
+    # SFTPStorage._ensure_helper_script() can read it and push it to
+    # the SSH server when the verify path can benefit. Optional: if
+    # the file is missing, the deployment falls back to sequential
+    # verify (3.5.10 behaviour).
+    server_helper = ASSETS / "server_helper.sh"
+    if server_helper.exists():
+        cmd += ["--add-data", f"{server_helper};assets"]
+
     # Entry point
     cmd.append(str(SRC / "__main__.py"))
 

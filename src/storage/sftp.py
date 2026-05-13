@@ -12,10 +12,12 @@ Security:
 """
 
 import contextlib
+import hashlib
 import io
 import logging
 import socket
 import stat
+import sys
 import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,6 +50,74 @@ _SFTP_WINDOW_SIZE = 2**25  # 32 MB (default is 2 MB)
 # server's disk becomes the bottleneck.
 _VERIFY_HASH_WORKERS = 4
 _VERIFY_HASH_BATCH_SIZE = 200  # files per sha256sum invocation
+
+
+# Server helper deployment (v3.6 PoC C). The helper is a bash script
+# that combines ``tar xf`` and ``sha256sum`` in a single pass over
+# the upload stream — replacing the post-upload ``sha256sum`` verify
+# pass that dominates run time on commodity servers.
+#
+# Resolution order matches ``src/__main__.py::_get_base_dir`` so the
+# helper is found whether running from source, a PyInstaller bundle,
+# or a Nuitka standalone. Returns None when the asset is missing —
+# callers must then fall back to the sequential 3.5.10 verify.
+_HELPER_ASSET_NAME = "server_helper.sh"
+
+
+def _resolve_helper_path() -> Path | None:
+    """Find ``assets/server_helper.sh`` across all deployment shapes.
+
+    The same file lives in different places depending on how the app
+    is being run:
+        - PyInstaller onedir: ``sys._MEIPASS/assets/...``
+        - Nuitka standalone:  ``<exe dir>/assets/...``
+        - Dev / source tree:  ``<repo root>/assets/...``
+
+    Returns the first existing candidate, or None if the asset has
+    been stripped from the bundle (graceful degradation: the SFTP
+    backend then keeps using sequential verify).
+    """
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / _HELPER_ASSET_NAME)
+    # Nuitka standalone (frozen) and dev tree both fall through here.
+    candidates.append(Path(sys.executable).resolve().parent / "assets" / _HELPER_ASSET_NAME)
+    candidates.append(Path(__file__).resolve().parent.parent.parent / "assets" / _HELPER_ASSET_NAME)
+
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+# Module-level cache for the helper bytes + hash. Read-only after
+# first access, safe to share across SFTPStorage instances and
+# threads (no mutation).
+_HELPER_CACHE: tuple[bytes, str] | None = None
+
+
+def _get_helper_bytes_and_hash() -> tuple[bytes, str] | None:
+    """Return ``(content_bytes, hex_sha256)`` for the helper, or None.
+
+    Lazy + cached. None signals "asset unavailable — fall back to
+    sequential verify". The hash is used both to namespace the
+    remote deployment path (``/tmp/bm-helper-<hash[:8]>.sh``) and
+    to detect when an existing remote copy is stale.
+    """
+    global _HELPER_CACHE
+    if _HELPER_CACHE is not None:
+        return _HELPER_CACHE
+
+    path = _resolve_helper_path()
+    if path is None:
+        logger.debug("Server helper asset not found in any candidate path")
+        return None
+
+    content = path.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    _HELPER_CACHE = (content, digest)
+    return _HELPER_CACHE
 
 
 def _validate_remote_name(name: str) -> str:
@@ -1296,6 +1366,148 @@ class SFTPStorage(StorageBackend):
                 self._list_remote_recursive(sftp, full, rel, result)
             else:
                 result.append((rel, entry.st_size or 0))
+
+    # ------------------------------------------------------------------
+    # Server helper deployment (v3.6 PoC C, hash-during-upload).
+    # ------------------------------------------------------------------
+    # These methods are additive. Nothing in the runtime calls them yet
+    # — Stage 4 of the PoC will wire ``_ensure_helper_script`` into the
+    # upload + verify path. Until then they exist so the deployment
+    # logic can be unit-tested in isolation against mocked SSH sessions.
+    # ------------------------------------------------------------------
+
+    def _ensure_helper_script(self) -> str | None:
+        """Ensure the SHA-256-during-upload helper is on the server.
+
+        Returns the remote absolute path of the helper if it is ready
+        to use, or ``None`` if hash-during-upload is unavailable for
+        this connection (BSD tar, asset missing, deployment failed).
+        ``None`` is the signal for the caller to fall back to the
+        sequential ``verify_backup_files`` path inherited from 3.5.10.
+
+        Caches the outcome on the instance — re-running the GNU tar
+        probe and the remote sha256sum check on every upload would
+        burn ~3 SSH round-trips per backup for no information gain.
+        """
+        if hasattr(self, "_cached_helper_remote_path"):
+            return self._cached_helper_remote_path
+
+        # Default to "unavailable" — every early-return below leaves
+        # the cache pinned to None so future calls short-circuit too.
+        self._cached_helper_remote_path: str | None = None
+
+        helper = _get_helper_bytes_and_hash()
+        if helper is None:
+            return None
+        content, expected_hash = helper
+
+        # The remote path is namespaced by the first 8 chars of the
+        # helper hash so a content change auto-rotates the deployment.
+        # No risk of running an old helper after an upgrade.
+        remote_path = f"/tmp/bm-helper-{expected_hash[:8]}.sh"
+
+        try:
+            transport = self._get_transport()
+        except Exception as e:
+            logger.warning("Could not get SSH transport for helper probe: %s", e)
+            return None
+
+        try:
+            if not self._has_gnu_tar(transport):
+                logger.info(
+                    "Server does not have GNU tar — hash-during-upload disabled, "
+                    "falling back to sequential verify"
+                )
+                return None
+
+            if self._remote_file_hash_matches(transport, remote_path, expected_hash):
+                logger.debug("Server helper already deployed at %s", remote_path)
+                self._cached_helper_remote_path = remote_path
+                return remote_path
+
+            self._upload_helper(transport, content, remote_path)
+            logger.info("Deployed server helper to %s (%d bytes)", remote_path, len(content))
+            self._cached_helper_remote_path = remote_path
+            return remote_path
+        except Exception as e:
+            # Helper deployment is best-effort — never block a backup
+            # because we couldn't optimise the verify. The 3.5.10
+            # sequential path remains available as the fallback.
+            logger.warning("Server helper deployment failed: %s — using sequential verify", e)
+            return None
+
+    def _has_gnu_tar(self, transport) -> bool:
+        """Probe whether the server's tar is GNU (supports --to-command).
+
+        Runs ``tar --version | head -1`` over an exec channel and
+        searches for the marker ``GNU tar``. The helper's
+        ``--to-command`` extraction hook is GNU-only — BSD tar's
+        ``--to-stdout`` is not a substitute. Returns False on any
+        connection / parsing failure so we degrade safely.
+        """
+        try:
+            channel = transport.open_session()
+            try:
+                channel.settimeout(_EXEC_PROBE_TIMEOUT)
+                channel.exec_command("tar --version 2>/dev/null | head -1")  # nosec B601
+                output = b""
+                while True:
+                    chunk = channel.recv(1024)
+                    if not chunk:
+                        break
+                    output += chunk
+                channel.recv_exit_status()  # drain
+                return b"GNU tar" in output
+            finally:
+                channel.close()
+        except Exception as e:
+            logger.debug("GNU tar probe failed: %s", e)
+            return False
+
+    def _remote_file_hash_matches(self, transport, remote_path: str, expected_hash: str) -> bool:
+        """Return True iff the remote file exists and hashes to ``expected_hash``.
+
+        Used to skip re-uploading the helper when an older deploy is
+        already in place with the same content. ``sha256sum`` outputs
+        ``<hash>  <path>`` so we strip the path via awk and compare.
+        Missing files yield empty output — the comparison fails
+        cleanly, no exception.
+        """
+        try:
+            channel = transport.open_session()
+            try:
+                channel.settimeout(_EXEC_PROBE_TIMEOUT)
+                escaped = _shell_escape(remote_path)
+                channel.exec_command(  # nosec B601
+                    f"sha256sum {escaped} 2>/dev/null | awk '{{print $1}}'"
+                )
+                output = b""
+                while True:
+                    chunk = channel.recv(1024)
+                    if not chunk:
+                        break
+                    output += chunk
+                channel.recv_exit_status()  # drain
+                return output.decode("utf-8", errors="replace").strip() == expected_hash
+            finally:
+                channel.close()
+        except Exception as e:
+            logger.debug("Remote hash check failed for %s: %s", remote_path, e)
+            return False
+
+    def _upload_helper(self, transport, content: bytes, remote_path: str) -> None:
+        """Push helper bytes to ``remote_path`` and chmod 0755.
+
+        Raised exceptions propagate to ``_ensure_helper_script`` which
+        catches them all and degrades to sequential verify.
+        """
+        sftp = self._get_sftp(transport)
+        try:
+            with sftp.open(remote_path, "wb") as f:
+                f.write(content)
+            sftp.chmod(remote_path, 0o755)
+        finally:
+            sftp.close()
 
     def verify_backup_files(self, backup_name: str) -> list[tuple[str, int, str]]:
         """Verify backup files via sha256sum executed on the SSH server.

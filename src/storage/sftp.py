@@ -19,6 +19,7 @@ import socket
 import stat
 import sys
 import tarfile
+import threading
 import time
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
@@ -146,6 +147,23 @@ def _validate_remote_name(name: str) -> str:
 def _shell_escape(s: str) -> str:
     """Escape a string for safe use in shell commands."""
     return "'" + s.replace("'", "'\\''") + "'"
+
+
+class _HelperEarlyFailure(Exception):
+    """Raised by ``_upload_tar_stream_with_helper`` when the helper
+    invocation fails BEFORE any tar byte was written to the channel.
+
+    Carries an explicit signal up to ``upload_tar_stream`` so that
+    layer can safely retry the upload on the classic ``tar xf -``
+    path within the same run — the destination directory is still
+    empty (or only contains parents created by
+    ``_ensure_remote_dir_exec``), so a second attempt is safe.
+
+    Any failure that occurs after tar bytes have been written must
+    propagate as a plain ``OSError`` instead — at that point the
+    destination holds a partial backup and the engine's
+    ``_best_effort_cleanup`` is the right level to handle the orphan.
+    """
 
 
 class _ChannelWriter(io.RawIOBase):
@@ -554,9 +572,22 @@ class SFTPStorage(StorageBackend):
     ) -> None:
         """Upload multiple files as a single tar stream via exec channel.
 
-        Streams a tar archive directly to ``tar xf -`` on the remote
-        server, eliminating per-file SSH channel overhead.  Falls back
-        to individual ``upload_file()`` calls when exec is unavailable.
+        v3.6 fast path:
+            Whenever the server is GNU-tar-capable and the helper has
+            been deployed, the call is dispatched to
+            ``_upload_tar_stream_with_helper``. That path runs the
+            helper instead of plain ``tar xf -`` so the same byte
+            stream that lands on disk is also hashed in flight — the
+            captured ``<hash>  <path>`` lines are saved as a sidecar
+            ``<basename>.wbserverhashes`` next to the backup directory.
+            The verify phase then becomes a single ~25 MB SFTP read
+            instead of a 85-minute ``sha256sum`` loop.
+
+        Legacy path (3.5.x):
+            ``tar xf - -C <dest>``. Used when the helper is not
+            available, or when the helper run raised after sending
+            any bytes (we cannot safely retry after a partial extract).
+            Also the route for exec-less servers via ``_tar_fallback``.
 
         Args:
             files: List of (local_path, relative_path, size) tuples.
@@ -577,6 +608,31 @@ class SFTPStorage(StorageBackend):
                 return
 
             self._ensure_remote_dir_exec(transport, full_dir)
+
+            # v3.6 helper path. ``_ensure_helper_script`` returns None
+            # whenever the server can't run it (BSD tar, deploy failure,
+            # asset missing), in which case we transparently fall
+            # through to the classic ``tar xf -`` path below.
+            helper_remote = self._ensure_helper_script()
+            if helper_remote is not None:
+                try:
+                    self._upload_tar_stream_with_helper(
+                        transport,
+                        files,
+                        full_dir,
+                        helper_remote,
+                        progress_callback,
+                        cancel_check,
+                    )
+                    return
+                except _HelperEarlyFailure as e:
+                    # Helper choked before we wrote any tar bytes —
+                    # we still have a clean dest folder so we can
+                    # retry via the classic path within this run.
+                    logger.warning(
+                        "Server helper unavailable at runtime (%s) — using classic tar upload",
+                        e,
+                    )
 
             escaped_dir = _shell_escape(full_dir)
             channel = transport.open_session()
@@ -615,6 +671,169 @@ class SFTPStorage(StorageBackend):
             # persistent transport is reused across calls and stays open.
             if not is_persistent:
                 transport.close()
+
+    def _upload_tar_stream_with_helper(
+        self,
+        transport,
+        files: list[tuple[Path, str, int]],
+        full_dir: str,
+        helper_remote: str,
+        progress_callback,
+        cancel_check,
+    ) -> None:
+        """Upload via the v3.6 helper, capturing the hash sidecar inline.
+
+        Concurrency model
+        -----------------
+        The helper reads the tar stream from stdin AND emits one
+        ``<sha256>  <path>`` line per file on stdout. Both directions
+        flow over the same SSH channel. The main thread writes the
+        tar stream; a reader thread drains stdout into a bytearray
+        in parallel — without this, the helper would block when the
+        SSH receive window fills up with hash output that we never
+        consumed.
+
+        The reader thread also drains stderr so a few warning lines
+        from the helper (unexpected file type, ``set -e`` bailing
+        on a single missing parent) don't deadlock the channel.
+
+        Failure modes
+        -------------
+        ``_HelperEarlyFailure`` is raised when the helper command
+        itself cannot be invoked (exec_command throws, channel closed
+        before any tar byte was sent). The caller may then retry on
+        the classic ``tar xf -`` path within the same run because the
+        destination is still empty.
+
+        Any failure AFTER tar bytes have been sent — non-zero exit,
+        reader exception, transport reset — surfaces as an ``OSError``.
+        The destination may now hold a partial backup and the engine's
+        ``_best_effort_cleanup`` handles the orphan.
+        """
+        escaped_helper = _shell_escape(helper_remote)
+        escaped_dir = _shell_escape(full_dir)
+        cmd = f"{escaped_helper} {escaped_dir}"
+
+        try:
+            channel = transport.open_session()
+        except Exception as e:
+            raise _HelperEarlyFailure(f"open_session failed: {e}") from e
+
+        try:
+            try:
+                channel.exec_command(cmd)  # nosec B601
+            except Exception as e:
+                raise _HelperEarlyFailure(f"exec_command failed: {e}") from e
+
+            stdout_buffer = bytearray()
+            stderr_buffer = bytearray()
+            reader_error: list[BaseException] = []
+
+            def _drain() -> None:
+                """Pull stdout + stderr until the channel is fully closed.
+
+                Polls ``recv_ready`` / ``recv_stderr_ready`` rather than
+                blocking on ``recv`` so we can exit the moment the
+                channel hits EOF on both streams — recv on an idle
+                channel can block for the whole channel timeout, which
+                stalls the join below.
+                """
+                try:
+                    while True:
+                        progress = False
+                        if channel.recv_ready():
+                            chunk = channel.recv(65536)
+                            if chunk:
+                                stdout_buffer.extend(chunk)
+                                progress = True
+                        if channel.recv_stderr_ready():
+                            chunk = channel.recv_stderr(65536)
+                            if chunk:
+                                stderr_buffer.extend(chunk)
+                                progress = True
+                        if (
+                            not progress
+                            and channel.exit_status_ready()
+                            and not channel.recv_ready()
+                            and not channel.recv_stderr_ready()
+                        ):
+                            return
+                        if not progress:
+                            time.sleep(0.005)
+                except Exception as e:
+                    reader_error.append(e)
+
+            reader = threading.Thread(target=_drain, name="bm-helper-drain", daemon=True)
+            reader.start()
+
+            total_bytes = sum(size for _, _, size in files)
+            writer = _ChannelWriter(
+                channel,
+                progress_callback,
+                total_bytes,
+                cancel_check,
+                limit_kbps=self._bandwidth_limit_kbps,
+            )
+
+            try:
+                with tarfile.open(fileobj=writer, mode="w|") as tar:
+                    for local_path, rel_path, size in files:
+                        if cancel_check is not None:
+                            cancel_check()
+                        info = tarfile.TarInfo(name=rel_path)
+                        info.size = size
+                        with open(local_path, "rb") as f:
+                            tar.addfile(info, fileobj=f)
+                writer.flush()
+                channel.shutdown_write()
+            except Exception:
+                # Tear down hard so the reader thread sees EOF and exits.
+                with contextlib.suppress(Exception):
+                    channel.shutdown_write()
+                raise
+
+            exit_status = channel.recv_exit_status()
+            reader.join(timeout=30)
+
+            if reader.is_alive():
+                raise OSError("Helper stdout reader thread did not finish in time")
+            if reader_error:
+                raise OSError(f"Helper stdout reader failed: {reader_error[0]}")
+            if exit_status != 0:
+                stderr_tail = stderr_buffer.decode("utf-8", errors="replace")[:500]
+                raise OSError(f"Server helper failed (exit {exit_status}): {stderr_tail}")
+        finally:
+            channel.close()
+
+        if not stdout_buffer:
+            logger.warning(
+                "Server helper emitted no hash output — sidecar will be empty; "
+                "verify will fall back to sequential sha256sum"
+            )
+            return
+
+        # Persist the captured stdout as ``<basename>.wbserverhashes``
+        # next to the backup directory. ``full_dir`` is e.g.
+        # ``/home/u/backups/My_Backup_FULL_...``; the sidecar lands
+        # in ``/home/u/backups/My_Backup_FULL_....wbserverhashes``.
+        sidecar_path = f"{full_dir}.wbserverhashes"
+        try:
+            self._upload_helper(transport, bytes(stdout_buffer), sidecar_path)
+            logger.info(
+                "Server helper sidecar written to %s (%d bytes, %d lines)",
+                sidecar_path,
+                len(stdout_buffer),
+                stdout_buffer.count(b"\n"),
+            )
+        except Exception as e:
+            # Sidecar write failure is non-fatal: the files are already
+            # extracted and the engine will fall back to the legacy
+            # sequential verify at the next verify call.
+            logger.warning(
+                "Server helper sidecar write to %s failed: %s — verify will fall back to sequential",
+                sidecar_path,
+                e,
+            )
 
     def _tar_fallback(self, files, remote_dir, progress_callback) -> None:
         """Fallback: upload files individually when exec is unavailable."""
@@ -1493,23 +1712,121 @@ class SFTPStorage(StorageBackend):
         finally:
             sftp.close()
 
-    def verify_backup_files(self, backup_name: str) -> list[tuple[str, int, str]]:
-        """Verify backup files via sha256sum executed on the SSH server.
+    # ------------------------------------------------------------------
+    # Verify dispatch (v3.6 PoC C, sidecar-first path).
+    # ------------------------------------------------------------------
 
-        Runs sha256sum in batches via the exec channel, avoiding
-        the need to re-download files for local hashing.
+    def _try_get_server_hashes_sidecar(self, backup_name: str) -> dict[str, str] | None:
+        """Try to download the server-helper-generated hash sidecar.
+
+        When ``_upload_tar_stream_with_helper`` ran, it persisted a
+        file named ``<backup_name>.wbserverhashes`` alongside the
+        backup directory containing one ``<sha256>  <rel_path>`` line
+        per regular file. Pulling it back at verify time replaces
+        the 85-min per-file ``sha256sum`` loop with a single ~25 MB
+        SFTP read.
+
+        Returns:
+            A dict ``relative_path → 64-char hex SHA-256`` when the
+            sidecar exists and is parseable. ``None`` when it is
+            missing, empty, or malformed — the caller then degrades
+            to the legacy sequential path.
+        """
+        sidecar_remote = self._join_remote(f"{backup_name}.wbserverhashes")
+        transport = self._get_transport()
+        is_persistent = transport is self._persistent_transport
+        try:
+            try:
+                sftp = self._get_sftp(transport)
+            except Exception as e:
+                logger.debug("SFTP open failed for sidecar fetch: %s", e)
+                return None
+            try:
+                try:
+                    with sftp.open(sidecar_remote, "rb") as f:
+                        content = f.read()
+                except FileNotFoundError:
+                    return None
+                except Exception as e:
+                    logger.debug("Sidecar %s read failed: %s", sidecar_remote, e)
+                    return None
+            finally:
+                sftp.close()
+        finally:
+            if not is_persistent:
+                transport.close()
+
+        if not content:
+            logger.warning("Sidecar %s is empty — falling back", sidecar_remote)
+            return None
+
+        # Parse ``<64-hex>  <path>\n`` lines. Tolerant of trailing
+        # whitespace and blank lines; rejects anything that does not
+        # match the canonical sha256sum line shape.
+        hashes: dict[str, str] = {}
+        for line in content.decode("utf-8", errors="replace").splitlines():
+            if not line:
+                continue
+            parts = line.split("  ", 1)
+            if len(parts) != 2 or len(parts[0]) != 64:
+                logger.debug("Skipping malformed sidecar line: %r", line[:80])
+                continue
+            hashes[parts[1].strip()] = parts[0].strip()
+        if not hashes:
+            logger.warning("Sidecar %s contained no usable lines", sidecar_remote)
+            return None
+        return hashes
+
+    def verify_backup_files(self, backup_name: str) -> list[tuple[str, int, str]]:
+        """Verify backup files: try server-helper sidecar first, then sha256sum batches.
+
+        v3.6 fast path:
+            ``<backup_name>.wbserverhashes`` was emitted by the server
+            helper during upload, so the hashes are already known —
+            verify is a single ~25 MB download + a dict lookup per
+            file. Subseconds on the user's 231 k-file profile.
+
+        Legacy fallback (3.5.9 behaviour, kept for safety):
+            When the sidecar is missing (older backups, helper
+            unavailable at upload time, BSD-tar server) we replay the
+            sequential ``sha256sum`` loop in batches of 200 over
+            the exec channel. Same algorithm that shipped in v3.1.3.
 
         Args:
             backup_name: Name of the backup directory.
 
         Returns:
-            List of (relative_path, size_bytes, sha256_hex) tuples.
+            List of ``(relative_path, size_bytes, sha256_hex)`` tuples
+            in the order returned by ``list_backup_files``. Files
+            whose hash is unavailable get an empty string — the
+            caller's verify routine falls back to size compare for
+            those entries.
         """
-        # First get file list with sizes
         file_list = self.list_backup_files(backup_name)
         if not file_list:
             return []
 
+        sidecar = self._try_get_server_hashes_sidecar(backup_name)
+        if sidecar is not None:
+            logger.info(
+                "Using server-helper sidecar (%d hashes) for %s — skipping sha256sum loop",
+                len(sidecar),
+                backup_name,
+            )
+            return [(rel, size, sidecar.get(rel, "")) for rel, size in file_list]
+
+        return self._verify_backup_files_sequential(backup_name, file_list)
+
+    def _verify_backup_files_sequential(
+        self, backup_name: str, file_list: list[tuple[str, int]]
+    ) -> list[tuple[str, int, str]]:
+        """Legacy ``sha256sum`` batch loop (v3.1.3 to v3.5.9 behaviour).
+
+        Kept as the safety net when the server-helper path is not
+        available (no helper deployed, sidecar missing, parse
+        failure). Same algorithm that shipped in v3.1.3: one exec
+        channel per batch of 200 paths, output parsed line by line.
+        """
         base = self._join_remote(backup_name)
         transport = self._get_transport()
         is_persistent = transport is self._persistent_transport

@@ -122,6 +122,21 @@ class TestBackupProfile:
         p = BackupProfile()
         assert ".pytest_cache" in p.exclude_patterns
 
+    def test_default_excludes_dot_claude(self):
+        """``.claude/`` is excluded by default.
+
+        Regression: ``.claude/settings.local.json`` is rewritten on
+        every Claude Code permission grant. When that happens during
+        the verify-mirror phase, a fresh re-hash of the source used to
+        diverge from the remote hash and abort every overnight backup
+        with a false-positive ``Hash mismatch`` on this single file.
+        The verify path no longer re-hashes the source (see
+        ``test_verify_uses_manifest_hash.py``), but excluding the
+        directory entirely is the cleaner fix — it has no backup value.
+        """
+        p = BackupProfile()
+        assert ".claude" in p.exclude_patterns
+
     def test_default_backup_type(self):
         p = BackupProfile()
         assert p.backup_type == BackupType.DIFFERENTIAL

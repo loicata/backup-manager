@@ -76,6 +76,16 @@ def with_retry(max_retries: int = 3, base_delay: float = 2.0):
                     # s3transfer ThreadPoolExecutor on cancel) must be caught
                     # — they are unrelated classes with the same name.
                     raise
+                except FileNotFoundError:
+                    # A missing file is a terminal state for backend ops
+                    # (delete_backup of an already-gone artefact, stat of
+                    # a vanished path). Retrying just wastes the backoff
+                    # window and floods the log with WARNING lines that
+                    # drown out the actual root cause — best_effort_cleanup
+                    # explicitly catches FileNotFoundError downstream and
+                    # treats it as success, so propagating immediately is
+                    # both correct and quieter.
+                    raise
                 except Exception as e:
                     last_exception = e
                     if attempt < max_retries:

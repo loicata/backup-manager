@@ -965,7 +965,16 @@ class BackupManagerApp:
         if current in self._no_save_tabs:
             self._save_frame.pack_forget()
         else:
-            self._save_frame.pack(fill="x", side="bottom")
+            # ``before=self.notebook`` is critical: without it the re-pack
+            # appends ``_save_frame`` at the END of the pack list (after
+            # the notebook, which was packed first with ``expand=True``).
+            # The notebook then claims the entire vertical cavity and
+            # ``_save_frame`` is squeezed to zero height — invisible. The
+            # initial pack at construction does pass ``before=`` so the
+            # button is visible on first launch; the bug only surfaces
+            # after the first tab switch back from Run/History/Recovery/
+            # Verify, which is the very common case.
+            self._save_frame.pack(fill="x", side="bottom", before=self.notebook)
 
     # --- Profile management ---
 
@@ -2889,7 +2898,7 @@ class BackupManagerApp:
             about.destroy()
             self._about_frame = None
             self._save_frame.pack(fill="x", side="bottom")
-            self.notebook.pack(fill="both", expand=True)
+            self.notebook.pack(fill="both", expand=True, before=self._save_frame)
 
         def _open_bug_report():
             _close_about()
@@ -3406,7 +3415,7 @@ class BackupManagerApp:
             bug.destroy()
             self._bug_frame = None
             self._save_frame.pack(fill="x", side="bottom")
-            self.notebook.pack(fill="both", expand=True)
+            self.notebook.pack(fill="both", expand=True, before=self._save_frame)
 
         def _send_report():
             description = desc_text.get("1.0", "end-1c").strip()
@@ -3522,7 +3531,7 @@ class BackupManagerApp:
         def _close_ready():
             ready.destroy()
             self._save_frame.pack(fill="x", side="bottom")
-            self.notebook.pack(fill="both", expand=True)
+            self.notebook.pack(fill="both", expand=True, before=self._save_frame)
 
         ttk.Button(
             main,

@@ -246,3 +246,29 @@ class TestWithRetry:
             func()
 
         assert call_count[0] == 1
+
+    def test_file_not_found_error_propagates_without_retry(self):
+        """FileNotFoundError must bypass the retry loop entirely.
+
+        Regression: ``delete_backup`` on an already-cleaned artefact
+        (typical with ``_best_effort_cleanup`` probing both ``X`` and
+        ``X.tar.wbenc`` for unencrypted profiles) used to retry twice
+        through exponential backoff, costing several seconds of stalled
+        cleanup and three noisy WARNING lines per failed backup. The
+        caller already treats FNF as success — propagating immediately
+        is both correct and silent.
+        """
+        call_count = [0]
+
+        @with_retry(max_retries=5, base_delay=10.0)
+        def func():
+            call_count[0] += 1
+            raise FileNotFoundError("gone")
+
+        start = time.monotonic()
+        with pytest.raises(FileNotFoundError, match="gone"):
+            func()
+        elapsed = time.monotonic() - start
+
+        assert call_count[0] == 1, "FileNotFoundError must not retry"
+        assert elapsed < 1.0, "FileNotFoundError must surface immediately"

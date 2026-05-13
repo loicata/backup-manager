@@ -230,6 +230,12 @@ class BackupProfile:
             ".pytest_cache",
             ".git",
             "node_modules",
+            # Claude Code's per-project state directory: ``settings.local.json``
+            # is rewritten on every permission grant, which used to race
+            # the verify-mirror phase and abort every backup that crossed
+            # midnight while Claude was open. The directory has no backup
+            # value (machine-local config) — exclude it by default.
+            ".claude",
         ]
     )
     backup_type: BackupType = BackupType.DIFFERENTIAL

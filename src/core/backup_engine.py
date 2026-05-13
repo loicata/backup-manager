@@ -1183,18 +1183,24 @@ class BackupEngine:
     ) -> None:
         """Verify remote files using checksums (SHA-256 or MD5).
 
-        For files with checksums: compare against local hash.
-        For files without checksums: fall back to size comparison.
+        Compares the remote checksum to the hash already captured in the
+        integrity manifest. The manifest is the canonical reference of
+        "what was backed up"; re-hashing ``f.source_path`` here would
+        race with any writer that touches the live source between the
+        manifest phase and this verify phase (a long-running mirror
+        upload of a volatile file like ``.claude/settings.local.json``
+        is enough to fail every backup).
+
+        For files without remote checksums: fall back to size comparison.
 
         Args:
-            ctx: Pipeline context with files.
+            ctx: Pipeline context with files and integrity_manifest.
             remote_files: List of (relative_path, size, checksum) tuples.
 
         Raises:
             RuntimeError: If any file fails verification.
         """
-        from src.core.hashing import compute_sha256
-
+        manifest_files = ctx.integrity_manifest.get("files", {})
         remote_map = {path: (size, checksum) for path, size, checksum in remote_files}
 
         errors = []
@@ -1212,20 +1218,35 @@ class BackupEngine:
             remote_size, remote_checksum = remote_map[f.relative_path]
 
             if remote_checksum:
+                manifest_entry = manifest_files.get(f.relative_path)
+                manifest_hash = manifest_entry.get("hash") if manifest_entry else None
                 # Hash-based verification
                 if len(remote_checksum) == 64:
-                    # SHA-256 (SFTP) — compare directly
-                    local_hash = compute_sha256(f.source_path)
-                    if local_hash != remote_checksum:
+                    # SHA-256 (SFTP) — compare against manifest hash
+                    if manifest_hash and manifest_hash != remote_checksum:
                         errors.append(
                             f"Hash mismatch: {f.relative_path} "
-                            f"(local={local_hash[:16]}... "
+                            f"(manifest={manifest_hash[:16]}... "
                             f"remote={remote_checksum[:16]}...)"
                         )
                         continue
+                    if not manifest_hash:
+                        # Manifest entry missing or hashless — fall back
+                        # to size to avoid blindly accepting the file.
+                        if remote_size != f.size:
+                            errors.append(
+                                f"Size mismatch: {f.relative_path} "
+                                f"(expected {f.size}, got {remote_size})"
+                            )
+                            continue
+                        size_verified += 1
+                        continue
                     hash_verified += 1
                 elif len(remote_checksum) == 32:
-                    # MD5 (S3 ETag) — compute local MD5 and compare
+                    # MD5 (S3 ETag) — manifest only stores SHA-256, so
+                    # we still need a one-shot MD5 of the source here.
+                    # MD5-only mirrors are rare (S3 simple uploads < 5GB);
+                    # the race-condition class of bug is much smaller.
                     local_md5 = self._compute_md5(f.source_path)
                     if local_md5 != remote_checksum:
                         errors.append(
@@ -1713,9 +1734,16 @@ class BackupEngine:
         remote_files: list[tuple[str, int, str]],
         mirror_name: str,
     ) -> None:
-        """Verify unencrypted mirror files using checksums."""
-        from src.core.hashing import compute_sha256
+        """Verify unencrypted mirror files using checksums.
 
+        Compares the remote checksum to the hash already captured in the
+        integrity manifest, NOT a fresh re-hash of ``f.source_path``.
+        See ``_verify_remote_checksums`` for the full rationale: live
+        source files (editor autosaves, ``.claude/settings.local.json``)
+        would otherwise race with the verify phase and produce
+        guaranteed false positives.
+        """
+        manifest_files = ctx.integrity_manifest.get("files", {})
         remote_map = {path: (size, checksum) for path, size, checksum in remote_files}
         errors = []
         hash_verified = 0
@@ -1731,9 +1759,16 @@ class BackupEngine:
             remote_size, remote_checksum = remote_map[expected_path]
 
             if remote_checksum and len(remote_checksum) == 64:
-                local_hash = compute_sha256(f.source_path)
-                if local_hash != remote_checksum:
+                manifest_entry = manifest_files.get(expected_path)
+                manifest_hash = manifest_entry.get("hash") if manifest_entry else None
+                if manifest_hash and manifest_hash != remote_checksum:
                     errors.append(f"Hash mismatch on {mirror_name}: " f"{expected_path}")
+                    continue
+                if not manifest_hash:
+                    if remote_size != f.size:
+                        errors.append(f"Size mismatch on {mirror_name}: " f"{f.relative_path}")
+                        continue
+                    size_verified += 1
                     continue
                 hash_verified += 1
             elif remote_checksum and len(remote_checksum) == 32:

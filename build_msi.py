@@ -200,33 +200,58 @@ def _build_wxs(version: str) -> str:
       exclusion taking effect, causing the same disappearance bug.
     -->
     <!--
-      ``-WindowStyle Hidden`` keeps the PowerShell host invisible on
-      both branches. Without it the install AND uninstall flash a
-      visible console window for ~200 ms during the deferred action,
-      which the user sees as a brief black rectangle right before
-      "Files installed" / right before file removal during uninstall —
-      looks like the installer is about to crash. ``Hidden`` tells the
-      PowerShell host to start with the window already off-screen so
-      no flicker reaches the desktop.
+      ``WixQuietExec64`` from WixUtilExtension launches the process via
+      ``CreateProcessEx`` with ``CREATE_NO_WINDOW`` set, so no conhost
+      is created and no window can flash on the desktop.
+
+      The earlier ``-WindowStyle Hidden`` flag on a plain ExeCommand
+      CustomAction was not enough on Windows 10/11: the console host
+      (conhost.exe) is spawned by the OS BEFORE PowerShell has a chance
+      to process ``-WindowStyle Hidden`` and hide it, producing a
+      ~150 ms black rectangle that users perceived as the installer
+      crashing.
+
+      Deferred CustomActions cannot read installer properties directly,
+      so we use the canonical pattern: an immediate "setter" CA
+      populates ``WixQuietExec64CmdLine`` with the resolved command
+      string (incl. the ``[INSTALLFOLDER]`` resolution), then the
+      deferred CA reads that property and runs the command silently.
+      ``Return="ignore"`` on the executor keeps a disabled / blocked
+      Defender from breaking the install or uninstall.
     -->
+    <CustomAction Id="SetAddDefenderCmd"
+                  Property="WixQuietExec64CmdLine"
+                  Value="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;Add-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
+                  Execute="immediate" />
+
     <CustomAction Id="AddDefenderExclusion"
-                  Directory="INSTALLFOLDER"
-                  ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command &quot;Add-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />
 
+    <CustomAction Id="SetRemoveDefenderCmd"
+                  Property="WixQuietExec64CmdLine"
+                  Value="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;Remove-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
+                  Execute="immediate" />
+
     <CustomAction Id="RemoveDefenderExclusion"
-                  Directory="INSTALLFOLDER"
-                  ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command &quot;Remove-MpPreference -ExclusionPath '[INSTALLFOLDER]' -ErrorAction SilentlyContinue&quot;"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />
 
     <InstallExecuteSequence>
+      <!-- Setter CAs must run BEFORE their paired deferred CA so the
+           property value is in the execution script when the deferred
+           CA fires. -->
+      <Custom Action="SetAddDefenderCmd" Before="AddDefenderExclusion">NOT Installed AND NOT REMOVE</Custom>
       <!-- Add the exclusion before files land, so the install path is
            already trusted when BackupManager.exe is created. -->
       <Custom Action="AddDefenderExclusion" Before="InstallFiles">NOT Installed AND NOT REMOVE</Custom>
+      <Custom Action="SetRemoveDefenderCmd" Before="RemoveDefenderExclusion">REMOVE="ALL"</Custom>
       <!-- Symmetric cleanup on full uninstall only (not repair). -->
       <Custom Action="RemoveDefenderExclusion" Before="RemoveFiles">REMOVE="ALL"</Custom>
     </InstallExecuteSequence>
@@ -306,6 +331,8 @@ def build():
     run(
         [
             candle,
+            "-ext",
+            "WixUtilExtension",
             str(main_wxs),
             "-o",
             str(product_obj),
@@ -332,6 +359,8 @@ def build():
             light,
             "-ext",
             "WixUIExtension",
+            "-ext",
+            "WixUtilExtension",
             str(product_obj),
             str(heat_obj),
             "-o",

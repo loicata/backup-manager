@@ -5,6 +5,14 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.10] - 2026-05-13
+
+### Changed
+- **Remote ``verify_backup_files`` parallelised across N=4 SSH channels.** The server-side ``sha256sum`` is the single largest phase of a backup on commodity hardware: a Pi 4 hashes ~45 files/s, so 231 908 files took ~85 min of pure wall-clock time during the verify phase, dwarfing the 33-min upload. The previous implementation dispatched batches of 200 files sequentially over a single SSH channel — the server's other 3 cores sat idle while one core ran ``sha256sum``. The refactor in ``SFTPStorage.verify_backup_files`` now feeds the batches to a ``ThreadPoolExecutor`` of 4 workers; each worker calls ``transport.open_session()`` (paramiko's channel multiplex is thread-safe) and the server's OS scheduler runs 4 concurrent ``sha256sum`` processes. Expected wall-clock reduction: ~85 min → ~22 min on a 4-core Pi (4×), ~17 min on the upcoming 5-core targets. The 4-worker cap stays well below OpenSSH's default ``MaxSessions=10`` per-connection limit. Failure semantics unchanged: any worker raising or returning a non-zero exit code falls the entire verify back to size-only, identical to the sequential path.
+
+### Tests
+- +12 tests in ``tests/test_sftp_verify_parallel.py`` cover three contracts: **concurrency** (two batches running 0.2 s each complete in <0.35 s — proves parallel execution; ``test_at_least_two_channels_overlap_in_time`` checks the timestamp windows directly), **correctness** (the aggregated hash map matches the input list regardless of worker completion order; empty file list returns empty; result ordering follows input ordering), and **failure semantics** (non-zero exit triggers size-only fallback). A 5-row parametrised test pins the batch count at every multiple/non-multiple of the batch size so a future refactor of the slicing can't silently double SSH channel count.
+
 ## [3.5.9] - 2026-05-13
 
 ### Changed

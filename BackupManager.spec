@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = ['paramiko', 'paramiko.transport', 'paramiko.sftp_client', 'paramiko.ed25519key', 'paramiko.ecdsakey', 'paramiko.rsakey', 'paramiko.hostkeys', 'paramiko.auth_handler', 'paramiko.channel', 'boto3', 'botocore', 'botocore.config', 'botocore.exceptions', 'pyotp', 'pystray', 'pystray._win32', 'PIL', 'PIL.Image', 'PIL.ImageDraw', 'PIL.ImageFont', 'cryptography', 'cryptography.hazmat', 'cryptography.hazmat.primitives', 'cryptography.hazmat.primitives.ciphers', 'cryptography.hazmat.primitives.ciphers.aead']
+hiddenimports = ['paramiko', 'paramiko.transport', 'paramiko.sftp_client', 'paramiko.ed25519key', 'paramiko.ecdsakey', 'paramiko.rsakey', 'paramiko.hostkeys', 'paramiko.auth_handler', 'paramiko.channel', 'boto3', 'botocore', 'botocore.config', 'botocore.exceptions', 'pystray', 'pystray._win32', 'PIL', 'PIL.Image', 'PIL.ImageDraw', 'PIL.ImageFont', 'cryptography', 'cryptography.hazmat', 'cryptography.hazmat.primitives', 'cryptography.hazmat.primitives.ciphers', 'cryptography.hazmat.primitives.ciphers.aead']
 hiddenimports += collect_submodules('paramiko')
 hiddenimports += collect_submodules('pystray')
 hiddenimports += collect_submodules('botocore')

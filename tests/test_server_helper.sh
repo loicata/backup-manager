@@ -203,6 +203,65 @@ assert_eq "1 MB file extracted with correct size" "1048576" "$big_size"
 stderr_size=$(wc -c < "$TMP/helper.stderr")
 assert_eq "helper stderr is empty" "0" "$stderr_size"
 
+# 11. POSIX compliance check (regression guard for the 2026-05-14 bug).
+#
+# tar --to-command invokes /bin/sh for the child command, not bash.
+# On Debian/Ubuntu/Raspberry Pi OS /bin/sh is dash, which rejects the
+# bash-only ``[[ ... ]]`` test. Using ``[[`` inside --to-command made
+# every file extraction silently no-op while sha256sum still emitted
+# correct hashes — sidecar full, backup dir empty. The bug went
+# undetected for an entire release cycle because Git Bash on Windows
+# (where this test runs locally) symlinks /bin/sh to bash, so the
+# corruption never surfaced.
+#
+# Static check: ensure no ``[[`` appears in the --to-command body of
+# the helper. We scope the search to the heredoc-style ``--to-command='
+# ... '`` block to avoid false positives in comments / docstrings.
+to_cmd_body=$(awk "/--to-command='/,/^'/" "$HELPER" | grep -v "^#")
+if echo "$to_cmd_body" | grep -q '\[\['; then
+    FAIL=$((FAIL + 1))
+    echo "  FAIL  POSIX violation: [[ ]] used inside tar --to-command body" >&2
+    echo "        That body runs under /bin/sh (dash on Debian); use [ ]." >&2
+    echo "$to_cmd_body" | grep -n '\[\[' >&2
+else
+    PASS=$((PASS + 1))
+    echo "  PASS  no [[ inside tar --to-command body (POSIX-safe)"
+fi
+
+# 12. Cross-shell extraction test: re-run the helper via plain dash
+# when available. The helper's outer wrapper uses bashisms
+# (``set -o pipefail``) that dash ignores with a warning — that is
+# fine in production because the helper's shebang ``#!/bin/bash`` is
+# honoured. What we check here is the integrity of extraction itself:
+# the ``tar --to-command`` body MUST work under dash because that is
+# what /bin/sh evaluates it as on Debian/Ubuntu/Raspberry Pi OS, and
+# any [[ ]] or [ -v ] regression there silently empties the backup
+# (see the 2026-05-14 incident).
+#
+# Hash integrity matters more than the extracted tree alone: a helper
+# that creates empty files but emits the correct hashes would still
+# defeat the verify, so we also diff the hashes against the bash run.
+if command -v dash >/dev/null 2>&1; then
+    DASH_EXTRACTED="$TMP/extracted_dash"
+    DASH_HASHES="$TMP/hashes_dash.txt"
+    (cd "$FIXTURE" && tar cf - .) | dash "$HELPER" "$DASH_EXTRACTED" > "$DASH_HASHES" 2>/dev/null
+    dash_files=$(find "$DASH_EXTRACTED" -type f 2>/dev/null | wc -l)
+    expected_files=$(find "$FIXTURE" -type f | wc -l)
+    assert_eq "helper extracts under dash" "$expected_files" "$dash_files"
+    # Same hash output regardless of which shell ran the outer wrapper.
+    sort "$DASH_HASHES" > "$TMP/dash_sorted.txt"
+    if diff -q "$REFERENCE" "$TMP/dash_sorted.txt" >/dev/null 2>&1; then
+        PASS=$((PASS + 1))
+        echo "  PASS  dash run produces same hashes as reference"
+    else
+        FAIL=$((FAIL + 1))
+        echo "  FAIL  dash run hashes diverge from reference" >&2
+        diff "$REFERENCE" "$TMP/dash_sorted.txt" >&2 | head -10
+    fi
+else
+    echo "  SKIP  dash not installed; skipping real-POSIX cross-shell test"
+fi
+
 # -------------------------------------------------------------------
 # Summary
 # -------------------------------------------------------------------

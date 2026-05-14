@@ -72,11 +72,20 @@ cd "$DEST"
 # The single-quoted command body is passed verbatim to a child shell
 # spawned by tar — the env vars TAR_FILETYPE and TAR_REALNAME are set
 # by tar inside that shell.
+#
+# CRITICAL: tar --to-command invokes /bin/sh (NOT bash) for the child
+# command. On Debian/Ubuntu/Raspberry Pi OS /bin/sh is dash, which
+# does NOT understand the bash-only ``[[ ... ]]`` test syntax. Using
+# ``[[`` here would fail silently at runtime — the test would crash,
+# mkdir -p would never run, tee would fail to open the file, BUT
+# sha256sum would still consume stdin and emit a (valid!) hash. The
+# result: a sidecar full of correct hashes but an empty backup dir.
+# Stick to POSIX ``[ ... ]`` here, no exceptions.
 tar xf - --to-command='
     case "$TAR_FILETYPE" in
         f)
             parent=$(dirname "$TAR_REALNAME")
-            if [[ "$parent" != "." ]]; then
+            if [ "$parent" != "." ]; then
                 mkdir -p "$parent"
             fi
             tee "$TAR_REALNAME" | sha256sum | awk -v p="$TAR_REALNAME" "{print \$1 \"  \" p}"

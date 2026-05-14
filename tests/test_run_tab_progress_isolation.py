@@ -105,3 +105,53 @@ class TestRunTabIgnoresProgressBetweenBackups:
 
         tab._on_progress(current=10, total=100, filename="x", phase="verification")
         assert tab.after.call_count == 0
+
+
+class TestRunTabIgnoresLogBetweenBackups:
+    """LOG events from the Verify tab must not append rows to the
+    Run-tab Message panel either.
+
+    Same root cause as the PROGRESS bug above: both tabs share the
+    EventBus, so the manual ``Verify all backups`` action fired LOG
+    events that ended up in this tab's Treeview (the user saw
+    ``Verification OK: 262646/262646 files verified`` rows show up
+    between backups).
+    """
+
+    def _make_log_stub(self) -> RunTab:
+        tab = RunTab.__new__(RunTab)
+        tab._backup_active = False
+        tab._current_phase = ""
+        tab.after = MagicMock(name="after")
+        tab.start_btn = MagicMock()
+        tab.cancel_btn = MagicMock()
+        tab.status_label = MagicMock()
+        tab.progress_bar = MagicMock()
+        tab.percent_label = MagicMock()
+        return tab
+
+    def test_log_dropped_when_no_backup_is_active(self) -> None:
+        tab = self._make_log_stub()
+        tab._on_log(
+            message="Verification OK: 262646/262646 files verified",
+            level="info",
+            phase="verifier",
+        )
+        assert tab.after.call_count == 0
+
+    def test_log_accepted_while_backup_is_running(self) -> None:
+        tab = self._make_log_stub()
+        tab._update_status("running")
+        tab._on_log(message="Building integrity manifest...", level="info", phase="")
+        # One append_log dispatch.
+        assert tab.after.call_count == 1
+        args = tab.after.call_args.args
+        assert args[0] == 0
+        assert args[1] == tab._append_log
+
+    def test_log_dropped_after_terminal_status(self) -> None:
+        tab = self._make_log_stub()
+        tab._update_status("running")
+        tab._update_status("success")
+        tab._on_log(message="Late event", level="info", phase="")
+        assert tab.after.call_count == 0

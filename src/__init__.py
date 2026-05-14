@@ -1,5 +1,5 @@
 """Backup Manager v3 — Backup management system."""
 
-__version__ = "3.6.5"
+__version__ = "3.6.6"
 
 __author__ = "Loic Ader loicata.com"

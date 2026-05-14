@@ -624,7 +624,16 @@ class RunTab(ttk.Frame):
            phase pattern (``"Backup written: ..."``, ``"Manifest
            created: ..."``) inherit the last known phase so they
            stay aligned with their announcing parent.
+
+        Cross-tab isolation: this tab shares LOG with the Verify tab
+        (and any future emitter). A manual "Verify all backups" click
+        in the Verify tab would otherwise drop "Verification OK: N/N"
+        rows into THIS tab's Message panel between runs. Drop log
+        events when no backup is currently active here, matching the
+        same gate the PROGRESS subscriber uses.
         """
+        if not self._backup_active:
+            return
         if not phase:
             if _is_terminal_log_message(message):
                 # Backup is finished: no phase is active any more. Reset

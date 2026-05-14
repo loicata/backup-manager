@@ -61,10 +61,13 @@ $bmEntry = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uni
 $installedVersion = if ($bmEntry) { $bmEntry.DisplayVersion } else { "(not installed)" }
 $allChecks += Write-Check ($null -ne $bmEntry) "Backup Manager installed" $installedVersion
 
-# Check 2: BM not currently running (scheduler would race the test run).
+# Check 2: BM process state -- INFO only. A manual backup needs BM to be
+# open (UI starts the run). A scheduled run can fire without BM in the
+# foreground but the BackupManager.exe process is always present then.
+# This check never fails; it just tells you which mode you are in.
 $bmProc = Get-Process BackupManager -ErrorAction SilentlyContinue
-$allChecks += Write-Check ($null -eq $bmProc) "BackupManager.exe not running" `
-    $(if ($bmProc) { "PID $($bmProc.Id) -- close BM first" } else { "" })
+$bmState = if ($bmProc) { "running (PID $($bmProc.Id)) -- manual run via UI possible" } else { "not running -- launch BM if you want a manual run" }
+$allChecks += Write-Check $true "BackupManager.exe state" $bmState
 
 # Check 3: venv python + deps importable (only matters if you want to
 # rebuild from this terminal, but cheap to verify).

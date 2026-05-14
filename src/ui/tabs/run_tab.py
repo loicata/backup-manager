@@ -86,6 +86,12 @@ class RunTab(ttk.Frame):
         # can be replaced with the canonical configured view once the
         # backup ends (STATUS = success / error / idle).
         self._profile_info_baseline: tuple[str, str, str, str] | None = None
+        # True only between STATUS=running and STATUS=success/error/idle.
+        # Used to filter out PROGRESS events emitted by an independent
+        # action (e.g. the user clicks "Verify all backups" in the
+        # Verify tab) so this tab's progress bar does not move while no
+        # backup is actually running here.
+        self._backup_active: bool = False
         self._build_ui()
         self._subscribe_events()
 
@@ -505,7 +511,16 @@ class RunTab(ttk.Frame):
             self._phase_weights = dict(weights)
 
     def _on_progress(self, current=0, total=0, filename="", phase="", **kw):
-        """Schedule progress update on the main thread."""
+        """Schedule progress update on the main thread.
+
+        Ignores PROGRESS events while no backup is active on this tab.
+        The same EventBus is shared with the Verify tab, so a manual
+        verify launched from there would otherwise push the bar back
+        to a "verifying..." view even when the user is just looking
+        at this tab between runs.
+        """
+        if not self._backup_active:
+            return
         self.after(0, self._update_progress, current, total, filename, phase)
 
     def _update_progress(self, current, total, filename, phase):
@@ -808,6 +823,12 @@ class RunTab(ttk.Frame):
         self.after(0, self._update_status, state)
 
     def _update_status(self, state):
+        # Track whether a backup is currently active here so PROGRESS
+        # events from other tabs (e.g. Verify) are filtered out.
+        if state == "running":
+            self._backup_active = True
+        elif state in ("success", "error", "idle"):
+            self._backup_active = False
         with contextlib.suppress(tk.TclError):
             if state == "running":
                 self.start_btn.config(state="disabled")

@@ -1,0 +1,107 @@
+"""Regression guard for the 2026-05-14 v3.6.5 Run/Verify cross-talk bug.
+
+The Run tab and the Verify tab share the same EventBus. Until 3.6.5
+the Run tab's PROGRESS subscriber updated its own progress bar on
+every event regardless of source. Clicking "Verify all backups" in
+the Verify tab pushed PROGRESS events on the same bus, which the
+Run tab interpreted as "a backup is in flight" and overwrote its
+own header (which had been showing "Last backup: Success — 2h ago")
+with the manifest path the verifier was currently walking.
+
+v3.6.5 adds a ``_backup_active`` flag on RunTab. It flips True only
+on STATUS=running (emitted by BackupEngine) and back to False on
+STATUS=success / error / idle. PROGRESS events arriving while the
+flag is False are dropped before any widget update.
+
+These tests pin the contract without touching Tk: RunTab is built
+via ``__new__`` and the methods are exercised directly.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+from src.ui.tabs.run_tab import RunTab
+
+
+def _make_tab_stub() -> RunTab:
+    """Build a RunTab without touching Tk.
+
+    Hand-attach the handful of attributes the methods under test
+    read so we can call them without a Tk root.
+    """
+    tab = RunTab.__new__(RunTab)
+    tab._backup_active = False
+    tab.after = MagicMock(name="after")
+    tab.start_btn = MagicMock(name="start_btn")
+    tab.cancel_btn = MagicMock(name="cancel_btn")
+    tab.status_label = MagicMock(name="status_label")
+    tab.progress_bar = MagicMock(name="progress_bar")
+    tab.percent_label = MagicMock(name="percent_label")
+    return tab
+
+
+class TestRunTabIgnoresProgressBetweenBackups:
+    """PROGRESS events from the Verify tab must not move the Run-tab bar."""
+
+    def test_progress_ignored_when_no_backup_is_active(self) -> None:
+        """The default state (just opened the app) is "no backup active"."""
+        tab = _make_tab_stub()
+        assert tab._backup_active is False
+
+        # A Verify-tab launched verify emits PROGRESS with phase="verification".
+        tab._on_progress(
+            current=37,
+            total=100,
+            filename="metadata.json",
+            phase="verification",
+        )
+        # No widget update should be scheduled.
+        assert tab.after.call_count == 0
+
+    def test_progress_accepted_while_backup_is_running(self) -> None:
+        """During an actual backup, PROGRESS must reach the widgets."""
+        tab = _make_tab_stub()
+        tab._update_status("running")
+        assert tab._backup_active is True
+
+        tab._on_progress(
+            current=42,
+            total=100,
+            filename="manifest.json",
+            phase="verification",
+        )
+        # One update_progress dispatch.
+        assert tab.after.call_count == 1
+        args = tab.after.call_args.args
+        assert args[0] == 0
+        assert args[1] == tab._update_progress
+        assert args[2:] == (42, 100, "manifest.json", "verification")
+
+    def test_progress_dropped_again_after_success(self) -> None:
+        """STATUS=success closes the activity window."""
+        tab = _make_tab_stub()
+        tab._update_status("running")
+        tab._update_status("success")
+        assert tab._backup_active is False
+
+        tab._on_progress(current=10, total=100, filename="x", phase="verification")
+        assert tab.after.call_count == 0
+
+    def test_progress_dropped_again_after_error(self) -> None:
+        tab = _make_tab_stub()
+        tab._update_status("running")
+        tab._update_status("error")
+        assert tab._backup_active is False
+
+        tab._on_progress(current=10, total=100, filename="x", phase="verification")
+        assert tab.after.call_count == 0
+
+    def test_progress_dropped_again_after_idle(self) -> None:
+        tab = _make_tab_stub()
+        tab._update_status("running")
+        tab._update_status("idle")
+        assert tab._backup_active is False
+
+        tab._on_progress(current=10, total=100, filename="x", phase="verification")
+        assert tab.after.call_count == 0

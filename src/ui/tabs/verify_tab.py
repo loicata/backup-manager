@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from src.core.events import PROGRESS, EventBus
+from src.ui._status_text import truncate_status_text
 from src.ui.theme import Colors, Fonts, Spacing
 
 
@@ -159,7 +160,12 @@ class VerifyTab(ttk.Frame):
             self.progress_bar["value"] = pct
             self.percent_label.config(text=f"{pct}%")
             if filename:
-                self.status_label.config(text=f"Verifying {filename}")
+                # Truncate via the shared helper so the percent label
+                # on the right of the same row stays visible even on
+                # 200-character-deep Outlook export paths. The truncation
+                # keeps the END of the path (basename + a few parents)
+                # which matches what the Run tab does.
+                self.status_label.config(text=truncate_status_text("Verifying", filename))
 
     def set_running(self, running: bool) -> None:
         """Update button states based on running status.

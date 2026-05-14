@@ -110,9 +110,26 @@ class TestApplyProgressEvent:
         tab.percent_label.config.assert_called_with(text="99%")
 
     def test_status_label_updated_with_filename(self) -> None:
+        """The filename is routed through ``truncate_status_text``,
+        not pasted raw -- otherwise a 200-character path would shove
+        the percent counter off-screen."""
         tab = _make_tab_stub()
         tab._apply_progress_event(current=3, total=10, filename="dir/sub/file.bin")
-        tab.status_label.config.assert_called_with(text="Verifying dir/sub/file.bin")
+        # Short path passes through with the "Verifying: " prefix
+        # produced by ``truncate_status_text`` (shared with the Run tab).
+        tab.status_label.config.assert_called_with(text="Verifying: dir/sub/file.bin")
+
+    def test_status_label_truncates_very_long_filenames(self) -> None:
+        """End of the path stays visible, beginning replaced by ``...``."""
+        tab = _make_tab_stub()
+        long_path = "Loic Perso/" + "deep/" * 30 + "mail_20260502.eml"
+        tab._apply_progress_event(current=3, total=10, filename=long_path)
+        # The actual text passed to status_label.config:
+        call_kwargs = tab.status_label.config.call_args.kwargs
+        text = call_kwargs["text"]
+        assert len(text) <= 80
+        assert text.startswith("Verifying: ...")
+        assert text.endswith("mail_20260502.eml")
 
     def test_empty_filename_does_not_clear_status(self) -> None:
         """An empty filename mid-loop (rare but possible) must not blank

@@ -47,6 +47,47 @@ function Write-Check {
     return $ok
 }
 
+function Test-Backend {
+    # Run the reachability checks for one storage block. Used for the
+    # primary destination (profile.storage) and for each entry of
+    # profile.mirror_destinations. Returns an array of bool results so
+    # the caller can keep a flat OK/FAIL tally across all backends.
+    param($storage, [string]$prefix)
+    $results = @()
+    switch ($storage.storage_type) {
+        "sftp" {
+            $host_ = $storage.sftp_host
+            $port  = $storage.sftp_port
+            $tnc = Test-NetConnection -ComputerName $host_ -Port $port -WarningAction SilentlyContinue
+            $results += Write-Check $tnc.TcpTestSucceeded "$prefix SFTP host reachable" "${host_}:${port}"
+            $keyPath = $storage.sftp_key_path
+            if ($keyPath) {
+                $results += Write-Check (Test-Path $keyPath) "$prefix SSH key file present" $keyPath
+            }
+        }
+        "local" {
+            $dest = $storage.destination_path
+            if ($dest) {
+                $results += Write-Check (Test-Path $dest) "$prefix local destination reachable" $dest
+            } else {
+                $results += Write-Check $false "$prefix local destination set" "destination_path empty"
+            }
+        }
+        "s3" {
+            $bucket = $storage.s3_bucket
+            $results += Write-Check ([bool]$bucket) "$prefix S3 bucket configured" $bucket
+        }
+        "network" {
+            $dest = $storage.destination_path
+            $results += Write-Check ([bool]$dest) "$prefix network destination set" $dest
+        }
+        default {
+            $results += Write-Check $true "$prefix backend $($storage.storage_type) -- skip probe"
+        }
+    }
+    return $results
+}
+
 # =====================================================================
 # Phase 1: PRE-FLIGHT
 # =====================================================================
@@ -100,37 +141,23 @@ $profOk = ($null -ne $profileObj)
 $profDetail = if ($profOk) { "$ProfileName ($($profileObj.storage.storage_type))" } else { "no match" }
 $allChecks += Write-Check $profOk "profile resolved" $profDetail
 
-# Check 6: backend-specific reachability.
+# Check 6: backend-specific reachability for primary + every mirror.
+# We track whether ANY backend (primary or mirror) is SFTP so the
+# post-run section can decide whether to show PoC C signals -- they
+# fire whenever an SFTP write path is exercised, regardless of which
+# slot it lives in.
+$anySftp = $false
 if ($profileObj) {
-    switch ($profileObj.storage.storage_type) {
-        "sftp" {
-            $host_ = $profileObj.storage.sftp_host
-            $port  = $profileObj.storage.sftp_port
-            $tnc = Test-NetConnection -ComputerName $host_ -Port $port -WarningAction SilentlyContinue
-            $allChecks += Write-Check $tnc.TcpTestSucceeded "SFTP host reachable" "${host_}:${port}"
-            $keyPath = $profileObj.storage.sftp_key_path
-            if ($keyPath) {
-                $allChecks += Write-Check (Test-Path $keyPath) "SSH key file present" $keyPath
-            }
-        }
-        "local" {
-            $dest = $profileObj.storage.destination_path
-            if ($dest) {
-                $allChecks += Write-Check (Test-Path $dest) "local destination reachable" $dest
-            }
-        }
-        "s3" {
-            $bucket = $profileObj.storage.s3_bucket
-            $allChecks += Write-Check ([bool]$bucket) "S3 bucket configured" $bucket
-        }
-        "network" {
-            $dest = $profileObj.storage.destination_path
-            $allChecks += Write-Check ([bool]$dest) "network destination set" $dest
-        }
-        default {
-            $allChecks += Write-Check $true "backend $($profileObj.storage.storage_type) -- skip backend probe"
-        }
+    $allChecks += Test-Backend $profileObj.storage "primary"
+    if ($profileObj.storage.storage_type -eq "sftp") { $anySftp = $true }
+
+    $mirrorIdx = 0
+    foreach ($mirror in $profileObj.mirror_destinations) {
+        $mirrorIdx++
+        $allChecks += Test-Backend $mirror "mirror $mirrorIdx"
+        if ($mirror.storage_type -eq "sftp") { $anySftp = $true }
     }
+
     # Source paths exist?
     foreach ($src in $profileObj.source_paths) {
         $allChecks += Write-Check (Test-Path $src) "source path reachable" $src
@@ -193,7 +220,13 @@ function Close-Phase([DateTime]$end) {
     }
 }
 
-$phaseRe = 'src\.core\.backup_engine: (Collecting files|Filtering changed files|Building integrity manifest|Uploading to Storage|Saving manifest|Verifying remote backup|Verifying backup|Writing commit marker|Uploading commit marker|Rotating old backups|Updating manifest)'
+# The mirror phases use dynamic strings ("Uploading to mirrors...",
+# "Verifying Mirror 1...", "Verifying Mirror 1 (encrypted)...",
+# "Verifying Mirror 1 (hash)...", "Writing commit marker for
+# Mirror 1...", etc). The regex captures the leading verb pattern
+# plus enough of the suffix that two distinct phases on the same
+# verb still close out cleanly when the next phase fires.
+$phaseRe = 'src\.core\.backup_engine: (Collecting files|Filtering changed files|Building integrity manifest|Uploading to Storage[^.]*|Copying to Storage[^.]*|Saving manifest|Verifying remote backup|Verifying backup [^.]*|Verifying encrypted backup|Verifying Mirror [^.]*|Writing commit marker[^.]*|Uploading commit marker[^.]*|Uploading to mirrors|Rotating old backups|Updating manifest)'
 
 Get-Content -Path $LogPath -Wait -Tail 0 | ForEach-Object {
     $line = $_
@@ -274,9 +307,9 @@ Get-Content -Path $LogPath -Wait -Tail 0 | ForEach-Object {
             }
         }
 
-        if ($profileObj.storage.storage_type -eq "sftp") {
+        if ($anySftp) {
             Write-Host ""
-            Write-Host "PoC C signals:"
+            Write-Host "PoC C signals (any SFTP backend, primary or mirror):"
             foreach ($k in @("helperDeployed","sidecarWritten","sidecarUsed")) {
                 $color = if ($state.pocC[$k]) { "Green" } else { "Yellow" }
                 Write-Host ("  {0,-18} {1}" -f $k, $state.pocC[$k]) -ForegroundColor $color

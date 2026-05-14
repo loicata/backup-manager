@@ -4,7 +4,7 @@ import contextlib
 import tkinter as tk
 from tkinter import ttk
 
-from src.core.events import EventBus
+from src.core.events import PROGRESS, EventBus
 from src.ui.theme import Colors, Fonts, Spacing
 
 
@@ -21,6 +21,14 @@ class VerifyTab(ttk.Frame):
         self._events = events or EventBus()
         self._running = False
         self._build_ui()
+        # Subscribe to PROGRESS so the bar advances DURING a backup's
+        # re-hash phase, not only when ``verify_iter`` yields between
+        # backups. Without this the bar sat at 0 % for the full ~10 min
+        # of a 260 k-file local re-hash and jumped to 100 % at the end.
+        # We filter by ``phase == "verification"`` so unrelated phases
+        # (e.g. a Run-tab backup happening in parallel) cannot move
+        # this tab's bar.
+        self._events.subscribe(PROGRESS, self._on_progress_event)
 
     def _build_ui(self) -> None:
         # Header
@@ -114,6 +122,44 @@ class VerifyTab(ttk.Frame):
 
         self.percent_label = ttk.Label(status_row, text="0%", foreground=Colors.TEXT_SECONDARY)
         self.percent_label.pack(side="right")
+
+    def _on_progress_event(self, current=0, total=0, filename="", phase="", **_kw) -> None:
+        """Receive throttled PROGRESS events from the verifier.
+
+        Bridges the per-file emits produced by ``verify_backup`` (the
+        underlying phase that re-hashes the destination) back to the
+        Verify tab. Only events tagged ``phase == "verification"`` are
+        handled here so a backup running on the Run tab in parallel
+        cannot move this bar.
+
+        The update itself is dispatched onto the Tk main thread via
+        ``self.after(0, ...)`` because PROGRESS is emitted from the
+        IntegrityVerifier's worker thread.
+
+        Args:
+            current: Files re-hashed so far in the current backup.
+            total: Total files in the manifest being verified.
+            filename: Relative path currently being hashed.
+            phase: Phase identifier; only "verification" is honoured.
+            _kw: Forward-compat for additional fields.
+        """
+        if phase != "verification":
+            return
+        if total <= 0 or self._running is False:
+            return
+        self.after(0, self._apply_progress_event, current, total, filename)
+
+    def _apply_progress_event(self, current: int, total: int, filename: str) -> None:
+        """Apply the throttled progress update to Tk widgets on the main thread."""
+        # Cap at 99 % while running -- the 100 % state is reserved for
+        # ``set_complete`` so the user reads "finished" only once, not
+        # once per backup mid-stream.
+        pct = min(99, int(current * 100 / total))
+        with contextlib.suppress(tk.TclError):
+            self.progress_bar["value"] = pct
+            self.percent_label.config(text=f"{pct}%")
+            if filename:
+                self.status_label.config(text=f"Verifying {filename}")
 
     def set_running(self, running: bool) -> None:
         """Update button states based on running status.

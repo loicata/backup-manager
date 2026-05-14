@@ -49,6 +49,7 @@ from src.core.phases.manifest import (
     save_integrity_manifest,
     upload_manifest_to_remote,
 )
+from src.core.phase_logger import PhaseLogger
 from src.core.phases.mirror import mirror_backup
 from src.core.phases.rotator import rotate_backups
 from src.core.phases.verifier import verify_backup
@@ -1208,6 +1209,15 @@ class BackupEngine:
         hash_verified = 0
         size_verified = 0
         total = len(ctx.files)
+        # Throttle progress emissions to 10 Hz the same way every other
+        # pipeline phase does. Previously this loop emitted one PROGRESS
+        # event per file; on a 231 k-file backup the resulting flood of
+        # Tk.after(0) callbacks dominated the verify phase wall time
+        # (~22 ms per widget update × 231908 ≈ 87 min for a loop that
+        # is otherwise just dict lookups). The throttler in PhaseLogger
+        # collapses that to ~10 emits/s -- the verify phase reverts to
+        # CPU-bound and finishes in well under a second.
+        phase_log = PhaseLogger("verify_remote", self._events)
 
         for i, f in enumerate(ctx.files):
             self._check_cancel()
@@ -1276,8 +1286,7 @@ class BackupEngine:
                     continue
                 size_verified += 1
 
-            self._events.emit(
-                PROGRESS,
+            phase_log.progress(
                 current=i + 1,
                 total=total,
                 filename=f.relative_path,
@@ -1311,6 +1320,8 @@ class BackupEngine:
         remote_map = {path: size for path, size in remote_files}
         errors = []
         total = len(ctx.files)
+        # Same throttle reason as ``_verify_remote_checksums`` above.
+        phase_log = PhaseLogger("verify_remote", self._events)
 
         for i, f in enumerate(ctx.files):
             self._check_cancel()
@@ -1324,8 +1335,7 @@ class BackupEngine:
                     f"got {remote_map[f.relative_path]})"
                 )
 
-            self._events.emit(
-                PROGRESS,
+            phase_log.progress(
                 current=i + 1,
                 total=total,
                 filename=f.relative_path,

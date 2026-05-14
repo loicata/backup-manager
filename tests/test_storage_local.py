@@ -100,6 +100,38 @@ class TestLocalStorage:
         names = {b["name"] for b in backups}
         assert names == {"Prof_FULL_2026-04-16_120000.tar.wbenc"}
 
+    def test_list_backups_excludes_every_known_sidecar(self, storage, tmp_path):
+        """Regression guard for the 2026-05-14 v3.6.0 Verify-tab bug.
+
+        The Verify tab listed each remote sidecar (``.wbcommit``,
+        ``.wbserverhashes``) as a separate "backup" because list_backups
+        on the SFTP / network / S3 backends filtered only ``.wbverify``
+        and ``.partial``. Local was already correct, but the same defence
+        belongs here too so a future refactor cannot silently drop the
+        filter on the primary local path. The new shared helper
+        ``src.storage.base.is_backup_sidecar`` is the single source of
+        truth; every backend funnels through it.
+        """
+        src = tmp_path / "real.txt"
+        src.write_text("ok", encoding="utf-8")
+        storage.upload(src, "RealBackup_FULL_2026-05-14_000000")
+        _commit(Path(storage._dest), "RealBackup_FULL_2026-05-14_000000")
+
+        # Drop one of every sidecar suffix on UNRELATED names so the
+        # real backup's own wbcommit (written by _commit above) is not
+        # overwritten with garbage. The filter is purely suffix-based,
+        # so the prefix does not matter to the assertion.
+        dest = Path(storage._dest)
+        for suffix in (".wbverify", ".wbcommit", ".wbcommit.tmp", ".wbserverhashes", ".partial"):
+            (dest / f"OrphanSidecar{suffix}").write_bytes(b"junk")
+
+        backups = storage.list_backups()
+        names = {b["name"] for b in backups}
+        assert names == {"RealBackup_FULL_2026-05-14_000000"}, (
+            f"sidecars leaked into list_backups: "
+            f"{names - {'RealBackup_FULL_2026-05-14_000000'}}"
+        )
+
     def test_list_backups_sorted_newest_first(self, storage, tmp_path):
         import time
 

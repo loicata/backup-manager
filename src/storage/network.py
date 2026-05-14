@@ -10,6 +10,7 @@ import subprocess
 import threading
 from pathlib import Path
 
+from src.storage.base import is_backup_sidecar
 from src.storage.local import LocalStorage
 
 # Hide console window on Windows when running net use
@@ -336,7 +337,7 @@ class NetworkStorage(LocalStorage):
         for entry in entries:
             if entry.name.startswith((".", "$")):
                 continue
-            if entry.name.endswith((".wbverify", ".partial")):
+            if is_backup_sidecar(entry.name):
                 continue
             if entry.name in SYSTEM_FOLDERS:
                 continue

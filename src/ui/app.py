@@ -2279,7 +2279,12 @@ class BackupManagerApp:
         self.tab_verify.clear()
         self.tab_verify.set_running(True)
 
-        self._verifier = IntegrityVerifier(profile, self.config_manager, events=None)
+        # Pass the event bus so the verifier's underlying verify_backup
+        # phase can emit PROGRESS during its ~10 min local re-hash on
+        # 260 k-file backups. Previously this was None and the Verify
+        # tab progress bar stayed at 0 % for the full duration -- users
+        # could not tell whether the verification was running or stuck.
+        self._verifier = IntegrityVerifier(profile, self.config_manager, events=self.events)
 
         def _verify_thread():
             try:

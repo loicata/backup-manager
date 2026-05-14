@@ -10,7 +10,13 @@ import threading
 from pathlib import Path
 from typing import BinaryIO
 
-from src.storage.base import StorageBackend, long_path_mkdir, long_path_str, with_retry
+from src.storage.base import (
+    StorageBackend,
+    is_backup_sidecar,
+    long_path_mkdir,
+    long_path_str,
+    with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -248,16 +254,15 @@ class S3Storage(StorageBackend):
                     }
                 )
 
-            # Objects (files) — skip manifests (.wbverify) and
-            # partial uploads (.partial) as they are not usable backups.
+            # Objects (files) — skip every known sidecar (manifests,
+            # commit markers, server-hashes sidecars, partial uploads).
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 name = key.rsplit("/", 1)[-1]
                 if (
                     name
                     and key != prefix
-                    and not name.endswith(".wbverify")
-                    and not name.endswith(".partial")
+                    and not is_backup_sidecar(name)
                 ):
                     last_mod = obj.get("LastModified", 0)
                     if hasattr(last_mod, "timestamp"):

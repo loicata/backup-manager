@@ -17,7 +17,7 @@ from src.core.phases.commit_marker import (
     is_backup_committed,
 )
 from src.storage._fs_utils import RemoveResult, safe_remove_tree
-from src.storage.base import StorageBackend
+from src.storage.base import StorageBackend, is_backup_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -223,13 +223,10 @@ class LocalStorage(StorageBackend):
             return False
         if entry.name.startswith("$"):
             return False
-        if entry.suffix == ".wbverify":
-            return False
-        if entry.name.endswith(COMMIT_MARKER_SUFFIX):
-            return False
-        if entry.name.endswith(COMMIT_MARKER_SUFFIX + ".tmp"):
-            return False
-        if entry.name.endswith(".partial"):
+        # Every sidecar suffix (.wbverify, .wbcommit, .wbcommit.tmp,
+        # .wbserverhashes, .partial) is filtered via the shared helper
+        # so adding a new sidecar type only needs one edit in base.py.
+        if is_backup_sidecar(entry.name):
             return False
         return entry.name not in SYSTEM_FOLDERS
 

@@ -22,6 +22,34 @@ from src.core.exceptions import CancelledError
 logger = logging.getLogger(__name__)
 
 
+# Suffixes attached to a backup directory or archive to record
+# metadata. These are NOT themselves restorable backups -- they are
+# the receipts the pipeline produces (integrity manifest, commit
+# marker, hash-during-upload sidecar) plus the transient ``.partial``
+# trail of an interrupted upload. ``list_backups`` MUST filter them
+# out on every backend, otherwise the Verify tab tries to verify
+# each sidecar as its own backup (visible bug in v3.6.0 SFTP/network/S3:
+# wbcommit and wbserverhashes were not filtered and showed up as
+# extra rows next to the real backup).
+BACKUP_SIDECAR_SUFFIXES: tuple[str, ...] = (
+    ".wbverify",         # integrity manifest (phases/manifest.py)
+    ".wbcommit",         # commit marker (phases/commit_marker.py)
+    ".wbcommit.tmp",     # half-written commit marker (atomic rename target)
+    ".wbserverhashes",   # PoC C server-side hash sidecar (sftp.py)
+    ".partial",          # interrupted upload trail
+)
+
+
+def is_backup_sidecar(name: str) -> bool:
+    """Return True if ``name`` is a backup sidecar, not a backup itself.
+
+    Centralises the suffix list so every backend's ``list_backups``
+    filters the same set. Adding a new sidecar type (e.g. a future
+    encryption-marker file) only needs one edit here.
+    """
+    return name.endswith(BACKUP_SIDECAR_SUFFIXES)
+
+
 def long_path_str(path: Path) -> str:
     """Return a Windows extended-length path string if needed.
 

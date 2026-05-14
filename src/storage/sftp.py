@@ -25,7 +25,13 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 from src.storage._fs_utils import safe_remove_tree
-from src.storage.base import StorageBackend, long_path_mkdir, long_path_str, with_retry
+from src.storage.base import (
+    StorageBackend,
+    is_backup_sidecar,
+    long_path_mkdir,
+    long_path_str,
+    with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1038,11 +1044,9 @@ class SFTPStorage(StorageBackend):
                 for entry in entries:
                     if entry.filename.startswith("."):
                         continue
-                    # Skip manifests (.wbverify) — metadata, not backups
-                    if entry.filename.endswith(".wbverify"):
-                        continue
-                    # Skip partial archives left by interrupted writes
-                    if entry.filename.endswith(".partial"):
+                    # Skip every known sidecar (manifest, commit marker,
+                    # server-hashes sidecar, partial upload trail).
+                    if is_backup_sidecar(entry.filename):
                         continue
                     is_dir = stat.S_ISDIR(entry.st_mode) if entry.st_mode else False
                     size = entry.st_size or 0

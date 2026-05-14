@@ -358,7 +358,19 @@ class IntegrityVerifier:
                     message="Backup directory not found",
                 )
 
-            ok, msg = verify_backup(backup_path, manifest_path)
+            # Propagate the event bus + cancellation hook so the
+            # verify phase emits its (throttled) PROGRESS events back to
+            # the Verify tab. Without these the tab stays at 0 % for the
+            # full ~9-10 min of a 260 k-file re-hash because the
+            # IntegrityVerifier only yields once per backup -- after
+            # verify_backup() returns. Mirrors how _phase_verify wires
+            # the engine's events into the same call.
+            ok, msg = verify_backup(
+                backup_path,
+                manifest_path,
+                events=self._events,
+                cancel_check=lambda: self._cancelled,
+            )
             status = "ok" if ok else "corrupted"
             self._log.info(f"{role}/{backup_name}: {msg}")
             return BackupVerifyResult(

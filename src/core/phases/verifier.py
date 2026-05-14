@@ -81,6 +81,19 @@ def verify_backup(
     if not manifest_path.exists():
         return True, "No manifest found — skipping verification"
 
+    # Show an immediate status line so the Verify tab does not look
+    # stuck while we read the manifest (80 MB JSON on a 260 k-file
+    # backup → ~3 s) and run the existence-check pass over every
+    # path (~10-30 s on NTFS USB). Without this the bar sits at 0 %
+    # with a blank status for up to 30 s before the first hash
+    # finishes and the throttled progress kicks in.
+    phase_log.progress(
+        current=0,
+        total=1,
+        filename="Loading manifest",
+        phase="verification",
+    )
+
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
@@ -91,6 +104,16 @@ def verify_backup(
     ok_count = 0
     errors = []
     completed = 0
+
+    # Second status update once we know the file count -- still 0 %
+    # on the bar but the status line now reads "Checking files exist"
+    # so the user sees the pass-1 walk is in flight.
+    phase_log.progress(
+        current=0,
+        total=total or 1,
+        filename="Checking files exist",
+        phase="verification",
+    )
 
     # Surface any files that were pruned by the writer (source vanished
     # between hashing and write). Without this, the manifest's

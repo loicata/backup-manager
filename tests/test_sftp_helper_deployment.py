@@ -159,6 +159,53 @@ class TestAssetResolution:
         assert len(digest) == 64
         assert hashlib.sha256(content).hexdigest() == digest
 
+    def test_helper_asset_is_lf_on_disk(self):
+        """The shipped asset must have LF line endings.
+
+        Regression guard for the 2026-05-15 incident: git's
+        `autocrlf=true` on Windows had converted the helper to CRLF
+        between checkout and PyInstaller bundling. The resulting
+        `#!/bin/bash\r\n` shebang made the Linux kernel look up an
+        interpreter literally named `bash\r`, execve failed with
+        ENOENT, and the SSH channel was closed before any tar byte
+        could be sent. The fix combines `.gitattributes` (*.sh
+        text eol=lf) with this static check so a future regression
+        — editor saving CRLF, autocrlf rule lost, etc. — fails
+        loudly in CI instead of silently shipping a broken helper.
+        """
+        path = _resolve_helper_path()
+        assert path is not None
+        content = path.read_bytes()
+        assert b"\r" not in content, (
+            f"{path} contains CR bytes — check .gitattributes "
+            f"(*.sh text eol=lf) and your editor's line-ending setting"
+        )
+
+    def test_get_helper_bytes_normalises_crlf_to_lf(self, tmp_path, monkeypatch):
+        """Defence in depth — the loader rewrites CRLF to LF.
+
+        If the static check above fails to catch a CRLF helper (older
+        checkout, third-party asset, manual edit), this layer ensures
+        the bytes pushed to the server are still a valid POSIX script.
+        Without it, the CRLF helper would deploy under a hash that
+        does not match the LF version on the server, triggering a
+        fresh upload of unrunnable bytes.
+        """
+        import src.storage.sftp as sftp_mod
+
+        crlf_helper = tmp_path / "server_helper.sh"
+        crlf_helper.write_bytes(b"#!/bin/bash\r\nset -e\r\necho ok\r\n")
+
+        monkeypatch.setattr(sftp_mod, "_HELPER_CACHE", None)
+        monkeypatch.setattr(sftp_mod, "_resolve_helper_path", lambda: crlf_helper)
+
+        result = _get_helper_bytes_and_hash()
+        assert result is not None
+        content, digest = result
+        assert b"\r" not in content
+        assert content == b"#!/bin/bash\nset -e\necho ok\n"
+        assert digest == hashlib.sha256(content).hexdigest()
+
 
 # ---------------------------------------------------------------------
 # Deployment paths
@@ -347,6 +394,39 @@ class TestHasGnuTar:
         transport.open_session.side_effect = OSError("broken pipe")
         assert backend._has_gnu_tar(transport) is False
 
+    def test_unbounded_recv_does_not_oom(self):
+        """Regression for the 2026-05-15 OOM freeze.
+
+        Stage 4 of PoC C wired ``_ensure_helper_script`` into
+        ``upload_tar_stream``. Existing tar-upload tests had been
+        written for the pre-stage-4 code path and configured their
+        channel mocks with only ``recv_exit_status`` — leaving
+        ``recv`` as a default ``MagicMock`` that returns truthy
+        ``MagicMock`` instances forever. The old recv loop
+        ``while True: chunk = recv(); if not chunk: break; output
+        += chunk`` then ran indefinitely, accumulating MagicMock
+        call metadata until pytest committed >2 GB of private bytes
+        and Windows froze the desktop (no BSOD).
+
+        This test pins the bound: a channel whose recv returns
+        anything other than bytes must make ``_has_gnu_tar`` bail
+        out promptly (False), not loop.
+        """
+        backend = _make_backend()
+        channel = MagicMock()
+        channel.settimeout = MagicMock()
+        channel.exec_command = MagicMock()
+        channel.recv.return_value = MagicMock()  # truthy non-bytes
+        channel.recv_exit_status.return_value = 0
+        channel.close = MagicMock()
+        transport = MagicMock()
+        transport.open_session.return_value = channel
+
+        assert backend._has_gnu_tar(transport) is False
+        # The guard must trigger on the first non-bytes chunk; recv
+        # is called at most a handful of times, not millions.
+        assert channel.recv.call_count <= 3
+
 
 class TestRemoteFileHashMatches:
     """``_remote_file_hash_matches`` compares cleanly trimmed hashes."""
@@ -372,3 +452,23 @@ class TestRemoteFileHashMatches:
         transport = MagicMock()
         transport.open_session.side_effect = OSError("transport gone")
         assert backend._remote_file_hash_matches(transport, "/tmp/x", "abcd1234") is False
+
+    def test_unbounded_recv_does_not_oom(self):
+        """Regression for the 2026-05-15 OOM freeze (mirror of
+        ``TestHasGnuTar.test_unbounded_recv_does_not_oom``).
+
+        The same recv loop pattern lives in
+        ``_remote_file_hash_matches``; same guard, same test.
+        """
+        backend = _make_backend()
+        channel = MagicMock()
+        channel.settimeout = MagicMock()
+        channel.exec_command = MagicMock()
+        channel.recv.return_value = MagicMock()  # truthy non-bytes
+        channel.recv_exit_status.return_value = 0
+        channel.close = MagicMock()
+        transport = MagicMock()
+        transport.open_session.return_value = channel
+
+        assert backend._remote_file_hash_matches(transport, "/tmp/x", "abcd") is False
+        assert channel.recv.call_count <= 3

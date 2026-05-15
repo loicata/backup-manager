@@ -106,6 +106,18 @@ def _get_helper_bytes_and_hash() -> tuple[bytes, str] | None:
         return None
 
     content = path.read_bytes()
+    # Defence in depth against the 2026-05-15 incident: if git's
+    # `autocrlf=true` or any Windows toolchain step has converted the
+    # helper to CRLF, Linux's shebang parser reads `#!/bin/bash\r`,
+    # cannot find that interpreter, and the SSH channel closes before
+    # any tar byte ships ("Socket is closed" 1 s after exec_command).
+    # Normalise here so the bytes uploaded to the server are always a
+    # valid POSIX script, regardless of how the asset was bundled.
+    if b"\r\n" in content:
+        content = content.replace(b"\r\n", b"\n")
+        logger.warning(
+            "Server helper had CRLF line endings — normalised to LF before deployment"
+        )
     digest = hashlib.sha256(content).hexdigest()
     _HELPER_CACHE = (content, digest)
     return _HELPER_CACHE
@@ -1651,17 +1663,29 @@ class SFTPStorage(StorageBackend):
         ``--to-command`` extraction hook is GNU-only — BSD tar's
         ``--to-stdout`` is not a substitute. Returns False on any
         connection / parsing failure so we degrade safely.
+
+        Hardening (2026-05-15 OOM incident): the recv loop is now
+        bounded. If a misbehaving channel never returns an empty
+        chunk (a real server cannot do this, but a MagicMock in a
+        test can), we cap output growth so memory does not balloon
+        until the pagefile saturates and freezes the desktop.
         """
+        _PROBE_OUTPUT_CAP = 64 * 1024  # plenty for "GNU tar 1.x ..."
         try:
             channel = transport.open_session()
             try:
                 channel.settimeout(_EXEC_PROBE_TIMEOUT)
                 channel.exec_command("tar --version 2>/dev/null | head -1")  # nosec B601
                 output = b""
-                while True:
+                while len(output) < _PROBE_OUTPUT_CAP:
                     chunk = channel.recv(1024)
                     if not chunk:
                         break
+                    if not isinstance(chunk, (bytes, bytearray)):
+                        # Non-bytes from a mocked channel — bail out
+                        # before we corrupt the loop or accumulate
+                        # MagicMock call metadata indefinitely.
+                        return False
                     output += chunk
                 channel.recv_exit_status()  # drain
                 return b"GNU tar" in output
@@ -1679,7 +1703,11 @@ class SFTPStorage(StorageBackend):
         ``<hash>  <path>`` so we strip the path via awk and compare.
         Missing files yield empty output — the comparison fails
         cleanly, no exception.
+
+        Hardening (2026-05-15 OOM incident): bounded recv loop, same
+        rationale as ``_has_gnu_tar``.
         """
+        _PROBE_OUTPUT_CAP = 4 * 1024  # one sha256 line is 65 chars
         try:
             channel = transport.open_session()
             try:
@@ -1689,10 +1717,12 @@ class SFTPStorage(StorageBackend):
                     f"sha256sum {escaped} 2>/dev/null | awk '{{print $1}}'"
                 )
                 output = b""
-                while True:
+                while len(output) < _PROBE_OUTPUT_CAP:
                     chunk = channel.recv(1024)
                     if not chunk:
                         break
+                    if not isinstance(chunk, (bytes, bytearray)):
+                        return False
                     output += chunk
                 channel.recv_exit_status()  # drain
                 return output.decode("utf-8", errors="replace").strip() == expected_hash

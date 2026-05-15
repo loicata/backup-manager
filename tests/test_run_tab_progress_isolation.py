@@ -155,3 +155,38 @@ class TestRunTabIgnoresLogBetweenBackups:
         tab._update_status("success")
         tab._on_log(message="Late event", level="info", phase="")
         assert tab.after.call_count == 0
+
+    def test_terminal_log_passes_through_even_after_status_success(self) -> None:
+        """Regression for the 2026-05-15 UI bug.
+
+        The engine emits ``STATUS=success`` immediately before the
+        final ``Backup complete: N files in X min`` LOG. On Windows
+        Tk can process ``_update_status`` (flipping ``_backup_active``
+        to False) BEFORE the LOG's ``after(0, _append_log)`` is even
+        scheduled — silently swallowing the only row that carries
+        the run duration. ``_is_terminal_log_message`` matches the
+        backup-engine's terminal patterns only, so an exemption is
+        cross-tab safe.
+        """
+        tab = self._make_log_stub()
+        tab._update_status("running")
+        tab._update_status("success")  # `_backup_active` is now False
+        tab._on_log(
+            message="Backup complete: 265552 files in 73.1 min",
+            level="info",
+            phase="",
+        )
+        # The terminal line MUST be appended despite the gate.
+        assert tab.after.call_count == 1
+        args = tab.after.call_args.args
+        assert args[0] == 0
+        assert args[1] == tab._append_log
+        assert args[2] == "Backup complete: 265552 files in 73.1 min"
+
+    def test_failed_terminal_log_also_passes_through(self) -> None:
+        """Same exemption applies to the failure variant."""
+        tab = self._make_log_stub()
+        tab._update_status("running")
+        tab._update_status("error")
+        tab._on_log(message="Backup failed: disk full", level="error", phase="")
+        assert tab.after.call_count == 1

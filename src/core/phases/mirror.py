@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from src.core.config import StorageConfig, StorageType
-from src.core.events import EventBus
+from src.core.events import PHASE_CHANGED, EventBus
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.collector import FileInfo
 from src.core.phases.manifest import save_integrity_manifest, upload_manifest_to_remote
@@ -90,6 +90,14 @@ def mirror_backup(
             # Apply bandwidth throttle if configured
             if apply_throttle is not None:
                 apply_throttle(backend, mirror_name)
+                # ``apply_throttle`` emits a "Measuring bandwidth (Mirror N)..."
+                # PHASE_CHANGED that sticks on the Run-tab status label for
+                # the entire mirror upload (43 min on a 260 k-file run) —
+                # confusing because the log feed has already moved on to
+                # "Uploading N files to remote...". Re-announce the phase
+                # here so the label tracks the actual work.
+                if events is not None:
+                    events.emit(PHASE_CHANGED, phase=f"Uploading to {mirror_name}...")
 
             # Determine if this mirror should be encrypted
             should_encrypt = i < len(flags) and flags[i]

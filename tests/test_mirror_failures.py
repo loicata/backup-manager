@@ -188,6 +188,54 @@ def test_single_mirror_only(tmp_path):
     assert results[0][1] is True
 
 
+def test_mirror_emits_uploading_phase_after_throttle(tmp_path):
+    """Regression: the Run-tab status label must not stay frozen on
+    'Measuring bandwidth (Mirror N)...' once the upload begins.
+
+    Before the fix, ``apply_throttle`` emitted PHASE_CHANGED with
+    'Measuring bandwidth...' and nothing in the mirror pipeline
+    emitted a follow-up phase event — so the label remained on the
+    bandwidth probe for the entire mirror upload (43 min on the
+    2026-05-15 BLoic run), even though the log feed had already
+    moved on to 'Uploading N files to remote...'. ``mirror_backup``
+    now re-announces 'Uploading to Mirror N...' right after the
+    throttle apply call.
+    """
+    from src.core.events import PHASE_CHANGED, EventBus
+
+    events = EventBus()
+    phase_events: list[str] = []
+    events.subscribe(PHASE_CHANGED, lambda phase, **_kw: phase_events.append(phase))
+
+    backend = MagicMock()
+
+    def fake_apply_throttle(_backend, label):
+        # Mirrors the real ``_apply_bandwidth_throttle`` for remote
+        # backends: it emits a PHASE_CHANGED that sticks on the label.
+        events.emit(PHASE_CHANGED, phase=f"Measuring bandwidth ({label})...")
+
+    mirror_backup(
+        backup_path=tmp_path,
+        files=[_make_file_info(tmp_path)],
+        mirror_configs=[_remote_config()],
+        backup_name="bk",
+        get_backend=lambda _: backend,
+        events=events,
+        apply_throttle=fake_apply_throttle,
+    )
+
+    assert "Measuring bandwidth (Mirror 1)..." in phase_events, (
+        "test setup: apply_throttle should have emitted Measuring"
+    )
+    assert "Uploading to Mirror 1..." in phase_events, (
+        "fix regression: mirror_backup must re-announce the phase after "
+        "apply_throttle so the status label tracks the actual work"
+    )
+    m_idx = phase_events.index("Measuring bandwidth (Mirror 1)...")
+    u_idx = phase_events.index("Uploading to Mirror 1...")
+    assert u_idx > m_idx, "Uploading must be emitted AFTER Measuring"
+
+
 # ---------------------------------------------------------------------------
 # Mirror GFS rotation tests (BackupEngine._phase_rotate)
 # ---------------------------------------------------------------------------

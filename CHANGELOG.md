@@ -5,6 +5,23 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.7] - 2026-05-15
+
+### Fixed
+- **SFTP mirror upload failed at +1 s with `WriteError: Failed to write tar-stream: Socket is closed`.** Root cause: ``assets/server_helper.sh`` shipped with **CRLF line endings**. ``core.autocrlf=true`` on Windows had rewritten the file at checkout, the PyInstaller / Nuitka bundle embedded the corrupted version, and on the Pi the Linux kernel read the shebang as ``#!/bin/bash\r``, failed to find that interpreter, and closed the SSH channel before any tar byte could land. Fix in three layers: (a) ``.gitattributes`` now pins ``*.sh text eol=lf`` so a future checkout cannot recreate the problem; (b) ``_get_helper_bytes_and_hash`` strips ``\r\n`` defensively before computing the deploy hash and pushing the bytes, so a stray CRLF anywhere in the toolchain still produces a working helper; (c) ``_has_gnu_tar`` and ``_remote_file_hash_matches`` now cap their ``recv`` loops at 64 KB / 4 KB and bail on non-bytes chunks — without this guard a misbehaving channel (mock or otherwise) accumulates an unbounded loop and on the 2026-05-15 test run consumed >2.25 GB of private bytes before Windows started thrashing the pagefile.
+- **Run-tab Log lost the final ``Backup complete: N files in X min`` row.** The engine emits ``STATUS=success`` immediately before the terminal LOG, and on Windows Tk can process ``_update_status`` (flipping ``_backup_active`` to False) before the LOG's ``after(0, _append_log)`` is even scheduled — silently dropping the only row that carries the run duration. ``_on_log`` now always lets terminal lines (``Backup (complete|failed|cancelled)`` matched via ``_TERMINAL_LOG_PATTERN``) through, regardless of the gate. The cross-tab pollution that originally motivated the gate is unaffected because the Verify tab never emits those messages.
+- **Run-tab status label stayed frozen on ``Measuring bandwidth (Mirror N)...`` for the entire mirror upload (43 min on the 260 k-file BLoic run).** ``apply_throttle`` emits a PHASE_CHANGED for the bandwidth probe; nothing in ``mirror_backup`` re-announced when the upload itself began, so the label and the log feed desynced. ``mirror_backup`` now emits ``PHASE_CHANGED("Uploading to Mirror N...")`` immediately after ``apply_throttle`` returns.
+
+### Added
+- **Run-tab "Last backup" card now shows ``Source size``** next to the file count, matching the same line in the success email. Persisted in ``ScheduleLogEntry.bytes_source`` so the card survives an app restart. Older journal entries from before 3.6.7 default the field to 0 and the line is suppressed rather than showing ``0 B``.
+- **``scripts/run-bounded.ps1``** — a PowerShell wrapper that monitors a subprocess tree's private commit and force-kills it when a configurable cap is exceeded (default 2 GB). Recursive BFS over child PIDs via a single ``Win32_Process`` snapshot, with parent-StartTime sanity check to drop recycled PIDs. Background: two desktop freezes from python.exe accruing 100+ GB virtual memory and saturating the pagefile (no BSOD, just unresponsive). Use it on every long-running Python invocation until the underlying leak is gone. Validated end-to-end: Nuitka build peaks 3.4 GB / cap 6 GB; ``pytest tests/test_sftp_tar_upload.py`` (which was OOMing at >2.25 GB before the recv-loop fix) now peaks at 34 MB.
+
+### Tests
+- +4 tests in ``tests/test_sftp_helper_deployment.py``: static LF check on the shipped asset, CRLF→LF defensive normalisation, and two unbounded-recv OOM guards (one per probe path).
+- +2 tests in ``tests/test_run_tab_progress_isolation.py``: terminal LOG passes through even after ``STATUS=success``; same for ``Backup failed: …``.
+- +1 test in ``tests/test_mirror_failures.py``: ``mirror_backup`` re-emits PHASE_CHANGED after ``apply_throttle`` so the Run-tab label resyncs with the actual work.
+- +2 tests in ``tests/test_scheduler.py``: ``bytes_source`` round-trips through ``ScheduleLogEntry`` and defaults to 0 for older entries.
+
 ## [3.5.9] - 2026-05-13
 
 ### Changed

@@ -38,6 +38,33 @@ class TestScheduleJournal:
         assert entries[0]["status"] == "success"
         assert entries[0]["files_count"] == 42
 
+    def test_update_last_persists_bytes_source(self, tmp_path):
+        """``bytes_source`` round-trips through the journal so the
+        Run-tab 'Last backup' card can surface the source size next to
+        the file count without re-reading the backup directory.
+        """
+        journal = ScheduleJournal(tmp_path)
+        journal.add(ScheduleLogEntry(profile_id="abc", status="started"))
+        journal.update_last(
+            status="success",
+            files_count=265552,
+            bytes_source=47657481011,  # ~44.39 GB
+            duration_seconds=4385.0,
+        )
+        entries = journal.get_entries()
+        assert entries[0]["bytes_source"] == 47657481011
+        assert entries[0]["files_count"] == 265552
+
+    def test_bytes_source_defaults_to_zero(self, tmp_path):
+        """Older journal entries (pre-3.6.7) lack ``bytes_source``;
+        the dataclass default must be 0 so the JSON round-trip stays
+        compatible.
+        """
+        journal = ScheduleJournal(tmp_path)
+        journal.add(ScheduleLogEntry(profile_id="abc", status="success"))
+        entries = journal.get_entries()
+        assert entries[0]["bytes_source"] == 0
+
     def test_update_last_overwrites_timestamp(self, tmp_path):
         """update_last with timestamp= overwrites the original start time."""
         journal = ScheduleJournal(tmp_path)

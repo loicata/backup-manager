@@ -1197,16 +1197,19 @@ class BackupManagerApp:
         # than profile.last_backup which only updates on success)
         last_run = self.scheduler.journal.get_last_run(profile.id)
         files_count = 0
+        bytes_source = 0
         success = True
         last_timestamp = profile.last_backup or ""
         if last_run:
             success = last_run.get("status") == "success"
             files_count = last_run.get("files_count", 0)
+            bytes_source = last_run.get("bytes_source", 0)
             last_timestamp = last_run.get("timestamp", last_timestamp)
         is_diff = profile.backup_type == BackupType.DIFFERENTIAL
         self.tab_run.update_last_backup_card(
             last_timestamp,
             files_count=files_count,
+            bytes_source=bytes_source,
             success=success,
             is_differential=is_diff,
             last_full_backup=profile.last_full_backup or "",
@@ -2113,6 +2116,7 @@ class BackupManagerApp:
                     self.scheduler.journal.update_last(
                         status="success",
                         files_count=stats.files_processed,
+                        bytes_source=stats.bytes_source,
                         duration_seconds=stats.duration_seconds,
                         timestamp=completed_at,
                     )
@@ -2501,6 +2505,7 @@ class BackupManagerApp:
                 self.scheduler.journal.update_last(
                     status="success",
                     files_count=stats.files_processed,
+                    bytes_source=stats.bytes_source,
                     duration_seconds=stats.duration_seconds,
                     timestamp=completed_at,
                 )

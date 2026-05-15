@@ -1,0 +1,9 @@
+# Force LF line endings for files consumed by Unix shells.
+#
+# Without this, `core.autocrlf=true` on Windows corrupts shebangs at
+# checkout: `#!/bin/bash\r\n` makes execve(2) look up an interpreter
+# literally named `bash\r`, fails with ENOENT, and the SSH channel is
+# closed before any tar byte reaches the server. See the 2026-05-15
+# incident: helper deployed in CRLF, mirror upload aborted 1 s in with
+# "Socket is closed".
+*.sh text eol=lf

@@ -318,10 +318,27 @@ class RunTab(ttk.Frame):
         except (ValueError, TypeError):
             return timestamp
 
+    @staticmethod
+    def _format_bytes(size_bytes: int) -> str:
+        """Format a byte count as a short human-readable string.
+
+        Mirrors ``email_notifier._format_size`` so the Run-tab card
+        and the success email agree on the number the user sees
+        (e.g. ``44.39 GB``).
+        """
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        if size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        if size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
     def update_last_backup_card(
         self,
         last_backup: str,
         files_count: int = 0,
+        bytes_source: int = 0,
         success: bool = True,
         is_differential: bool = False,
         last_full_backup: str = "",
@@ -332,6 +349,8 @@ class RunTab(ttk.Frame):
         Args:
             last_backup: ISO timestamp of last backup, or empty.
             files_count: Number of files in last backup.
+            bytes_source: Total source size in bytes (0 = unknown,
+                shown only when > 0).
             success: Whether last backup succeeded.
             is_differential: Whether the profile uses differential backups.
             last_full_backup: ISO timestamp of last full backup.
@@ -366,7 +385,19 @@ class RunTab(ttk.Frame):
             font=Fonts.normal(),
         ).pack(anchor="w")
 
-        # Line 2: last full info (only for differential profiles)
+        # Line 2: source size (only when we have a real measurement \u2014
+        # older journal entries from before bytes_source existed leave
+        # it at 0, in which case we just suppress the line rather than
+        # show a misleading "0 B").
+        if bytes_source > 0:
+            ttk.Label(
+                content,
+                text=f"  Source size: {self._format_bytes(bytes_source)}",
+                foreground=Colors.TEXT_SECONDARY,
+                font=Fonts.small(),
+            ).pack(anchor="w")
+
+        # Line 3: last full info (only for differential profiles)
         if is_differential and last_full_backup:
             full_ago = self._format_ago(last_full_backup)
             full_files = (
@@ -631,11 +662,24 @@ class RunTab(ttk.Frame):
         rows into THIS tab's Message panel between runs. Drop log
         events when no backup is currently active here, matching the
         same gate the PROGRESS subscriber uses.
+
+        Terminal log lines (``Backup complete: …`` etc.) are always
+        let through. The engine emits ``STATUS=success`` immediately
+        before the terminal log, and on Windows Tk can process the
+        resulting ``_update_status`` (which flips ``_backup_active``
+        to False) before the terminal log's ``after(0, _append_log)``
+        is even scheduled — silently dropping the only row that
+        carries the run duration. Terminal lines are also unique to
+        this tab's engine (``_TERMINAL_LOG_PATTERN`` matches
+        ``Backup complete|failed|cancelled`` which the Verify tab
+        never emits), so an unconditional exemption is safe from
+        cross-tab pollution.
         """
-        if not self._backup_active:
+        is_terminal = _is_terminal_log_message(message)
+        if not self._backup_active and not is_terminal:
             return
         if not phase:
-            if _is_terminal_log_message(message):
+            if is_terminal:
                 # Backup is finished: no phase is active any more. Reset
                 # ``_current_phase`` so we don't leak a stale tag into a
                 # follow-up run, and force the column blank for this row.

@@ -36,6 +36,12 @@ class ScheduleLogEntry:
     detail: str = ""
     files_count: int = 0
     duration_seconds: float = 0.0
+    # Total size of all source files that were backed up, in bytes.
+    # Surfaces in the Run-tab "Last backup" card so the user can
+    # eyeball the workload without opening the success email. 0 means
+    # "unknown" (older entries from before this field existed, or a
+    # failed run that never reached the collect phase).
+    bytes_source: int = 0
 
 
 class ScheduleJournal:

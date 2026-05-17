@@ -5,6 +5,17 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.8] - 2026-05-17
+
+### Fixed
+- **Profile-switch click took 2.9-6.6 s before the tabs repainted.** Root cause located by the v3.7.7 instrumentation (``[LP-PROFILE]`` timings in ``backup_manager.log``): ``RecoveryTab._update_post_source_sections`` ran ``src.rglob("*.wbenc")`` on the storage destination path. The path typically points at a USB HDD root holding 268 k+ files across all profiles' backups, and ``rglob`` walked the entire tree to ask a question that only needs the storage root: "is there a ``{backup_name}.tar.wbenc`` next to my backup dirs?". The call was triggered on every profile switch via ``load_profile → source_type_var.set → _on_source_type_changed → _update_post_source_sections``. Fix: ``rglob`` → ``glob``. Encrypted backups are always written as ``{backup_name}.tar.wbenc`` at the storage root (see ``local_writer.py::write_encrypted_tar``, ``backup_engine.py::_phase_write``), never nested inside a backup directory — a shallow glob is functionally equivalent and runs in microseconds. The 17/05/2026 case dropped from 2.9-6.6 s per switch to near-instant.
+
+### Removed
+- v3.7.7's temporary instrumentation (``[LP-PROFILE]`` / ``[LP-HEALTH]`` timing logs in ``_load_profile`` and ``_update_health_dashboard``). Its job is done: the recovery-tab ``rglob`` was the single cost (99.8 % of the wall-clock); everything else timed at 0-4 ms. The contract is now pinned by a regression test rather than left as live instrumentation.
+
+### Tests
+- +1 test in ``tests/unit/test_recovery_tab_no_recursive_glob.py``: AST-level inspection of ``_update_post_source_sections`` source — rejects any reintroduction of ``.rglob(`` and pins the presence of the shallow ``.glob("*.wbenc")``. Comments mentioning the regression by name are ignored via an AST round-trip so the docstring/rationale can keep explaining the original bug.
+
 ## [3.7.7] - 2026-05-17
 
 ### Added (diagnostic build, temporary)

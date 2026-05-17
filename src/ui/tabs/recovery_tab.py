@@ -584,8 +584,20 @@ class RecoveryTab(ScrollableTab):
                 has_source = True
                 src = Path(path)
                 if src.exists():
+                    # Use a SHALLOW glob, not rglob — encrypted backups
+                    # are always written as ``{backup_name}.tar.wbenc``
+                    # at the storage root (see
+                    # ``backup_engine.py::_phase_write``,
+                    # ``local_writer.py::write_encrypted_tar``), never
+                    # nested inside a backup directory. A previous
+                    # ``rglob`` walked the entire destination tree —
+                    # on a USB HDD holding 268 k files it added 3-6 s
+                    # to every profile-switch click via the trace
+                    # callback chain
+                    # ``load_profile -> source_type_var.set ->
+                    # _on_source_type_changed -> _update_post_source_sections``.
                     has_encrypted = src.suffix == ".wbenc" or (
-                        src.is_dir() and any(src.rglob("*.wbenc"))
+                        src.is_dir() and any(src.glob("*.wbenc"))
                     )
         else:
             # NETWORK / SFTP / S3 all use the list + selection flow.

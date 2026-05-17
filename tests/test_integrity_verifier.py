@@ -151,10 +151,11 @@ class TestVerifyFlatBackup:
         )
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -181,10 +182,11 @@ class TestVerifyFlatBackup:
         (dest / "Backup_FULL_2026-01-01_120000" / "a.txt").write_bytes(b"CORRUPTED")
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -202,10 +204,11 @@ class TestVerifyFlatBackup:
         (dest / "Ghost_FULL_2026-01-01_120000.wbverify").write_text("{}", "utf-8")
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -237,10 +240,11 @@ class TestVerifyFlatBackup:
         )
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -255,10 +259,11 @@ class TestVerifyFlatBackup:
         dest.mkdir()
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -286,6 +291,7 @@ class TestVerifyEncryptedBackup:
         )
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -321,6 +327,7 @@ class TestVerifyEncryptedBackup:
         archive.write_bytes(data)
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -359,7 +366,7 @@ class TestVerifyEncryptedBackup:
             mtime=(src / "a.txt").stat().st_mtime,
             source_root=str(src),
         )
-        archive = write_encrypted_tar([fi], dest, "Old_FULL_2025-12-01_120000", "pw")
+        archive = write_encrypted_tar([fi], dest, "Backup_FULL_2025-12-01_120000", "pw")
 
         # Stamp as committed so list_backups returns the archive.
         write_commit_marker(
@@ -376,6 +383,7 @@ class TestVerifyEncryptedBackup:
         shutil.rmtree(src)
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -400,10 +408,11 @@ class TestVerifyCancellation:
     def test_cancel_sets_flag(self, tmp_path: Path) -> None:
         """Cancel method sets the internal cancellation flag."""
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(tmp_path),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -425,10 +434,11 @@ class TestVerifyMultipleBackups:
         _create_flat_backup(dest, "Backup_DIFF_2026-01-03_120000", {"c.txt": b"c"})
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -442,18 +452,19 @@ class TestVerifyMultipleBackups:
         """One corrupted backup among several is detected."""
         dest = tmp_path / "backups"
         dest.mkdir()
-        _create_flat_backup(dest, "Good1", {"a.txt": b"alpha"})
-        _create_flat_backup(dest, "Bad1", {"b.txt": b"beta"})
-        _create_flat_backup(dest, "Good2", {"c.txt": b"gamma"})
+        _create_flat_backup(dest, "Backup_Good1", {"a.txt": b"alpha"})
+        _create_flat_backup(dest, "Backup_Bad1", {"b.txt": b"beta"})
+        _create_flat_backup(dest, "Backup_Good2", {"c.txt": b"gamma"})
 
         # Corrupt one backup
-        (dest / "Bad1" / "b.txt").write_bytes(b"CORRUPTED")
+        (dest / "Backup_Bad1" / "b.txt").write_bytes(b"CORRUPTED")
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -475,10 +486,11 @@ class TestVerifyIter:
         _create_flat_backup(dest, "Backup_B", {"b.txt": b"beta"})
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -499,10 +511,11 @@ class TestVerifyIter:
         (dest / "Backup_B" / "b.txt").write_bytes(b"CORRUPTED")
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -523,10 +536,11 @@ class TestVerifyIter:
         _create_flat_backup(dest, "Backup_A", {"a.txt": b"alpha"})
 
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)
@@ -538,10 +552,11 @@ class TestVerifyIter:
     def test_iter_yields_connection_errors(self, tmp_path: Path) -> None:
         """Connection errors are yielded as results too."""
         profile = BackupProfile(
+            name="Backup",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(tmp_path / "nonexistent"),
-            )
+            ),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
         verifier = IntegrityVerifier(profile, mgr)

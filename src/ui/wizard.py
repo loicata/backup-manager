@@ -1441,6 +1441,8 @@ class SetupWizard:
                 "after the copy."
             ),
             foreground=Colors.TEXT_SECONDARY,
+            wraplength=900,
+            justify="left",
         ).pack(pady=(0, Spacing.LARGE), anchor="w")
 
         # Rehydrate from a previous visit (Back from Finish) so the

@@ -5,6 +5,20 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.4] - 2026-05-17
+
+### Fixed
+- **Periodic integrity verification fired on the first scheduler tick after a profile was created.** Root cause: ``InAppScheduler._check_verify_due`` treated ``last_verify is None`` as "verification due right now" instead of "timer not yet seeded". On a profile created at ``T``, the scheduler thread started, fired ``_check_schedules`` ~30 s later (``CHECK_INTERVAL``), entered ``_check_verify_due`` with ``last_verify=None``, and immediately triggered ``IntegrityVerifier.verify_all()`` — even though the user-configured ``verify_interval_days`` was 7. Visible on 2026-05-17: profile ``TestLoic`` saved at 15:47:51 had its first periodic verify recorded at 15:48:47, 56 s after creation. Fix: ``_check_verify_due`` now seeds ``last_verify = now`` on the first observation and returns; the first real periodic verify is due ``interval_days`` after creation, not on the next tick.
+- **Periodic verify re-hashed backups belonging to OTHER profiles** that shared the destination directory. ``IntegrityVerifier.verify_iter`` called ``backend.list_backups()`` without filtering, while the rotator already filtered by ``sanitize_profile_name(profile_name) + "_"``. Concretely on the 2026-05-17 case: the newly-created ``TestLoic`` profile's accidental first-tick verify re-hashed 39 873 + 3 339 files from two unrelated ``TestBackup*`` profiles in parallel with its own first backup hash phase, wasting USB I/O bandwidth and CPU. ``verify_iter`` now applies the same profile prefix as the rotator — only the caller's own backups are in scope.
+
+### Added
+- **``InAppScheduler.mark_verify_now(profile_id, dt=None)``** — public API symmetric to ``mark_triggered_now``. Out-of-band callers (wizard, profile import, manual verify) use it to seed the periodic-verify clock so the next tick does not fire immediately on a freshly-created profile. The wizard's post-save block in ``src/ui/app.py`` now calls both ``mark_triggered_now`` and ``mark_verify_now`` on every profile it produces, replacing the previous direct poke of the private ``scheduler._state.set_last_trigger``.
+
+### Tests
+- +6 tests in ``tests/unit/test_scheduler_periodic_verify_first_launch.py``: first observation seeds the timer without instantiating ``IntegrityVerifier``; second call within the interval is silent; call past the interval does trigger; ``mark_verify_now`` records state, defaults to ``datetime.now()``, and prevents the immediate first-tick trigger when called from a wizard-style flow.
+- +4 tests in ``tests/unit/test_integrity_verifier_profile_filter.py``: foreign-profile backups are skipped on a shared destination (the 2026-05-17 ``TestLoic`` / ``TestBackup*`` scenario); the prefix is anchored at ``_`` so ``Foo`` does not match ``FooBar_FULL_…``; ``sanitize_profile_name`` is applied so ``My Profile`` matches ``My_Profile_FULL_…``; a destination holding only foreign backups yields zero results without errors.
+- Existing IntegrityVerifier suites updated to pass ``name="Backup"`` / ``name="Test"`` on the ``BackupProfile`` fixtures so the new profile filter matches the historical backup names (``Backup_FULL_…``, ``Test_FULL_…``). ``test_backup_sidecar_filtering`` pins ``profile.name`` on its ``MagicMock`` to avoid a ``sanitize_profile_name(MagicMock)`` ``ValueError``.
+
 ## [3.7.3] - 2026-05-17
 
 ### Fixed

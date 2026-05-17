@@ -710,14 +710,20 @@ class BackupManagerApp:
             self.tab_verify.update_last_verify(app_settings["last_verify"])
 
         # After wizard: switch to Run tab, mark new profiles as
-        # already triggered so the scheduler won't auto-run them
+        # already triggered so the scheduler won't auto-run them.
+        # Symmetric ``mark_verify_now`` seeds the periodic-verify clock
+        # at creation time so the first verify is due N days later, not
+        # ~30 s after the wizard closes (cf. scheduler._check_verify_due
+        # docstring for the v3.7.3 case study).
         if self._from_wizard:
             self.notebook.select(self.tab_run)
             self.scheduler.skip_startup_check = True
             from datetime import datetime
 
+            now = datetime.now()
             for p in self.config_manager.get_all_profiles():
-                self.scheduler._state.set_last_trigger(p.id, datetime.now())
+                self.scheduler.mark_triggered_now(p.id, now)
+                self.scheduler.mark_verify_now(p.id, now)
 
         # Start services
         self.scheduler.start()
@@ -2399,10 +2405,7 @@ class BackupManagerApp:
             day_word = "day" if interval == 1 else "days"
             ttk.Label(
                 body,
-                text=(
-                    f"The next periodic verification will run in "
-                    f"{interval} {day_word}."
-                ),
+                text=(f"The next periodic verification will run in " f"{interval} {day_word}."),
                 foreground=Colors.TEXT_SECONDARY,
             ).pack(anchor="w")
         else:
@@ -2456,7 +2459,9 @@ class BackupManagerApp:
                 pass
             self._run_verify()
 
-        ttk.Button(btn_row, text="Skip", command=_on_skip).pack(side="right", padx=(Spacing.SMALL, 0))
+        ttk.Button(btn_row, text="Skip", command=_on_skip).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
         ttk.Button(
             btn_row,
             text="Verify now",
@@ -2691,8 +2696,7 @@ class BackupManagerApp:
                 from src.core.backup_engine import _effective_auto_verify
 
                 verification_disabled = (
-                    not _effective_auto_verify(profile)
-                    and not profile.schedule.verify_enabled
+                    not _effective_auto_verify(profile) and not profile.schedule.verify_enabled
                 )
 
                 self._send_backup_email(

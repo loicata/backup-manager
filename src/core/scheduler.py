@@ -286,6 +286,23 @@ class InAppScheduler:
         """
         self._state.set_last_trigger(profile_id, dt or datetime.now())
 
+    def mark_verify_now(self, profile_id: str, dt: datetime | None = None) -> None:
+        """Record an out-of-band "verified now" event for a profile.
+
+        Symmetric counterpart of :meth:`mark_triggered_now` for the
+        periodic verification clock.  Callers (wizard, profile import,
+        manual verify) use this to seed ``last_verify`` so the next
+        ``_check_verify_due`` tick does not fire immediately on a
+        profile that has just been created or just been manually
+        verified.
+
+        Args:
+            profile_id: The profile that was just verified.
+            dt: Timestamp of the verification. Defaults to
+                ``datetime.now()``.
+        """
+        self._state.set_last_verify(profile_id, dt or datetime.now())
+
     def start(self) -> None:
         if self._running:
             return
@@ -672,7 +689,24 @@ class InAppScheduler:
         """
         interval_days = profile.schedule.verify_interval_days
         last_verify = self._state.get_last_verify(profile.id)
-        if last_verify and (now - last_verify).days < interval_days:
+        # First observation of this profile: seed the timer at ``now``
+        # and bail out. The expected semantics for a fresh profile is
+        # "first periodic verify in N days from creation", not "verify
+        # right now everything that already lives on the destination".
+        # Without this guard, ``_check_verify_due`` fired on the first
+        # scheduler tick (CHECK_INTERVAL ≈ 30 s after profile creation)
+        # and re-hashed any pre-existing backup on the same destination
+        # — including backups belonging to OTHER profiles — in parallel
+        # with the user's first backup run. v3.7.3 case: a 56-s-old
+        # ``TestLoic`` profile re-verified 39 873 + 3 339 foreign files
+        # during its own hash phase. ``mark_verify_now`` is the public
+        # API for callers that want to seed the clock at creation; this
+        # branch is defence-in-depth for any creation path that forgot.
+        if last_verify is None:
+            with self._op_lock:
+                self._state.set_last_verify(profile.id, now)
+            return
+        if (now - last_verify).days < interval_days:
             return
 
         logger.info(

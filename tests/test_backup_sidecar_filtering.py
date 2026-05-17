@@ -95,6 +95,11 @@ class TestIntegrityVerifierPropagatesEvents:
         (tmp_path / "Prof_FULL.wbverify").write_text("{}", encoding="utf-8")
 
         profile = MagicMock()
+        # Pin .name explicitly: ``verify_iter`` now filters the backup
+        # list by ``sanitize_profile_name(profile.name) + "_"`` (v3.7.4
+        # fix), and a default MagicMock.name returns another MagicMock
+        # that ``sanitize_profile_name`` cannot encode.
+        profile.name = "Prof"
         profile.storage.storage_type.value = "local"
         profile.mirror_destinations = []
 

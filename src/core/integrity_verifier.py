@@ -133,12 +133,26 @@ class IntegrityVerifier:
         (e.g. schedule UI updates on the main thread) instead of
         waiting for the entire verification to finish.
 
+        The backup list is filtered by the profile's sanitized name
+        prefix so a verify triggered for profile A only re-hashes
+        backups produced by profile A. Without this filter, two
+        profiles sharing a destination directory (a common setup
+        for one-USB-many-profiles users) cross-verified each other's
+        backups on every periodic tick — wasting USB I/O and CPU on
+        archives the caller never asked to be checked. The rotator
+        already filters by the same prefix (rotator.py::rotate_backups),
+        so this just brings the verify phase in line with it.
+
         Yields:
             BackupVerifyResult for each backup checked.
         """
+        from src.core.phases.local_writer import sanitize_profile_name
+
         start = time.monotonic()
         self._result = VerifyAllResult()
         self._cancelled = False
+
+        profile_prefix = sanitize_profile_name(self._profile.name) + "_"
 
         # Build list of (role, storage_config)
         targets: list[tuple[str, StorageConfig]] = [("primary", self._profile.storage)]
@@ -152,7 +166,11 @@ class IntegrityVerifier:
                 break
             try:
                 backend = _build_backend(config)
-                backups = backend.list_backups()
+                backups = [
+                    b
+                    for b in backend.list_backups()
+                    if b.get("name", "").startswith(profile_prefix)
+                ]
                 backends_and_backups.append((role, config, backend, backups))
                 self._result.total_backups += len(backups)
             except Exception as e:

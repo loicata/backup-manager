@@ -88,6 +88,7 @@ class TestVerifyLocalEncrypted:
         dest.mkdir()
 
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -123,6 +124,7 @@ class TestVerifyLocalEncrypted:
         archive.write_bytes(b"")
 
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -151,6 +153,7 @@ class TestVerifyLocalEncrypted:
         archive.write_bytes(b"encrypted data content")
 
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -192,6 +195,7 @@ class TestVerifyLocalFlat:
         dest.mkdir()
 
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -222,6 +226,7 @@ class TestVerifyRemote:
     def test_remote_encrypted_missing(self, tmp_path):
         """Missing remote encrypted archive reports 'missing'."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
             ),
@@ -245,6 +250,7 @@ class TestVerifyRemote:
     def test_remote_encrypted_sha256_ok(self, tmp_path):
         """Remote SFTP archive with matching SHA-256 passes."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
             ),
@@ -273,6 +279,7 @@ class TestVerifyRemote:
     def test_remote_encrypted_sha256_mismatch(self, tmp_path):
         """Remote SFTP archive with mismatched SHA-256 reports corrupted."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
             ),
@@ -299,6 +306,7 @@ class TestVerifyRemote:
     def test_remote_encrypted_size_mismatch(self, tmp_path):
         """Remote archive with size mismatch reports corrupted."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="test-bucket"),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
@@ -323,6 +331,7 @@ class TestVerifyRemote:
     def test_remote_encrypted_exists_no_hash(self, tmp_path):
         """Remote encrypted archive exists, no stored hash — reports ok."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="test-bucket"),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
@@ -345,6 +354,7 @@ class TestVerifyRemote:
     def test_remote_flat_with_verify_files(self, tmp_path):
         """Remote flat backup uses verify_backup_files when available."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
             ),
@@ -372,6 +382,7 @@ class TestVerifyRemote:
     def test_remote_flat_missing(self, tmp_path):
         """Remote flat backup fallback — missing backup."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="test-bucket"),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
@@ -394,6 +405,7 @@ class TestVerifyRemote:
     def test_remote_flat_exists_fallback(self, tmp_path):
         """Remote flat backup fallback — exists check."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="test-bucket"),
         )
         mgr = ConfigManager(config_dir=tmp_path / "config")
@@ -425,6 +437,7 @@ class TestVerifySingleException:
     def test_unexpected_error_returns_error_status(self, tmp_path):
         """Unexpected exceptions in _verify_single return error status."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(tmp_path),
@@ -461,6 +474,7 @@ class TestVerifyIterConnectionFailure:
     def test_connection_failure_yields_error(self, tmp_path):
         """Connection failure during list_backups yields error result."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(tmp_path / "nonexistent"),
@@ -501,6 +515,7 @@ class TestVerifyIterCancellation:
         _stamp(b2)
 
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(dest),
@@ -536,6 +551,7 @@ class TestVerifyWithMirrors:
         mirror.mkdir()
 
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
                 destination_path=str(primary),
@@ -566,6 +582,7 @@ class TestRemoteSha256Fallthrough:
     def test_sha256_fails_fallthrough_to_size(self, tmp_path):
         """When compute_remote_sha256 returns None, falls through to size."""
         profile = BackupProfile(
+            name="Test",
             storage=StorageConfig(
                 storage_type=StorageType.SFTP, sftp_host="test.local", sftp_username="user"
             ),

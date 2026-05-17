@@ -1421,7 +1421,19 @@ class BackupManagerApp:
         sched_cfg = schedule["schedule"]
         # Retry enabled comes from general tab
         sched_cfg.retry_enabled = general["retry_enabled"]
+        # Integrity verification fields moved from Schedule to General in
+        # v3.7.0; overwrite whatever the (now empty) Schedule tab returned.
+        sched_cfg.verify_enabled = general["periodic_verify_enabled"]
+        sched_cfg.verify_interval_days = general["periodic_verify_interval_days"]
         profile.schedule = sched_cfg
+
+        # Per-backup post-copy hash verify toggle (new in v3.7.0).
+        from src.core.config import VerificationConfig
+
+        profile.verification = VerificationConfig(
+            auto_verify=general["auto_verify"],
+            alert_on_failure=profile.verification.alert_on_failure,
+        )
 
         # Validate that the full-backup schedule is compatible with the
         # run schedule. A profile that runs weekly cannot have a "daily"
@@ -2136,6 +2148,14 @@ class BackupManagerApp:
                 # label from BACKUP_TYPE_DETERMINED.
                 self.root.after(0, self._refresh_run_header, profile)
 
+                # v3.7.0: when post-copy verify was skipped (Fast mode)
+                # and the user hasn't opted out, offer a one-click
+                # "Verify now" right after the manual backup completes.
+                # Scheduled runs do not get the dialog — the user is
+                # not in front of the screen and the email notifier
+                # adapts its subject/body instead.
+                self.root.after(0, self._maybe_prompt_post_backup_verify, profile)
+
                 # Send email notification
                 if profile.email.enabled:
                     self._send_backup_email(
@@ -2317,6 +2337,141 @@ class BackupManagerApp:
             self.tab_verify.set_running(False)
             self.tab_verify.status_label.config(text="Cancelled", foreground=Colors.DANGER)
 
+    def _maybe_prompt_post_backup_verify(self, profile: BackupProfile) -> None:
+        """Show the "Verify now?" dialog after a manual Fast-mode backup.
+
+        Skipped when any of:
+        - Verification is already on (the verify just ran inline; nothing
+          to offer).
+        - Remote primary storage (engine forces verify on; user toggle
+          irrelevant; case already covered inline).
+        - Object Lock profile (verify is mandatory; the engine already
+          ran it; not a Fast-mode scenario).
+        - User opted out for this profile by ticking "Don't ask again".
+
+        Called from the manual backup thread once the run has been
+        marked success on the Run tab; scheduled runs do not call this
+        path (the email notifier handles their Fast-mode messaging).
+        """
+        from src.core.backup_engine import _effective_auto_verify
+
+        # If verify ran inline, there is nothing to offer
+        if _effective_auto_verify(profile):
+            return
+        if profile.dont_prompt_verify_after_skip:
+            return
+
+        self._show_post_backup_verify_dialog(profile)
+
+    def _show_post_backup_verify_dialog(self, profile: BackupProfile) -> None:
+        """Build and show the post-backup verify-prompt Toplevel.
+
+        Modal-style relative to the main window (transient + grab_set).
+        Two buttons: Skip (just log) and Verify now (delegate to
+        _run_verify after switching to the Verify tab so the user
+        sees the progress bar moving). One checkbox: Don't ask again
+        for this profile (persisted onto the profile and saved).
+        """
+        win = tk.Toplevel(self.root)
+        win.title("Backup complete")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+
+        body = ttk.Frame(win, padding=Spacing.PAD)
+        body.pack(fill="both", expand=True)
+
+        ttk.Label(
+            body,
+            text="✓ Backup completed",
+            foreground=Colors.SUCCESS,
+            font=Fonts.bold(),
+        ).pack(anchor="w")
+
+        ttk.Label(
+            body,
+            text="Post-backup verification was skipped (Fast mode).",
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(Spacing.SMALL, 0))
+
+        if profile.schedule.verify_enabled:
+            interval = profile.schedule.verify_interval_days
+            day_word = "day" if interval == 1 else "days"
+            ttk.Label(
+                body,
+                text=(
+                    f"The next periodic verification will run in "
+                    f"{interval} {day_word}."
+                ),
+                foreground=Colors.TEXT_SECONDARY,
+            ).pack(anchor="w")
+        else:
+            ttk.Label(
+                body,
+                text=("No periodic verification is scheduled for this profile."),
+                foreground=Colors.DANGER,
+            ).pack(anchor="w")
+
+        ttk.Label(
+            body,
+            text="Would you like to verify this backup right now?",
+            font=Fonts.normal(),
+        ).pack(anchor="w", pady=(Spacing.MEDIUM, Spacing.SMALL))
+
+        dont_ask_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            body,
+            text="Don't ask again for this profile",
+            variable=dont_ask_var,
+        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
+
+        btn_row = ttk.Frame(body)
+        btn_row.pack(fill="x")
+
+        def _commit_dont_ask() -> None:
+            if dont_ask_var.get() and not profile.dont_prompt_verify_after_skip:
+                profile.dont_prompt_verify_after_skip = True
+                try:
+                    self.config_manager.save_profile(profile)
+                except OSError as e:
+                    logger.warning(
+                        "Could not persist dont_prompt_verify_after_skip for %s: %s",
+                        profile.name,
+                        e,
+                    )
+
+        def _on_skip() -> None:
+            _commit_dont_ask()
+            self.tab_run._append_log("Verification skipped by user (Fast mode).")
+            win.destroy()
+
+        def _on_verify_now() -> None:
+            _commit_dont_ask()
+            win.destroy()
+            # Switch to the Verify tab so the progress bar is visible,
+            # then trigger the verify on the current profile.
+            try:
+                self.notebook.select(self.tab_verify)
+            except tk.TclError:
+                pass
+            self._run_verify()
+
+        ttk.Button(btn_row, text="Skip", command=_on_skip).pack(side="right", padx=(Spacing.SMALL, 0))
+        ttk.Button(
+            btn_row,
+            text="Verify now",
+            command=_on_verify_now,
+        ).pack(side="right")
+
+        # Centre the dialog on the main window roughly
+        win.update_idletasks()
+        try:
+            x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+            y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_height()) // 3
+            win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        except tk.TclError:
+            pass
+
     def _on_verify_result(self, bvr, checked: int = 0, total: int = 0):
         """Handle a single verification result on the main thread."""
         self.tab_verify.add_result(
@@ -2367,6 +2522,7 @@ class BackupManagerApp:
         result,
         summary: str,
         cancelled: bool = False,
+        verification_disabled: bool = False,
     ) -> None:
         """Send backup report email with enriched metrics.
 
@@ -2376,6 +2532,11 @@ class BackupManagerApp:
             result: BackupResult (may be None on early failure).
             summary: Short summary text.
             cancelled: Whether the backup was cancelled.
+            verification_disabled: True when this is a scheduled run in
+                v3.7.0 case 3 (Fast + no periodic). The notifier adds
+                a "verification disabled" tag to the subject and an
+                amber warning block to the body. Only meaningful on
+                success — failure already screams loudly.
         """
         try:
             from src.core.integrity_verifier import _build_backend
@@ -2406,6 +2567,7 @@ class BackupManagerApp:
                     else profile.backup_type.value.upper()
                 ),
                 free_space=free_space,
+                verification_disabled=verification_disabled,
             )
         except Exception as e:
             logger.warning("Could not send backup report: %s", e)
@@ -2518,11 +2680,27 @@ class BackupManagerApp:
             self.root.after(0, self._update_health_dashboard, profile)
 
             if profile.email.enabled:
+                # v3.7.0 case 3 detection: this is a scheduled run that
+                # succeeded, the effective post-copy verify was OFF
+                # (Fast mode on local/network storage; remote and
+                # Object Lock force-on so they never reach here with a
+                # False), and no periodic verification is armed. The
+                # notifier adds an amber "verification disabled" block
+                # so the operator knows no automatic integrity check
+                # will confirm this backup.
+                from src.core.backup_engine import _effective_auto_verify
+
+                verification_disabled = (
+                    not _effective_auto_verify(profile)
+                    and not profile.schedule.verify_enabled
+                )
+
                 self._send_backup_email(
                     profile,
                     True,
                     stats,
                     f"{stats.files_processed} files backed up",
+                    verification_disabled=verification_disabled,
                 )
 
         except CancelledError:

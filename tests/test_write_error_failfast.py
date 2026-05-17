@@ -11,7 +11,7 @@ import pytest
 
 from src.core.exceptions import CancelledError, WriteError
 from src.core.phases.collector import FileInfo
-from src.core.phases.local_writer import write_flat
+from src.core.phases.local_writer import WRITE_FLAT_WORKERS, write_flat
 from src.core.phases.remote_writer import write_remote
 
 
@@ -98,9 +98,39 @@ class TestLocalWriterFailFast:
             write_flat([fi], tmp_path / "dst", "bk1")
 
     def test_first_file_failure_stops_pipeline(self, tmp_path):
-        """When 3 files are queued and first fails, only 1 copy is attempted."""
-        files = _make_files(tmp_path, count=3)
-        mock_copy = MagicMock(side_effect=OSError("fail"))
+        """A failing copy short-circuits the pool: pending futures
+        get cancelled and only the workers that were already mid-copy
+        when the first exception surfaced finish their current task.
+
+        Pre-v3.7.1 (sequential loop) this assertion was ``== 1``: only
+        the first file's copy was attempted before the error broke the
+        loop. With the v3.7.1 ThreadPoolExecutor(4), the strict bound
+        is ``≤ WRITE_FLAT_WORKERS`` calls *if* the main thread reacts
+        to the first exception before any worker can rotate to a
+        second file. On a tmp_path NVMe where ``OSError`` is raised
+        in microseconds, the workers can churn through several files
+        before the main thread's ``as_completed`` loop yields the
+        first future — giving counts of 5-10 instead of 4. To make
+        the bound deterministic, the mock sleeps for 50 ms before
+        raising, giving the main thread comfortable headroom to cancel
+        pending futures before any worker can dequeue a second file.
+
+        Contract pinned: copies attempted ≤ workers, and strictly less
+        than the total queue (so cancellation is observable as a real
+        short-circuit).
+        """
+        import time
+
+        files = _make_files(tmp_path, count=20)
+
+        def slow_fail(*_args, **_kwargs):
+            # 50 ms is large enough that the main thread observes the
+            # first future's exception (microseconds) before any
+            # worker can finish its sleep and dequeue another file.
+            time.sleep(0.05)
+            raise OSError("fail")
+
+        mock_copy = MagicMock(side_effect=slow_fail)
 
         with (
             patch("src.core.phases.local_writer.shutil.copy2", mock_copy),
@@ -108,7 +138,14 @@ class TestLocalWriterFailFast:
         ):
             write_flat(files, tmp_path / "dst", "bk1")
 
-        assert mock_copy.call_count == 1
+        # At least 1 attempt (the one that surfaced the error).
+        assert mock_copy.call_count >= 1
+        # Strictly less than the queued total — the cancellation must
+        # be observable, not a no-op.
+        assert mock_copy.call_count < len(files)
+        # And at most WRITE_FLAT_WORKERS: every worker fires exactly
+        # one copy, sleeps 50 ms, raises, then the queue is empty.
+        assert mock_copy.call_count <= WRITE_FLAT_WORKERS
 
     def test_success_still_works(self, tmp_path):
         """Normal case: all files copied successfully."""

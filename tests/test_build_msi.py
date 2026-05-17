@@ -168,6 +168,35 @@ class TestDefenderExclusion:
         condition = match.group(1)
         assert 'REMOVE="ALL"' in condition
 
+    def test_remove_exclusion_skips_on_upgrade(self, build_msi):
+        """v3.7.3 fix: the Remove CA must NOT fire during a MajorUpgrade.
+
+        Without the ``NOT UPGRADINGPRODUCTCODE`` guard, WiX's
+        ``RemoveExistingProducts`` silently uninstalled the old product
+        with ``REMOVE="ALL"`` and stripped the Defender exclusion, then
+        the new product's AddDefenderExclusion either did not fire or
+        was blocked by Tamper Protection, leaving the install folder
+        un-excluded. Symptom on the user's machine: 5-10 min Defender
+        scan freeze at first launch after every upgrade since v3.7.0.
+
+        Both the deferred Remove CA and its paired setter must carry
+        the guard — if only one does, the executor still runs with the
+        wrong command line because the setter was skipped.
+        """
+        wxs = build_msi._build_wxs("1.0.0")
+        import re
+
+        for action_id in ("SetRemoveDefenderCmd", "RemoveDefenderExclusion"):
+            pattern = (
+                r'<Custom Action="' + action_id + r'"[^>]*>([^<]+)</Custom>'
+            )
+            match = re.search(pattern, wxs)
+            assert match is not None, f"{action_id} <Custom> not found"
+            condition = match.group(1)
+            assert (
+                "NOT UPGRADINGPRODUCTCODE" in condition
+            ), f"{action_id} must guard against MajorUpgrade with NOT UPGRADINGPRODUCTCODE"
+
     def test_defender_actions_run_as_system(self, build_msi):
         """Add/Remove-MpPreference need elevation.
 

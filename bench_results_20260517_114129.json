@@ -1,0 +1,34 @@
+{
+  "started_at": "2026-05-17T11:41:29.936012",
+  "ended_at": "2026-05-17T11:46:01.678698",
+  "source": "F:\\Documents\\Divers",
+  "dest_root": "E:\\BMtest",
+  "max_bytes": 10737418240,
+  "evict_gb": 20,
+  "modes": [
+    {
+      "mode": "single",
+      "files": 3642,
+      "bytes_total": 7926566293,
+      "elapsed_seconds": 27.955659300030675,
+      "rate_mb_s": 270.40545206949577,
+      "evict_seconds": 64.41779689997202
+    },
+    {
+      "mode": "pool4",
+      "files": 3642,
+      "bytes_total": 7926566293,
+      "elapsed_seconds": 20.147774900018703,
+      "rate_mb_s": 375.19590765919173,
+      "evict_seconds": 67.64069439994637
+    },
+    {
+      "mode": "pool8",
+      "files": 3642,
+      "bytes_total": 7926566293,
+      "elapsed_seconds": 19.413506300013978,
+      "rate_mb_s": 389.3867791888864,
+      "evict_seconds": 66.86569169996073
+    }
+  ]
+}

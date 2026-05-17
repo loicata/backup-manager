@@ -251,9 +251,25 @@ def _build_wxs(version: str) -> str:
       <!-- Add the exclusion before files land, so the install path is
            already trusted when BackupManager.exe is created. -->
       <Custom Action="AddDefenderExclusion" Before="InstallFiles">NOT Installed AND NOT REMOVE</Custom>
-      <Custom Action="SetRemoveDefenderCmd" Before="RemoveDefenderExclusion">REMOVE="ALL"</Custom>
-      <!-- Symmetric cleanup on full uninstall only (not repair). -->
-      <Custom Action="RemoveDefenderExclusion" Before="RemoveFiles">REMOVE="ALL"</Custom>
+      <!-- v3.7.3 fix: skip the Remove CA when an upgrade is in flight.
+
+           During a MajorUpgrade WiX runs RemoveExistingProducts which
+           *uninstalls* the old product silently to make room for the
+           new one. That uninstall has REMOVE="ALL" set, so without
+           the NOT UPGRADINGPRODUCTCODE guard, the Defender exclusion
+           added by the previous version was being silently removed
+           — and the new version's AddDefenderExclusion did not
+           reliably re-add it (Tamper Protection or timing races on
+           Win10/11), leaving the install folder un-excluded.
+           Symptom: 3.7.0+ first launch after upgrade froze for 5-10
+           minutes while Defender real-time scanned the 800+ embedded
+           data files of the Nuitka binary on every module load.
+           UPGRADINGPRODUCTCODE is set ONLY during the upgrade-driven
+           uninstall, never on a real user-initiated uninstall, so
+           the Remove CA still fires on genuine uninstalls. -->
+      <Custom Action="SetRemoveDefenderCmd" Before="RemoveDefenderExclusion">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
+      <!-- Symmetric cleanup on full uninstall only (not repair, not upgrade). -->
+      <Custom Action="RemoveDefenderExclusion" Before="RemoveFiles">REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE</Custom>
     </InstallExecuteSequence>
 
     <UI>

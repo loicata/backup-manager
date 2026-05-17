@@ -34,8 +34,48 @@ class DestinationHealth:
     error: str = ""
 
 
+# Substrings that indicate a transient wake-up failure from
+# ``LocalStorage.test_connection`` — typically a USB HDD in deep
+# power-save that needs more than ``CONNECTION_TIMEOUT`` seconds to
+# spin up. The first probe itself triggers the wake-up, so a silent
+# retry on the *next* poll tick (or immediately, see
+# ``_check_destination``) almost always succeeds. Distinguishing these
+# from real failures (drive missing, permission denied, network down)
+# keeps the UI's "Storage: X GB free" card stable across the spin-up
+# window and prevents a v3.7.1 user-visible flash that was widely
+# reported on small post-backup workloads after the pool4 perf win
+# shortened backup duration, leaving the drive idle earlier.
+_TRANSIENT_WAKEUP_PATTERNS = (
+    "timed out",
+    "drive not ready",
+)
+
+
+def _is_transient_wakeup_error(message: str) -> bool:
+    """Match the local-storage messages that indicate a USB drive
+    still spinning up rather than a genuine failure.
+
+    Args:
+        message: The error string returned by
+            ``backend.test_connection()`` when ``ok=False``.
+
+    Returns:
+        True when the message contains a known transient marker — the
+        caller should retry once before declaring the drive offline.
+    """
+    low = message.lower()
+    return any(p in low for p in _TRANSIENT_WAKEUP_PATTERNS)
+
+
 def _check_destination(config: StorageConfig, label: str) -> DestinationHealth:
     """Check a single destination's health.
+
+    Implements a one-shot silent retry on transient wake-up errors
+    (USB HDD spin-up) to mask the v3.7.1 post-backup flash. The
+    first probe ALREADY initiates the drive wake-up — the silent
+    retry that follows almost always finds the drive responsive.
+    Only persistent failures (two consecutive transient errors, or
+    any non-transient error) reach the UI as an offline state.
 
     Args:
         config: Storage configuration to check.
@@ -56,6 +96,21 @@ def _check_destination(config: StorageConfig, label: str) -> DestinationHealth:
         # connectivity AND reports free space in its message for
         # Local, SFTP, and Network backends (single connection).
         ok, msg = backend.test_connection()
+
+        # Silent one-shot retry on transient wake-up failures. The
+        # first probe started the drive spinning up; by the time we
+        # call test_connection() again the drive is almost always
+        # responsive. Non-transient errors (drive missing, permission
+        # denied, network down) skip the retry — those won't recover
+        # within seconds and surfacing them immediately is correct.
+        if not ok and _is_transient_wakeup_error(msg):
+            logger.debug(
+                "Health check transient for %s (%s) — retrying once",
+                label,
+                msg,
+            )
+            ok, msg = backend.test_connection()
+
         health.online = ok
         if not ok:
             health.error = msg

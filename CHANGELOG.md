@@ -5,6 +5,54 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.3] - 2026-05-17
+
+### Fixed
+- **MSI MajorUpgrade silently removed the Defender exclusion on the install folder, causing 5-10 min Defender-scan freezes on every first launch after upgrade since v3.7.0.** Root cause: the WiX ``RemoveDefenderExclusion`` CustomAction was conditioned only on ``REMOVE="ALL"``, which is set during a MajorUpgrade's ``RemoveExistingProducts`` step (silent uninstall of the previous version to make room for the new one). The old version's exclusion was therefore stripped, and the new version's ``AddDefenderExclusion`` either skipped (timing race on the ``Installed`` property) or was silently blocked by Windows 10/11 **Tamper Protection** (introduced in 1903, blocks third-party processes from modifying Defender preferences even from elevated MSI context). Net effect: the install folder ended un-excluded, and Windows Defender real-time scanned every one of the ~800 embedded data files of the Nuitka binary on every module load at startup. The fix adds ``NOT UPGRADINGPRODUCTCODE`` to both ``RemoveDefenderExclusion`` and its paired ``SetRemoveDefenderCmd`` conditions so the Remove CA fires only on a genuine user-initiated uninstall, never during the upgrade-driven silent uninstall. The exclusion is now preserved across upgrades.
+- **General tab "Integrity verification" section had a visible gap between the two checkboxes** on local-plain profiles. The hint label below "Verify integrity after backup" was always packed (reserving one line of vertical space) even when its text was empty — only populated when storage is remote or Object Lock forces verify on. The hint is now packed dynamically: shown only when there is a message, ``pack_forget()`` otherwise.
+
+### Tests
+- +1 test in ``tests/test_build_msi.py::TestDefenderExclusion::test_remove_exclusion_skips_on_upgrade``: pins ``NOT UPGRADINGPRODUCTCODE`` on both ``SetRemoveDefenderCmd`` and ``RemoveDefenderExclusion`` conditions so a future refactor of the WiX template can't silently regress this property.
+
+## [3.7.2] - 2026-05-17
+
+### Fixed
+- **Run-tab Destinations card flashed "Connection test timed out after 30s" right after a backup completed**, then recovered to "X GB free" on the next health poll 60 s later. Visible since v3.7.1 because the pool4 perf win shortened backup duration, leaving the USB HDD idle earlier and hitting its spin-down threshold sooner; the first post-backup health probe lands while the drive is still spinning up, which exceeds ``CONNECTION_TIMEOUT = 30 s`` on deep-power-save HDDs. The fix lives in ``src/core/health_checker.py::_check_destination``: after a failed ``test_connection()``, the message is matched against a transient-marker list (``"timed out"``, ``"drive not ready"``). On a match, ``test_connection()`` is called once more — by then the drive is responsive and the probe succeeds. Non-transient errors (permission denied, connection refused, missing destination) skip the retry and surface immediately. Behaviour change is purely cosmetic; the backup pipeline does not use this code path.
+
+### Tests
+- +10 in ``tests/unit/test_health_checker.py::TestTransientWakeupRetry``: marker matching (``timed out``, ``drive not ready``, case-insensitive), rejection of non-transient strings (``permission denied``, ``connection refused``, empty), retry-on-transient that succeeds on the 2nd probe, retry-on-transient that fails twice and surfaces the second message, no-retry paths on real failures and on success.
+
+## [3.7.1] - 2026-05-17
+
+### Changed
+- **``write_flat`` now drives ``shutil.copy2`` from a ``ThreadPoolExecutor`` of 4 workers.** Byte transfer still goes through ``CopyFileExW`` (Windows kernel zero-copy, Invariant 1 of ``invariants_perf_critical.md``) — only the per-file driving loop is parallel. On the 2026-05-17 bench (``scripts/bench_copy_strategies.py``, 7.38 GB / 3 642 files / HDD USB external) pool4 gained **+39 %** vs single-thread (28.0 s → 20.1 s, 270 → 375 MB/s) while pool8 only added +5 % over pool4 — 4 is the empirical sweet spot for an HDD spindle. Projected gain on the 47 GB / 271 k-file BLoic workload: backup wall-clock 55 min → ~40 min, since per-file overhead dominates more on small-file workloads than on the 2-MB/file Divers proxy.
+- **``PhaseLogger.progress()`` is now thread-safe.** A ``threading.Lock`` guards the throttle window (``_last_progress_ms`` read/update) so two parallel writer workers cannot double-emit within the same 100 ms window and defeat Invariant 5 (PROGRESS at most 10 Hz to keep the Tk message pump alive). Uncontended on the sequential phases (collector, filter, hashing-internal loop) and adds ~50 ns there.
+
+### Added
+- **``scripts/bench_copy_strategies.py``** — committed alongside the result JSON ``bench_results_20260517_114129.json`` so the empirical basis for ``WRITE_FLAT_WORKERS = 4`` is reproducible. Bench compares single / pool4 / pool8 modes with OS cache eviction between runs (20 GB dummy write) to keep the comparison cold-cache for every mode.
+
+### Tests
+- +7 tests in ``tests/test_local_writer.py::TestWriteFlatParallel``: ``WRITE_FLAT_WORKERS == 4`` is pinned; pool is constructed with ``max_workers=4``; 50 files all land regardless of completion order; ``cancel_check`` propagates from any worker; first ``WriteError`` surfaces; PROGRESS still emits once per file with throttle disabled; ``long_path_mkdir`` race on deeply-nested concurrent directories is safe.
+- Updated ``tests/test_write_error_failfast.py::test_first_file_failure_stops_pipeline``: the pre-v3.7.1 strict bound ``mock_copy.call_count == 1`` (only the first file's copy attempted before the loop broke) is replaced by ``≤ WRITE_FLAT_WORKERS``. A cross-worker short-circuit on the first observed error (``first_error[]`` shared state, ``error_lock``) pins this stricter form deterministically — without it, worker rotation races could burn 5-10 extra copy attempts on a tmp_path NVMe before the main thread observes the first exception.
+
+## [3.7.0] - 2026-05-17
+
+### Added
+- **Per-profile "Verify integrity after backup" toggle (Fast / Thorough mode).** Before 3.7.0 every successful backup re-hashed every file right after the copy phase to confirm the destination bytes matched the manifest — on the 47 GB / 271 k-file BLoic profile this added ~19 min to a 70-min run on a 5400 rpm HDD. The new toggle (defaults to **Fast = OFF** for new profiles) lets the user trade post-copy verify wall-clock for a periodic verification that runs out-of-band on the schedule the user already picked. Local plain and local encrypted (.tar.wbenc) profiles honour the toggle directly; **SFTP, S3, and Object Lock force-on regardless** (verify cost is dwarfed by upload cost on remote, and Object Lock anti-ransomware requires integrity by contract). The engine helper ``_effective_auto_verify(profile)`` resolves the user toggle against these overrides and is the single source of truth for the ``_phase_verify`` early-exit.
+- **Wizard step 6 — "How thorough should the backup be?"** Personal mode goes from 5 to 6 steps. The new final step (Fast / Thorough radio) maps directly to the new toggle. Pro mode keeps its 11 steps unchanged because Object Lock anti-ransomware forces verify on.
+- **Integrity verification section moved from the Schedule tab to the General tab** (between Source paths and Exclusion patterns). The new "Verify integrity after backup" checkbox sits above the existing "Enable periodic integrity verification" / "Verification interval" pair, so the user sees both options in the same place — the post-copy verify and the periodic safety net.
+- **Post-backup "Verify now?" dialog for manual Fast-mode backups.** After a manual backup completes successfully and the post-copy verify was skipped, a modal Toplevel offers a one-click ``Verify now`` (switches to the Verify tab and triggers the verify on the current profile) plus a ``Skip`` button and a ``Don't ask again for this profile`` checkbox (persisted to ``BackupProfile.dont_prompt_verify_after_skip``). The dialog is suppressed when verify ran inline (remote / Object Lock / user toggle on), when the user opted out previously, and on scheduled runs (no one is in front of the screen — the email notifier handles those instead).
+- **Email "verification disabled" tag for scheduled Fast + no-periodic backups.** When a scheduled backup completes successfully in Fast mode AND no periodic verification is armed for the profile (v3.7.0 case 3), the subject is prefixed with ``⚠️`` and suffixed with ``, verification disabled`` so the warning is visible in inbox previews, and an amber warning block is inserted in the HTML body (variant A wording) telling the operator that no automatic integrity check will confirm this backup and pointing to the Verify tab.
+
+### Changed
+- **``VerificationConfig.auto_verify`` default flips from True to False.** New profiles ship Fast-mode by default; existing profiles already on disk are not migrated (the user manually validated on 2026-05-17 that no in-the-wild profiles need migration).
+- **Wizard ``_create_profile`` reads ``verify_after_backup`` from the new step 6** and constructs a ``VerificationConfig`` accordingly. Pro-mode flow does not consume the key (Object Lock force-on overrides it).
+
+### Tests
+- +16 tests in ``tests/test_skip_verify_after_backup.py``: ``VerificationConfig`` default-off contract, ``_effective_auto_verify`` resolution across LOCAL plain, LOCAL encrypted, SFTP, S3, NETWORK and Object Lock, and engine ``_phase_verify`` integration (skip when user off+local, run when user off+remote, run when user off+Object Lock, run when user on+local). The engine tests build a minimal ``BackupEngine`` via ``__new__`` + ``MagicMock`` ``_events`` so the verify-dispatch path is testable without touching the full pipeline.
+- +13 tests in ``tests/test_email_verification_disabled.py``: subject tag fires only on ``success`` (never on FAILED / CANCELLED), amber HTML block present/absent across both ``_build_html`` and ``_build_backup_html``, and the kwarg defaults to False so v3.6.x callers keep their previous output byte-for-byte.
+- Updated ``tests/unit/test_wizard_schedule_step.py``: renamed ``test_personal_mode_has_five_steps`` → ``test_personal_mode_has_six_steps`` and updated ``test_next_says_finish_on_last_step`` to anchor on step 6 (the new Backup-speed final step).
+
 ## [3.6.7] - 2026-05-15
 
 ### Fixed

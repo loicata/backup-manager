@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 
 from src.core.events import EventBus
-from src.core.exceptions import WriteError
+from src.core.exceptions import CancelledError, WriteError
 from src.core.phases.collector import FileInfo
 from src.core.phases.local_writer import (
+    WRITE_FLAT_WORKERS,
     generate_backup_name,
     write_encrypted_tar,
     write_flat,
@@ -162,6 +163,238 @@ class TestWriteFlat:
         dest.mkdir()
         result = write_flat(files, dest, "Backup")
         assert (result / "big.bin").read_bytes() == data
+
+
+# ---------------------------------------------------------------------------
+# write_flat — parallel pool behaviour (v3.7.1)
+# ---------------------------------------------------------------------------
+
+
+class TestWriteFlatParallel:
+    """Contracts pinned for the v3.7.1 ThreadPoolExecutor refactor.
+
+    The point of these tests is *not* to measure throughput (pytest
+    runs on NVMe / tmp_path where pool4 and single-thread are within
+    rounding error — see ``feedback_no_silent_perf_regressions.md``).
+    They pin the structural properties that a green local run cannot
+    catch on its own:
+
+    - The pool is sized at ``WRITE_FLAT_WORKERS`` (4).
+    - All files land in the destination regardless of completion order.
+    - ``cancel_check`` raised by any worker propagates.
+    - The first ``WriteError`` surfaces; pending work is cancelled.
+    - PROGRESS events still emit once per file (with throttle disabled).
+    """
+
+    def test_workers_constant_is_4(self) -> None:
+        """``WRITE_FLAT_WORKERS`` is the sweet spot from the 2026-05-17
+        bench. Changing it requires a re-bench on a real HDD/USB
+        target — see scripts/bench_copy_strategies.py."""
+        assert WRITE_FLAT_WORKERS == 4
+
+    def test_pool_constructed_with_4_workers(self, tmp_path: Path) -> None:
+        """The executor is built with ``max_workers=WRITE_FLAT_WORKERS``.
+
+        Pins the wiring between the constant and the executor so a
+        refactor that drops the kwarg (Python's default scales with
+        CPU count, which is wildly wrong for an HDD target) cannot
+        silently land.
+        """
+        from unittest.mock import patch
+
+        src = tmp_path / "source"
+        _make_file(src / "a.txt", "a")
+        files = [_make_file_info(src / "a.txt", "a.txt")]
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        with patch(
+            "src.core.phases.local_writer.ThreadPoolExecutor",
+            wraps=__import__(
+                "concurrent.futures", fromlist=["ThreadPoolExecutor"]
+            ).ThreadPoolExecutor,
+        ) as mock_pool:
+            write_flat(files, dest, "Backup")
+
+        # Inspect the call kwargs to find max_workers
+        assert mock_pool.call_count == 1
+        kwargs = mock_pool.call_args.kwargs
+        assert kwargs.get("max_workers") == 4
+
+    def test_all_files_copied_with_many(self, tmp_path: Path) -> None:
+        """50 files all land in the destination regardless of which
+        worker copies which one. Catches a counter / loop bug that
+        could lose a file silently when the pool reorders work.
+        """
+        src = tmp_path / "source"
+        files = []
+        for i in range(50):
+            f = src / f"f_{i:02d}.txt"
+            _make_file(f, f"content-{i}")
+            files.append(_make_file_info(f, f"f_{i:02d}.txt"))
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        result = write_flat(files, dest, "Backup")
+
+        produced = sorted(p.name for p in result.iterdir())
+        assert produced == sorted(f"f_{i:02d}.txt" for i in range(50))
+        # And each file has its expected content (no cross-pollination
+        # via a shared buffer or filename swap).
+        for i in range(50):
+            assert (result / f"f_{i:02d}.txt").read_text(
+                encoding="utf-8"
+            ) == f"content-{i}"
+
+    def test_cancellation_propagates_from_worker(self, tmp_path: Path) -> None:
+        """``cancel_check`` raised by any worker surfaces as
+        ``CancelledError``. The pool is drained promptly and at least
+        one file may have been copied before the cancel was observed
+        — that is acceptable.
+        """
+        src = tmp_path / "source"
+        files = []
+        for i in range(20):
+            f = src / f"f_{i:02d}.txt"
+            _make_file(f, "data")
+            files.append(_make_file_info(f, f"f_{i:02d}.txt"))
+
+        # ``cancel_check`` is called from multiple worker threads. The
+        # call counter must be guarded by a lock so the "raise after N"
+        # rule is deterministic — without the lock the threshold can
+        # be crossed by several workers concurrently, but the contract
+        # (a CancelledError surfaces) still holds.
+        import threading
+
+        call_lock = threading.Lock()
+        call_count = [0]
+
+        def cancel_after_three() -> None:
+            with call_lock:
+                call_count[0] += 1
+                n = call_count[0]
+            if n > 3:
+                raise CancelledError("user cancelled")
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        with pytest.raises(CancelledError):
+            write_flat(files, dest, "Backup", cancel_check=cancel_after_three)
+
+    def test_first_write_error_propagates(self, tmp_path: Path) -> None:
+        """If multiple files would fail, only the first observed
+        ``WriteError`` surfaces; pending files are cancelled. The test
+        is order-agnostic on which file's path appears in the
+        exception (the pool may reorder).
+        """
+        from unittest.mock import patch
+
+        src = tmp_path / "source"
+        files = []
+        for i in range(20):
+            f = src / f"f_{i:02d}.txt"
+            _make_file(f, "data")
+            files.append(_make_file_info(f, f"f_{i:02d}.txt"))
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+
+        with patch(
+            "src.core.phases.local_writer.shutil.copy2",
+            side_effect=PermissionError("Access denied"),
+        ), pytest.raises(WriteError) as exc_info:
+            write_flat(files, dest, "Backup")
+
+        # The relative path on the exception comes from the
+        # file_info passed to whichever worker failed first — must
+        # match one of the inputs.
+        msg = str(exc_info.value)
+        assert any(f"f_{i:02d}.txt" in msg for i in range(20))
+
+    def test_progress_emits_one_per_file_without_throttle(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """With the throttle disabled, every file produces a PROGRESS
+        event regardless of which worker copies it. Catches a counter
+        bug that would lose events when workers race on the lock.
+        """
+        monkeypatch.setattr("src.core.phase_logger._PROGRESS_THROTTLE_MS", 0)
+
+        src = tmp_path / "source"
+        files = []
+        for i in range(20):
+            f = src / f"f_{i:02d}.txt"
+            _make_file(f, "data")
+            files.append(_make_file_info(f, f"f_{i:02d}.txt"))
+
+        events = EventBus()
+        progress_data: list[dict] = []
+        events.subscribe("progress", lambda **kw: progress_data.append(kw))
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        write_flat(files, dest, "Backup", events=events)
+
+        # Exactly one PROGRESS per file
+        assert len(progress_data) == 20
+        # ``current`` values are 1..20 in some order (pool may reorder)
+        current_values = sorted(p["current"] for p in progress_data)
+        assert current_values == list(range(1, 21))
+
+    def test_progress_current_max_equals_total(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """At least one PROGRESS event has ``current == total`` so the
+        UI bar reaches 100%, even when the throttle would otherwise
+        squelch the last event.
+        """
+        monkeypatch.setattr("src.core.phase_logger._PROGRESS_THROTTLE_MS", 0)
+
+        src = tmp_path / "source"
+        files = []
+        for i in range(8):
+            f = src / f"f_{i}.txt"
+            _make_file(f, "data")
+            files.append(_make_file_info(f, f"f_{i}.txt"))
+
+        events = EventBus()
+        progress_data: list[dict] = []
+        events.subscribe("progress", lambda **kw: progress_data.append(kw))
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        write_flat(files, dest, "Backup", events=events)
+
+        max_current = max(p["current"] for p in progress_data)
+        assert max_current == 8
+
+    def test_long_path_destination_directories_created(
+        self, tmp_path: Path
+    ) -> None:
+        """Files in nested subdirectories all land properly even when
+        multiple workers create parent directories concurrently — the
+        ``long_path_mkdir`` call inside ``_copy_one`` is the race
+        target. ``mkdir(parents=True, exist_ok=True)`` is the safety
+        net but the test pins the property explicitly.
+        """
+        src = tmp_path / "source"
+        files = []
+        for i in range(20):
+            # Same parent for many files → highest concurrency on
+            # the mkdir of that one directory.
+            rel = f"deep/nested/path/f_{i:02d}.txt"
+            f = src / rel
+            _make_file(f, "data")
+            files.append(_make_file_info(f, rel))
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        result = write_flat(files, dest, "Backup")
+
+        for i in range(20):
+            assert (result / "deep" / "nested" / "path" / f"f_{i:02d}.txt").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -209,6 +209,61 @@ class GeneralTab(ScrollableTab):
             font=Fonts.small(),
         ).pack(side="right", padx=(Spacing.MEDIUM, 0))
 
+        # Integrity verification (moved from Schedule tab in v3.7.0).
+        # Two controls:
+        # - Verify integrity after backup: re-hash every file right
+        #   after copying (post-copy hash verify). Off by default —
+        #   the periodic check below covers silent corruption on its
+        #   own clock without slowing every backup down. Force-on
+        #   (greyed out) when storage is remote (SFTP / S3) or when
+        #   Object Lock is enabled on the profile.
+        # - Enable periodic integrity verification: background re-hash
+        #   every N days, independent of the per-backup toggle above.
+        verify_frame = ttk.LabelFrame(
+            self.inner, text="Integrity verification", padding=Spacing.PAD
+        )
+        verify_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, Spacing.MEDIUM))
+
+        self.verify_after_backup_var = tk.BooleanVar(value=False)
+        self._verify_after_backup_cb = ttk.Checkbutton(
+            verify_frame,
+            text="Verify integrity after backup",
+            variable=self.verify_after_backup_var,
+        )
+        self._verify_after_backup_cb.pack(anchor="w")
+        self._verify_after_backup_hint = ttk.Label(
+            verify_frame,
+            text="",
+            foreground=Colors.TEXT_SECONDARY,
+            font=Fonts.small(),
+        )
+        # Created but NOT packed yet — ``_refresh_verify_after_state``
+        # decides whether to pack it (only when there is a message to
+        # display, i.e. on remote storage or Object Lock profiles).
+        # Without this, even an empty Label reserved one line of
+        # vertical space between the two checkboxes, which felt like
+        # a gap on the common local-plain case.
+
+        self.periodic_verify_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            verify_frame,
+            text="Enable periodic integrity verification",
+            variable=self.periodic_verify_enabled_var,
+        ).pack(anchor="w", pady=(Spacing.SMALL, 0))
+
+        interval_row = ttk.Frame(verify_frame)
+        interval_row.pack(fill="x", padx=(Spacing.LARGE, 0))
+        ttk.Label(interval_row, text="Verify every").pack(side="left")
+        self.periodic_verify_interval_var = tk.IntVar(value=7)
+        ttk.Spinbox(
+            interval_row,
+            textvariable=self.periodic_verify_interval_var,
+            from_=1,
+            to=90,
+            width=5,
+        ).pack(side="left", padx=Spacing.SMALL)
+        ttk.Label(interval_row, text="days").pack(side="left")
+
         # Exclusion patterns
         excl_frame = ttk.LabelFrame(self.inner, text="Exclusion patterns", padding=Spacing.PAD)
         excl_frame.pack(fill="x", padx=Spacing.LARGE, pady=(Spacing.MEDIUM, Spacing.MEDIUM))
@@ -567,6 +622,14 @@ class GeneralTab(ScrollableTab):
             self.exclude_var.set(", ".join(profile.exclude_patterns))
             self.bw_percent_var.set(profile.bandwidth_percent)
 
+            # Integrity verification fields (moved here in v3.7.0)
+            self.verify_after_backup_var.set(profile.verification.auto_verify)
+            self.periodic_verify_enabled_var.set(profile.schedule.verify_enabled)
+            self.periodic_verify_interval_var.set(profile.schedule.verify_interval_days)
+            # Lock the post-backup toggle when storage / Object Lock
+            # forces verification on. The hint label explains why.
+            self._refresh_verify_after_state(profile)
+
             # Retry from schedule config
             self.retry_var.set(profile.schedule.retry_enabled)
 
@@ -605,7 +668,53 @@ class GeneralTab(ScrollableTab):
             "full_schedule_mode": self.full_sched_mode_var.get(),
             "full_day_of_week": self._day_name_to_int(self.full_day_of_week_var.get()),
             "full_day_of_month": self.full_day_of_month_var.get(),
+            # Integrity verification fields (moved from Schedule tab in v3.7.0)
+            "auto_verify": self.verify_after_backup_var.get(),
+            "periodic_verify_enabled": self.periodic_verify_enabled_var.get(),
+            "periodic_verify_interval_days": self.periodic_verify_interval_var.get(),
         }
+
+    def _refresh_verify_after_state(self, profile: BackupProfile) -> None:
+        """Lock the "Verify integrity after backup" checkbox when an
+        engine-side force-on override applies (remote storage or
+        Object Lock). Updates the hint label to explain why.
+        """
+        from src.core.config import StorageType
+
+        st = profile.storage.storage_type
+        is_remote = st in (StorageType.SFTP, StorageType.S3)
+        is_locked = profile.object_lock_enabled
+
+        # Helper closure: only pack the hint label when there is
+        # something to say. An empty packed Label still claims a line
+        # of vertical space — visible as a gap between the two
+        # checkboxes on local-plain profiles. Pack on first message,
+        # pack_forget when the message clears.
+        def _show_hint(message: str) -> None:
+            self._verify_after_backup_hint.config(text=message)
+            if message:
+                if not self._verify_after_backup_hint.winfo_ismapped():
+                    self._verify_after_backup_hint.pack(
+                        anchor="w", padx=(Spacing.LARGE, 0), after=self._verify_after_backup_cb
+                    )
+            else:
+                if self._verify_after_backup_hint.winfo_ismapped():
+                    self._verify_after_backup_hint.pack_forget()
+
+        if is_locked:
+            # Object Lock wins the message even if both apply — the
+            # security promise is the primary reason verification is
+            # mandatory on these profiles.
+            self.verify_after_backup_var.set(True)
+            self._verify_after_backup_cb.config(state="disabled")
+            _show_hint("Anti-ransomware mode: verification mandatory.")
+        elif is_remote:
+            self.verify_after_backup_var.set(True)
+            self._verify_after_backup_cb.config(state="disabled")
+            _show_hint("Remote destination: verification mandatory.")
+        else:
+            self._verify_after_backup_cb.config(state="normal")
+            _show_hint("")
 
     def _toggle_full_sched_selectors(self) -> None:
         """Show the day-of-week or day-of-month selector based on the

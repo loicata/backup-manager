@@ -56,10 +56,15 @@ def wizard(tk_root):
 class TestStepWiring:
     """The new step must be reachable from the personal-mode flow."""
 
-    def test_personal_mode_has_five_steps(self, wizard) -> None:
-        """Personal mode now ends with a Retention step (5/5)."""
+    def test_personal_mode_has_six_steps(self, wizard) -> None:
+        """Personal mode now ends with a Backup-speed step (6/6) since v3.7.0.
+
+        Before v3.7.0 the flow stopped at Retention (5/5). The new step 6
+        lets the user pick Fast (verify_after_backup=False, default) or
+        Thorough (verify_after_backup=True).
+        """
         wizard._select_mode(MODE_PERSONAL)
-        assert wizard._total_steps == 5
+        assert wizard._total_steps == 6
 
     def test_step_four_builder_is_schedule_frequency(self, wizard) -> None:
         """``_show_step`` must dispatch step 4 to the new builder method."""
@@ -318,11 +323,13 @@ class TestNextButtonLabel:
 
     def test_next_says_finish_on_last_step(self, wizard) -> None:
         wizard._select_mode(MODE_PERSONAL)
-        # Step 5 (retention) is the new last step. ``_show_step`` needs
-        # ``schedule_frequency`` populated so the retention step can
-        # decide which rows to render — seed a weekly default.
+        # Step 6 (backup speed) is the new last step since v3.7.0. The
+        # step itself only reads ``verify_after_backup`` (defaulting to
+        # Fast=False), but ``_show_step`` may navigate from prior steps
+        # that need ``schedule_frequency`` populated — seed a weekly
+        # default to keep the test independent of unrelated rehydration.
         wizard._data["schedule_frequency"] = ScheduleFrequency.WEEKLY.value
-        wizard._step = 5
+        wizard._step = 6
         wizard._show_step()
         assert str(wizard._next_btn.cget("text")) == "Finish"
 

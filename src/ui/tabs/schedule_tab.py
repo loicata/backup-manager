@@ -115,31 +115,16 @@ class ScheduleTab(ttk.Frame):
             anchor="e", pady=(Spacing.SMALL, 0)
         )
 
-        # Periodic integrity verification
-        verify_frame = ttk.LabelFrame(
-            self._content, text="Integrity verification", padding=Spacing.PAD
-        )
-        verify_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
-
+        # NOTE: the "Integrity verification" section that used to live
+        # here has moved to the General tab in v3.7.0 (between Source
+        # paths and Exclusion patterns) so it sits alongside the new
+        # per-backup "Verify integrity after backup" toggle. We keep
+        # the hidden vars here so the rest of the tab's load / save /
+        # toggle code can still reference them — General tab is the
+        # source of truth, this tab just mirrors the values into the
+        # ScheduleConfig that gets saved.
         self.verify_enabled_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            verify_frame,
-            text="Enable periodic integrity verification",
-            variable=self.verify_enabled_var,
-        ).pack(anchor="w")
-
-        interval_row = ttk.Frame(verify_frame)
-        interval_row.pack(fill="x", pady=(Spacing.SMALL, 0))
-        ttk.Label(interval_row, text="Verify every").pack(side="left")
         self.verify_interval_var = tk.IntVar(value=7)
-        ttk.Spinbox(
-            interval_row,
-            textvariable=self.verify_interval_var,
-            from_=1,
-            to=90,
-            width=5,
-        ).pack(side="left", padx=Spacing.SMALL)
-        ttk.Label(interval_row, text="days").pack(side="left")
 
         self._toggle_enabled()
 

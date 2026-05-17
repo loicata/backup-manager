@@ -294,6 +294,7 @@ class SetupWizard:
                 3: self._step_storage,
                 4: self._step_schedule_frequency,
                 5: self._step_retention,
+                6: self._step_backup_speed,
             }
         else:
             builders = {
@@ -538,12 +539,18 @@ class SetupWizard:
         """Set the wizard mode and start the flow."""
         self._mode = mode
         if mode == MODE_PERSONAL:
-            # 5 steps: name → sources → storage → schedule frequency
-            # → retention. The retention step adapts its visible rows to
-            # the frequency picked in step 4 (Daily shows all three GFS
-            # tiers, Weekly hides daily, Monthly hides daily+weekly).
-            self._total_steps = 5
+            # 6 steps: name → sources → storage → schedule frequency
+            # → retention → backup speed (Fast/Thorough). The retention
+            # step adapts its visible rows to the frequency picked in
+            # step 4 (Daily shows all three GFS tiers, Weekly hides
+            # daily, Monthly hides daily+weekly). The backup-speed
+            # step (new in v3.7.0) lets the user trade integrity
+            # post-copy verify time for backup wall-clock time.
+            self._total_steps = 6
         else:
+            # Pro mode is Object Lock = anti-ransomware: verification
+            # is mandatory by security contract, so no Fast/Thorough
+            # choice — we stay at 11 steps.
             self._total_steps = 11
             # Auto-detect nearest AWS region in background (no UI freeze)
             self._data["pro_region"] = "eu-west-1"  # Default until detected
@@ -1409,6 +1416,74 @@ class SetupWizard:
         monthly_var.trace_add("write", _on_monthly)
 
         _refresh_summary()
+
+    def _step_backup_speed(self) -> None:
+        """Personal-mode step 6: pick Fast vs Thorough.
+
+        Maps directly to ``profile.verification.auto_verify``:
+        - Fast (default)  -> auto_verify=False -> skip post-copy hash
+          verify. The periodic verify (configurable from the General
+          tab after creation) is the safety net.
+        - Thorough        -> auto_verify=True  -> re-hash every file
+          right after the copy phase. ~19 min extra on a 47 GB HDD.
+
+        The Pro mode is Object Lock = anti-ransomware, where the
+        engine forces verify on regardless of the user choice, so
+        this step is not shown for the Pro flow.
+        """
+        self._set_header("How thorough should the backup be?")
+
+        ttk.Label(
+            self._content,
+            text=(
+                "Both modes write the same backup. The difference is "
+                "whether we re-verify every file's hash immediately "
+                "after the copy."
+            ),
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(pady=(0, Spacing.LARGE), anchor="w")
+
+        # Rehydrate from a previous visit (Back from Finish) so the
+        # user's choice survives navigation. Default False = Fast.
+        initial = bool(self._data.get("verify_after_backup", False))
+        verify_var = tk.BooleanVar(self._win, value=initial)
+
+        choice_frame = ttk.Frame(self._content)
+        choice_frame.pack(fill="x", pady=(0, Spacing.MEDIUM))
+
+        fast_row = ttk.Frame(choice_frame)
+        fast_row.pack(fill="x", pady=(0, Spacing.MEDIUM), anchor="w")
+        ttk.Radiobutton(
+            fast_row,
+            text="Fast",
+            variable=verify_var,
+            value=False,
+        ).pack(anchor="w")
+        ttk.Label(
+            fast_row,
+            text="Skip the full verification right after the backup.",
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w", padx=(Spacing.LARGE, 0))
+
+        thorough_row = ttk.Frame(choice_frame)
+        thorough_row.pack(fill="x", anchor="w")
+        ttk.Radiobutton(
+            thorough_row,
+            text="Thorough",
+            variable=verify_var,
+            value=True,
+        ).pack(anchor="w")
+        ttk.Label(
+            thorough_row,
+            text="Verify every file immediately after copying. Slower.",
+            foreground=Colors.TEXT_SECONDARY,
+        ).pack(anchor="w", padx=(Spacing.LARGE, 0))
+
+        def _on_choice(*_args: object) -> None:
+            self._data["verify_after_backup"] = verify_var.get()
+
+        verify_var.trace_add("write", _on_choice)
+        _on_choice()  # seed _data even if the user does not change anything
 
     # ------------------------------------------------------------------
     # Professional steps (3-9)
@@ -2387,6 +2462,14 @@ class SetupWizard:
         schedule_dow = int(d.get("schedule_day_of_week", 0))
         schedule_dom = int(d.get("schedule_day_of_month", 1))
 
+        # Backup speed step (v3.7.0). User picked Fast (default) or
+        # Thorough at the final wizard step. Maps directly to the
+        # per-profile verify_after_backup toggle. Defaults to False
+        # (Fast) for the rare path where the step was skipped.
+        from src.core.config import VerificationConfig
+
+        verify_after = bool(d.get("verify_after_backup", False))
+
         profile = BackupProfile(
             name=d["name"],
             source_paths=d["sources"],
@@ -2404,6 +2487,7 @@ class SetupWizard:
                 gfs_weekly=gfs_weekly,
                 gfs_monthly=gfs_monthly,
             ),
+            verification=VerificationConfig(auto_verify=verify_after),
         )
 
         self.result_profile = profile

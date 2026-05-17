@@ -100,6 +100,39 @@ def _is_full_due_by_schedule(profile: BackupProfile, now: datetime) -> bool:
 logger = logging.getLogger(__name__)
 
 
+def _effective_auto_verify(profile: BackupProfile) -> bool:
+    """Compute whether post-copy verification runs for this profile.
+
+    Resolves the user's ``verification.auto_verify`` toggle against
+    two force-on overrides:
+    1. Remote primary storage (SFTP / S3) — time saved by skipping
+       is negligible (~17 s for SFTP via PoC C sidecar, ~30 s for
+       S3 ETag check) and silent corruption is harder to detect on
+       a remote backend, so the safer default is to always verify.
+       Network shares are NOT included: they go through the local
+       pipeline (mounted as a drive letter), so the user-toggle
+       applies to them like to any local destination.
+    2. Object Lock (anti-ransomware) profiles — verification is part
+       of the security contract; the anti-ransomware mode promises
+       integrity guarantees that depend on post-copy verification.
+
+    The UI greys out the "Verify integrity after backup" checkbox
+    whenever either override applies, so the user is not surprised.
+
+    Args:
+        profile: BackupProfile to evaluate.
+
+    Returns:
+        True if post-copy verification should run, False if it
+        should be skipped.
+    """
+    if profile.storage.is_remote():
+        return True
+    if profile.object_lock_enabled:
+        return True
+    return profile.verification.auto_verify
+
+
 def _resolve_local_destination(storage: StorageConfig) -> str:
     """Resolve the local destination path using drive serial if needed.
 
@@ -1105,10 +1138,26 @@ class BackupEngine:
         Local backups: re-hash files and compare to manifest.
         Remote backups: verify file count and sizes on the server.
 
+        Since v3.7.0 the user can disable post-copy verification on
+        a per-profile basis via the "Verify integrity after backup"
+        toggle in the General tab. Two cases bypass the toggle and
+        force verification on:
+        1. Remote primary storage (SFTP / S3 / Network) — the time
+           saved by skipping is negligible (under 30 s) and silent
+           corruption is harder to detect on a remote backend.
+        2. Object Lock (anti-ransomware) profiles — verification is
+           part of the security contract.
+
+        When the toggle is off and the backup is local plain or local
+        encrypted, this phase returns silently. The UI dispatcher
+        (run tab for manual runs, email notifier for scheduled runs)
+        handles the user-facing "Verify now?" prompt or the adapted
+        success email.
+
         Raises:
             RuntimeError: If any file fails integrity verification.
         """
-        if not ctx.profile.verification.auto_verify:
+        if not _effective_auto_verify(ctx.profile):
             return
 
         is_local_dir = (

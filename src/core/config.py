@@ -194,7 +194,19 @@ class EncryptionConfig:
 
 @dataclass
 class VerificationConfig:
-    auto_verify: bool = True
+    # Whether to re-hash every file right after the copy phase as part
+    # of the backup run. Default OFF since v3.7.0: post-copy hash verify
+    # adds ~19 min on a 47 GB HDD backup and the periodic verification
+    # (every N days) already detects silent corruption on its own clock.
+    # The General tab exposes this as "Verify integrity after backup".
+    #
+    # Force-on overrides applied at runtime by the engine:
+    # - Remote primary storage (SFTP / S3 / Network) — gain from skipping
+    #   is negligible (~17 s for SFTP via PoC C sidecar, ~30 s for S3
+    #   ETag check) and silent corruption is harder to detect remotely.
+    # - Object Lock (anti-ransomware) profiles — verification is part
+    #   of the security contract.
+    auto_verify: bool = False
     alert_on_failure: bool = True
 
 
@@ -283,6 +295,13 @@ class BackupProfile:
     # auto-config from running again on subsequent transitions so the user
     # keeps full control after the initial friendly setup.
     differential_auto_configured: bool = False
+    # When the user clicked "Don't ask again" on the post-backup
+    # "Verify now?" dialog, this flag suppresses the dialog for all
+    # future Fast-mode backups on this profile. Per profile (not
+    # global) so the user can have different prompt behaviour on
+    # different profiles. Defaults False so newly-created profiles
+    # see the dialog at least once and can opt out.
+    dont_prompt_verify_after_skip: bool = False
 
 
 # --- Profile fingerprint ---

@@ -65,6 +65,7 @@ def send_backup_report(
     result=None,
     backup_type: str = "",
     free_space: int | None = None,
+    verification_disabled: bool = False,
 ) -> tuple[bool, str]:
     """Send backup report email.
 
@@ -78,6 +79,11 @@ def send_backup_report(
         result: Optional BackupResult with full metrics.
         backup_type: "FULL" or "DIFFERENTIAL".
         free_space: Remaining disk space in bytes (primary destination).
+        verification_disabled: True when this scheduled run skipped the
+            post-copy hash verification AND no periodic verification is
+            armed for the profile (v3.7.0 case 3 \u2014 Fast + no periodic +
+            scheduled). Adds a "verification disabled" tag to the
+            subject and a dedicated warning block in the body.
 
     Returns:
         (sent, message) tuple.
@@ -104,7 +110,20 @@ def send_backup_report(
         status_emoji = "\u274c"
         status_text = "FAILED"
 
-    subject = f"{status_emoji} Backup Manager \u2014 {profile_name} \u2014 {status_text}"
+    # v3.7.0: case 3 subject \u2014 promote the warning marker to the front
+    # of the subject line so it is the first thing the user sees in
+    # their inbox preview, and keep the profile name + status next to
+    # it for traceability. Only applies on success (a FAILED run
+    # already screams loudly enough).
+    if verification_disabled and success and not cancelled:
+        subject = (
+            f"\u26a0\ufe0f Backup Manager \u2014 {profile_name} "
+            f"\u2014 {status_text}, verification disabled"
+        )
+    else:
+        subject = (
+            f"{status_emoji} Backup Manager \u2014 {profile_name} \u2014 {status_text}"
+        )
 
     if result is not None:
         html_body = _build_backup_html(
@@ -116,9 +135,17 @@ def send_backup_report(
             result=result,
             backup_type=backup_type,
             free_space=free_space,
+            verification_disabled=verification_disabled,
         )
     else:
-        html_body = _build_html(profile_name, success, summary, details, cancelled=cancelled)
+        html_body = _build_html(
+            profile_name,
+            success,
+            summary,
+            details,
+            cancelled=cancelled,
+            verification_disabled=verification_disabled,
+        )
 
     return _send_email(config, subject, html_body)
 
@@ -221,8 +248,15 @@ def _build_html(
     summary: str,
     details: str = "",
     cancelled: bool = False,
+    verification_disabled: bool = False,
 ) -> str:
-    """Build HTML email body."""
+    """Build HTML email body.
+
+    When ``verification_disabled`` is True (v3.7.0 case 3: Fast + no
+    periodic + scheduled), an amber warning block is inserted right
+    after the overview table so the operator notices that no
+    automatic integrity check confirms this backup.
+    """
     from src import __version__
 
     if cancelled:
@@ -235,6 +269,10 @@ def _build_html(
         color = "#e74c3c"
         status = "FAILED"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    verification_section = _verification_disabled_block(
+        verification_disabled and success and not cancelled
+    )
 
     details_section = ""
     if details:
@@ -279,6 +317,7 @@ def _build_html(
                     </table>
                 </td>
             </tr>
+            {verification_section}
             {details_section}
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;
@@ -290,6 +329,41 @@ def _build_html(
     </body>
     </html>
     """
+
+
+def _verification_disabled_block(enabled: bool) -> str:
+    """Return the amber "verification disabled" warning block, or empty.
+
+    Reused by both ``_build_html`` (no-result emails) and
+    ``_build_backup_html`` (enriched emails) so the wording stays in
+    one place. Variant A wording chosen with the user on 2026-05-17.
+
+    Args:
+        enabled: True to emit the block, False to emit an empty string.
+    """
+    if not enabled:
+        return ""
+    return """
+        <tr>
+            <td style="padding: 12px 20px; border-top: 1px solid #eee;">
+                <div style="background: #fdf6e3; border-left: 4px solid #d68910;
+                            padding: 12px 14px; border-radius: 4px;
+                            color: #6e5012;">
+                    <strong style="color: #9a7d0a; font-size: 13px;">
+                        ⚠️ Verification disabled
+                    </strong>
+                    <p style="margin: 6px 0 0 0; font-size: 13px; line-height: 1.5;">
+                        Your scheduled backup completed successfully, but
+                        post-backup verification is OFF and no periodic
+                        verification is scheduled for this profile.
+                        No automatic integrity check will confirm this
+                        backup. To verify manually, open
+                        <strong>Backup Manager → Verify tab</strong>.
+                    </p>
+                </div>
+            </td>
+        </tr>
+        """
 
 
 def _build_verify_html(
@@ -460,6 +534,7 @@ def _build_backup_html(
     result=None,
     backup_type: str = "",
     free_space: int | None = None,
+    verification_disabled: bool = False,
 ) -> str:
     """Build enriched HTML email body with full backup metrics.
 
@@ -472,6 +547,10 @@ def _build_backup_html(
         result: BackupResult with full metrics.
         backup_type: "FULL" or "DIFFERENTIAL".
         free_space: Remaining disk space in bytes.
+        verification_disabled: True when the v3.7.0 case 3 amber
+            block should be inserted just after the metrics sections
+            (Fast + no periodic + scheduled). Suppressed on cancelled
+            / failed runs so the warning does not drown the failure.
 
     Returns:
         HTML string.
@@ -584,6 +663,13 @@ def _build_backup_html(
     </td>
 </tr>"""
 
+    # --- Verification-disabled warning (v3.7.0 case 3) \u2014 only on
+    # success because a FAILED run already screams loudly enough,
+    # and a CANCELLED run is the user's own choice.
+    verification_section = _verification_disabled_block(
+        verification_disabled and success and not cancelled
+    )
+
     # --- Log section ---
     log_section = ""
     if details:
@@ -610,6 +696,7 @@ def _build_backup_html(
                 </td>
             </tr>
             {sections}
+            {verification_section}
             {log_section}
             <tr>
                 <td style="padding: 12px 20px; color: #999; font-size: 11px;

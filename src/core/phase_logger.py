@@ -6,6 +6,7 @@ phase name to each event for downstream filtering.
 """
 
 import logging
+import threading
 import time
 
 from src.core.events import LOG, PROGRESS, EventBus
@@ -43,6 +44,14 @@ class PhaseLogger:
         # to the EventBus. ``0.0`` means "never emitted" so the very
         # first call always fires.
         self._last_progress_ms: float = 0.0
+        # Guards ``_last_progress_ms`` against the parallel writer
+        # (4 workers in ``write_flat`` since v3.7.1) — without this
+        # lock, two workers can read the same stale timestamp on the
+        # same throttle window and double-emit, defeating Invariant 5
+        # (PROGRESS at most 10 Hz). The lock is uncontended in the
+        # legacy sequential phases (collector, filter, hashing's own
+        # loop) and adds ~50 ns there.
+        self._progress_lock = threading.Lock()
 
     def info(self, message: str, *, details: dict | None = None) -> None:
         """Log at INFO level and emit LOG event.
@@ -141,15 +150,21 @@ class PhaseLogger:
         # last one, so the bar reaches its boundaries even when the
         # whole phase fits inside one throttle window.
         is_terminal = current <= 1 or (total > 0 and current >= total)
-        if not is_terminal:
-            now_ms = time.monotonic() * 1000.0
-            if now_ms - self._last_progress_ms < _PROGRESS_THROTTLE_MS:
-                return
-            self._last_progress_ms = now_ms
-        else:
-            # Reset the gate on terminal events so the next phase
-            # starts with a clean throttle window.
-            self._last_progress_ms = time.monotonic() * 1000.0
+        # Throttle gate decision must read and update ``_last_progress_ms``
+        # atomically — without this lock, two parallel workers (see
+        # ``write_flat``'s thread pool) can both observe the gate as
+        # "open" within the same window and both emit, doubling the
+        # event rate the UI sees.
+        with self._progress_lock:
+            if not is_terminal:
+                now_ms = time.monotonic() * 1000.0
+                if now_ms - self._last_progress_ms < _PROGRESS_THROTTLE_MS:
+                    return
+                self._last_progress_ms = now_ms
+            else:
+                # Reset the gate on terminal events so the next phase
+                # starts with a clean throttle window.
+                self._last_progress_ms = time.monotonic() * 1000.0
 
         self._events.emit(
             PROGRESS,

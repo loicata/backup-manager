@@ -7,6 +7,7 @@ from src.core.config import StorageConfig, StorageType
 from src.core.health_checker import (
     DestinationHealth,
     _check_destination,
+    _is_transient_wakeup_error,
     _parse_free_space,
     check_destinations_async,
     format_bytes,
@@ -268,6 +269,159 @@ class TestDestinationHealth:
         )
         assert h.online is True
         assert h.free_bytes == 1024
+
+
+class TestTransientWakeupRetry:
+    """v3.7.2 silent retry on USB-HDD spin-up timeouts.
+
+    The first probe of a sleeping HDD triggers its wake-up sequence
+    (10-30 s on deep-power-save drives) and can exceed
+    ``CONNECTION_TIMEOUT = 30 s``. The retry that follows almost
+    always finds the drive already spinning. Only transient markers
+    trigger the silent retry — real failures surface immediately.
+    """
+
+    def test_is_transient_matches_timeout_message(self):
+        assert _is_transient_wakeup_error(
+            "Connection test timed out after 30s. The drive may be …"
+        )
+
+    def test_is_transient_matches_drive_not_ready(self):
+        assert _is_transient_wakeup_error(
+            "Drive not ready after wake-up retries: G:\\Backup Manager"
+        )
+
+    def test_is_transient_case_insensitive(self):
+        assert _is_transient_wakeup_error("TIMED OUT after 30s")
+
+    def test_is_transient_rejects_permission_denied(self):
+        assert not _is_transient_wakeup_error(
+            "Destination is read-only or locked (permission denied)"
+        )
+
+    def test_is_transient_rejects_connection_refused(self):
+        assert not _is_transient_wakeup_error("Connection refused")
+
+    def test_is_transient_rejects_empty(self):
+        assert not _is_transient_wakeup_error("")
+
+    def test_retry_succeeds_after_transient_timeout(self):
+        """First probe times out (drive spinning up), second succeeds.
+
+        Mirrors the real-world v3.7.1 post-backup flash: backup ends,
+        drive starts spinning down, first health poll lands during
+        spin-up and times out, retry finds the drive ready.
+        """
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path="G:\\Backup Manager",
+        )
+        mock_backend = MagicMock()
+        mock_backend.test_connection.side_effect = [
+            (False, "Connection test timed out after 30s. The drive …"),
+            (True, "Connected — 2456.3 GB free"),
+        ]
+
+        with patch(
+            "src.core.health_checker.create_backend",
+            return_value=mock_backend,
+        ):
+            health = _check_destination(config, "Storage")
+
+        assert health.online is True
+        assert health.free_bytes == int(2456.3 * 1024**3)
+        # Called twice — once for the failing probe, once for the retry.
+        assert mock_backend.test_connection.call_count == 2
+
+    def test_retry_reports_failure_when_both_fail(self):
+        """Two transient timeouts in a row → reported offline.
+
+        Pins that the retry is *one-shot*, not an infinite loop. If
+        the drive is genuinely unresponsive (real unplug rather than
+        spin-up), the second timeout surfaces.
+        """
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path="G:\\Backup Manager",
+        )
+        mock_backend = MagicMock()
+        mock_backend.test_connection.side_effect = [
+            (False, "Connection test timed out after 30s. The drive …"),
+            (False, "Drive not ready after wake-up retries: G:\\…"),
+        ]
+
+        with patch(
+            "src.core.health_checker.create_backend",
+            return_value=mock_backend,
+        ):
+            health = _check_destination(config, "Storage")
+
+        assert health.online is False
+        # The error reported is the SECOND probe's message — the
+        # most recent state of the world wins. Caller does not see
+        # the first transient blip.
+        assert "Drive not ready" in health.error
+        assert mock_backend.test_connection.call_count == 2
+
+    def test_no_retry_on_permission_error(self):
+        """Permission-denied is NOT a transient marker: skip retry."""
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path="G:\\Backup Manager",
+        )
+        mock_backend = MagicMock()
+        mock_backend.test_connection.return_value = (
+            False,
+            "Destination is read-only or locked (permission denied)",
+        )
+
+        with patch(
+            "src.core.health_checker.create_backend",
+            return_value=mock_backend,
+        ):
+            health = _check_destination(config, "Storage")
+
+        assert health.online is False
+        # No retry — exactly one probe.
+        assert mock_backend.test_connection.call_count == 1
+
+    def test_no_retry_on_connection_refused(self):
+        """ConnectionRefused (SFTP/network) is a real failure: no retry."""
+        config = StorageConfig(
+            storage_type=StorageType.SFTP,
+            sftp_host="unreachable",
+            sftp_username="user",
+            sftp_remote_path="/backup",
+        )
+        mock_backend = MagicMock()
+        mock_backend.test_connection.return_value = (False, "Connection refused")
+
+        with patch(
+            "src.core.health_checker.create_backend",
+            return_value=mock_backend,
+        ):
+            health = _check_destination(config, "Mirror 1")
+
+        assert health.online is False
+        assert mock_backend.test_connection.call_count == 1
+
+    def test_no_retry_on_success(self):
+        """Successful probe does not trigger a retry."""
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path="G:\\Backup Manager",
+        )
+        mock_backend = MagicMock()
+        mock_backend.test_connection.return_value = (True, "Connected — 100.0 GB free")
+
+        with patch(
+            "src.core.health_checker.create_backend",
+            return_value=mock_backend,
+        ):
+            health = _check_destination(config, "Storage")
+
+        assert health.online is True
+        assert mock_backend.test_connection.call_count == 1
 
 
 class TestHealthPollingIdempotent:

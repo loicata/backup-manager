@@ -978,13 +978,23 @@ class BackupManagerApp:
 
     # --- Profile management ---
 
-    def _load_profiles(self):
+    def _load_profiles(self, *, select_first: bool = True):
         """Load profiles into the sidebar.
 
         Classic and Anti-Ransomware profiles share the same ACTIVE /
         INACTIVE sections. Anti-Ransomware profiles are highlighted in
         red (active) or a desaturated red (inactive) so the mode remains
         visible without splitting the list into two sub-lists.
+
+        Args:
+            select_first: When True (default), auto-selects the first
+                active profile in the sidebar and runs ``_load_profile``
+                on it — that's a 11-tab fan-out + health-dashboard
+                update, ~5-10 s on a populated config. Pass ``False``
+                from callers that will select a specific profile right
+                after (e.g. ``_new_profile``), so the freshly-created
+                profile is loaded ONCE in its tabs instead of twice
+                (first_active then new_profile).
         """
         self.profile_listbox.delete(0, "end")
         all_profiles = self.config_manager.get_all_profiles()
@@ -1064,7 +1074,8 @@ class BackupManagerApp:
 
         if first_active_profile is not None and first_active_idx is not None:
             self.profile_listbox.select_set(first_active_idx)
-            self._load_profile(first_active_profile)
+            if select_first:
+                self._load_profile(first_active_profile)
 
     def _on_profile_selected(self, event=None):
         sel = self.profile_listbox.curselection()
@@ -1601,7 +1612,12 @@ class BackupManagerApp:
         # created via this code path triggered a spurious backup during
         # the ~10 s ``_load_profiles`` + ``_load_profile`` freeze.
         self._seed_scheduler_for_new_profile(profile)
-        self._load_profiles()
+        # ``select_first=False`` skips the implicit ``_load_profile(first_active)``
+        # at the end of ``_load_profiles``. The newly-created profile is
+        # then loaded once below — without the kwarg, the 11-tab fan-out
+        # runs twice (first_active, then this profile), doubling the
+        # post-wizard freeze window on a populated config.
+        self._load_profiles(select_first=False)
 
         # Select the newly created profile in the sidebar
         self.profile_listbox.selection_clear(0, "end")
@@ -1868,7 +1884,11 @@ class BackupManagerApp:
                 self.config_manager.save_profile(profile)
                 self.config_manager.save_profile(other)
 
-        self._load_profiles()
+        # ``select_first=False`` skips the implicit ``_load_profile(first_active)``
+        # since ``_reselect_profile`` below loads the moved profile itself —
+        # without the kwarg, the 11-tab fan-out + health-dashboard runs
+        # twice (first_active then moved profile).
+        self._load_profiles(select_first=False)
         self._reselect_profile(profile)
 
     def _move_profile_down(self):
@@ -1907,7 +1927,11 @@ class BackupManagerApp:
             self.config_manager.save_profile(profile)
             self.config_manager.save_profile(other)
 
-        self._load_profiles()
+        # ``select_first=False`` skips the implicit ``_load_profile(first_active)``
+        # since ``_reselect_profile`` below loads the moved profile itself —
+        # without the kwarg, the 11-tab fan-out + health-dashboard runs
+        # twice (first_active then moved profile).
+        self._load_profiles(select_first=False)
         self._reselect_profile(profile)
 
     def _reselect_profile(self, profile: BackupProfile):

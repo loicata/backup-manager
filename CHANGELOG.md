@@ -5,6 +5,17 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.6] - 2026-05-17
+
+### Fixed
+- **Post-wizard ~10 s white-window freeze after creating a 2nd profile.** Root cause: ``_load_profiles`` always ended with an implicit ``_load_profile(first_active_profile)`` — the 11-tab fan-out + health-dashboard refresh on the first active profile in the sidebar. ``_new_profile``, ``_move_profile_up``, and ``_move_profile_down`` then *also* called ``_load_profile`` (directly or via ``_reselect_profile``) on their actually-targeted profile (the new one / the moved one). Net effect: every "create a new profile" or "reorder profile" action ran the full per-profile load TWICE — once on first_active, once on the target — doubling the freeze window. The newly-deiconified main window stayed unpainted (white) until the second load returned.
+
+### Changed
+- ``_load_profiles`` now accepts ``select_first: bool = True`` (keyword-only). The three callers that own the post-reload selection (``_new_profile``, ``_move_profile_up``, ``_move_profile_down``) pass ``False``; the implicit ``_load_profile(first_active)`` is skipped and the targeted profile is loaded ONCE. Startup paths and ``_save_profile`` / ``_relaunch_wizard_after_delete`` keep the default ``True`` because they rely on the implicit load to populate the tabs after the sidebar refresh.
+
+### Tests
+- +8 tests in ``tests/unit/test_app_load_profiles_select_first.py``: signature is keyword-only with default True; the three optimized callers pass ``select_first=False``; the two preserve-default callers do NOT pass False (so they keep showing tab content after Save / wizard-relaunch-after-delete); behavioural pair — ``select_first=False`` skips the implicit ``_load_profile`` while ``select_first=True`` invokes it on the first active profile.
+
 ## [3.7.5] - 2026-05-17
 
 ### Fixed

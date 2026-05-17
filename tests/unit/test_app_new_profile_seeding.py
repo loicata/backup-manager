@@ -111,7 +111,10 @@ class TestNewProfileOrdering:
         """
         src = textwrap.dedent(inspect.getsource(BackupManagerApp._new_profile))
         seed_pos = src.find("_seed_scheduler_for_new_profile(profile)")
-        load_pos = src.find("self._load_profiles()")
+        # Tolerate the optional ``select_first=False`` kwarg (v3.7.6 perf
+        # fix) — both ``_load_profiles()`` and ``_load_profiles(select_first=False)``
+        # are valid post-seed call shapes.
+        load_pos = src.find("self._load_profiles(")
         assert seed_pos != -1, "helper call missing in _new_profile"
         assert load_pos != -1, "_load_profiles call missing in _new_profile"
         assert seed_pos < load_pos, (
@@ -125,7 +128,10 @@ class TestNewProfileOrdering:
         the last profile and the wizard auto-relaunches."""
         src = textwrap.dedent(inspect.getsource(BackupManagerApp._relaunch_wizard_after_delete))
         seed_pos = src.find("_seed_scheduler_for_new_profile(profile)")
-        load_pos = src.find("self._load_profiles()")
+        # Tolerate the optional ``select_first=False`` kwarg (v3.7.6 perf
+        # fix) — both ``_load_profiles()`` and ``_load_profiles(select_first=False)``
+        # are valid post-seed call shapes.
+        load_pos = src.find("self._load_profiles(")
         assert seed_pos != -1
         assert load_pos != -1
         assert seed_pos < load_pos

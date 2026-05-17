@@ -1154,6 +1154,11 @@ class BackupManagerApp:
             profile.last_backup,
             profile.last_full_backup or "",
         )
+        # Bind the Run tab to this profile id so pipeline events tagged
+        # with a different profile_id (e.g. a background scheduler
+        # backup of another profile) do not move the bar / status /
+        # log of this view (v3.7.12 ProfileTaggingEventBus contract).
+        self.tab_run.set_current_profile_id(profile.id)
         # Only clear log when switching to a different profile
         if profile.id != previous_id:
             self.tab_run.clear_log()

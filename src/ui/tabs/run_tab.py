@@ -92,6 +92,14 @@ class RunTab(ttk.Frame):
         # Verify tab) so this tab's progress bar does not move while no
         # backup is actually running here.
         self._backup_active: bool = False
+        # Currently-selected profile id in the sidebar. Set by the app
+        # on every profile-switch via ``set_current_profile_id``. Pipeline
+        # events carry their own ``profile_id`` (since v3.7.12), and
+        # ``_event_belongs_to_current_profile`` drops every event whose
+        # tag does not match this id — that's how a background scheduler
+        # run on profile A stops bleeding into the Run-tab view of
+        # profile B (17/05/2026 user report).
+        self._current_profile_id: str = ""
         self._build_ui()
         self._subscribe_events()
 
@@ -520,7 +528,13 @@ class RunTab(ttk.Frame):
         self._events.subscribe(PHASE_COUNT, self._on_phase_count)
         self._events.subscribe(BACKUP_TYPE_DETERMINED, self._on_backup_type_determined)
 
-    def _on_backup_type_determined(self, backup_type: str = "", forced_full: bool = False, **_):
+    def _on_backup_type_determined(
+        self,
+        backup_type: str = "",
+        forced_full: bool = False,
+        profile_id: str = "",
+        **_,
+    ):
         """Update the Run tab header with the effective backup_type.
 
         Fires once per backup after ``_maybe_force_full``. When an
@@ -529,6 +543,8 @@ class RunTab(ttk.Frame):
         Thread-safe: the engine emits from the backup thread so we hop
         onto the main thread via ``after``.
         """
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
         self.after(0, self._apply_active_backup_type, backup_type, forced_full)
 
     def _apply_active_backup_type(self, backup_type: str, forced_full: bool) -> None:
@@ -541,16 +557,59 @@ class RunTab(ttk.Frame):
                 text=f"Profile: {name} | Type: {type_display} | Last backup: {last}"
             )
 
-    def _on_phase_count(self, weights=None, **kw):
+    def _event_belongs_to_current_profile(self, event_profile_id) -> bool:
+        """Return True if this event should drive the Run-tab view.
+
+        v3.7.12 contract: every pipeline event is tagged with the
+        profile id of the backup that produced it (engine wraps its
+        EventBus in ``ProfileTaggingEventBus`` for the duration of
+        ``run_backup``). The Run-tab is bound to whichever profile
+        the user has selected in the sidebar — events from any other
+        profile must not move the bar, status label, log tree, or
+        alerts area.
+
+        Untagged events (``profile_id`` missing or empty) pass through
+        for backwards compatibility: tray-emitted notices, the verify
+        loop on the Verify tab, and any test fixture that builds an
+        engine without a profile context.
+
+        Args:
+            event_profile_id: Value of the ``profile_id`` kwarg the
+                event carried — typically a 32-char UUID hex or empty.
+
+        Returns:
+            True when the event should be consumed by the handler.
+        """
+        if not event_profile_id:
+            return True
+        if not self._current_profile_id:
+            # No profile selected yet (cold start, between deletes) —
+            # accept everything so the very first profile click sees
+            # the events that may have arrived in the meantime.
+            return True
+        return event_profile_id == self._current_profile_id
+
+    def set_current_profile_id(self, profile_id: str) -> None:
+        """Bind the Run-tab to a specific profile id for event filtering.
+
+        Called by ``BackupManagerApp._load_profile`` on every sidebar
+        switch. After this call, only events tagged with
+        ``profile_id`` (or untagged events) reach the handlers.
+        """
+        self._current_profile_id = profile_id or ""
+
+    def _on_phase_count(self, weights=None, profile_id="", **kw):
         """Receive phase weights for progress bar calculation.
 
         Each phase gets a share proportional to its weight.
         E.g. hashing=1, backup=2, upload=5 → upload gets 5/8 of the bar.
         """
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
         if weights:
             self._phase_weights = dict(weights)
 
-    def _on_progress(self, current=0, total=0, filename="", phase="", **kw):
+    def _on_progress(self, current=0, total=0, filename="", phase="", profile_id="", **kw):
         """Schedule progress update on the main thread.
 
         Ignores PROGRESS events while no backup is active on this tab.
@@ -559,6 +618,8 @@ class RunTab(ttk.Frame):
         to a "verifying..." view even when the user is just looking
         at this tab between runs.
         """
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
         if not self._backup_active:
             return
         self.after(0, self._update_progress, current, total, filename, phase)
@@ -623,7 +684,7 @@ class RunTab(ttk.Frame):
             if filename:
                 self.status_label.config(text=truncate_status_text(phase, filename))
 
-    def _on_phase(self, phase="", **kw):
+    def _on_phase(self, phase="", profile_id="", **kw):
         """Schedule phase label update on the main thread.
 
         Also updates ``_current_phase`` so subsequent LOG events
@@ -631,6 +692,8 @@ class RunTab(ttk.Frame):
         Phase column. Falls back to the previous tag when the
         announcement is unrecognised — better stale than blank.
         """
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
         inferred = _infer_phase(phase)
         if inferred:
             self._current_phase = inferred
@@ -646,7 +709,7 @@ class RunTab(ttk.Frame):
             # signal at the end.
             self.status_label.config(text=phase, foreground=Colors.TEXT_SECONDARY)
 
-    def _on_log(self, message="", level="info", phase="", details=None, **kw):
+    def _on_log(self, message="", level="info", phase="", details=None, profile_id="", **kw):
         """Schedule log append on the main thread.
 
         Engine-level emits (``backup_engine._log`` / ``_phase``) do
@@ -684,6 +747,8 @@ class RunTab(ttk.Frame):
         never emits), so an unconditional exemption is safe from
         cross-tab pollution.
         """
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
         is_terminal = _is_terminal_log_message(message)
         if not self._backup_active and not is_terminal:
             return
@@ -880,8 +945,10 @@ class RunTab(ttk.Frame):
             with contextlib.suppress(tk.TclError):
                 self.log_tree.see(children[-1])
 
-    def _on_status(self, state="", **kw):
+    def _on_status(self, state="", profile_id="", **kw):
         """Schedule status update on the main thread."""
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
         self.after(0, self._update_status, state)
 
     def _update_status(self, state):

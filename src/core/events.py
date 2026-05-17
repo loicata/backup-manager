@@ -74,3 +74,48 @@ class EventBus:
         """Remove all subscribers."""
         with self._lock:
             self._subscribers.clear()
+
+
+class ProfileTaggingEventBus:
+    """``EventBus`` wrapper that auto-tags every emit with a ``profile_id``.
+
+    The backup pipeline emits PROGRESS / LOG / STATUS / PHASE_CHANGED
+    / PHASE_COUNT / BACKUP_TYPE_DETERMINED from many call sites — the
+    engine itself, every ``PhaseLogger`` instance, individual phase
+    modules. Threading the active profile id through every signature
+    would touch dozens of call sites and forever risk drift. Wrapping
+    the bus at the engine boundary inserts the tag in exactly one
+    place, transparently to every consumer.
+
+    The wrapper exposes the same ``emit`` / ``subscribe`` / ``unsubscribe``
+    surface as ``EventBus`` so callers can hold it interchangeably.
+    Subscriptions go straight through to the inner bus, so the
+    main-thread UI subscribers register on the long-lived bus instance
+    while the engine swaps its own ``_events`` attribute for the
+    wrapped variant during ``run_backup``.
+
+    Args:
+        inner: The underlying ``EventBus`` (or any object with a
+            compatible ``emit`` / ``subscribe`` / ``unsubscribe``
+            interface).
+        profile_id: The active profile's id, attached to every emit
+            unless the caller already passes one (``setdefault`` —
+            so a future caller can still override per emit).
+    """
+
+    def __init__(self, inner: "EventBus | ProfileTaggingEventBus", profile_id: str):
+        self._inner = inner
+        self._profile_id = profile_id
+
+    def emit(self, event_type: str, **data: Any) -> None:
+        data.setdefault("profile_id", self._profile_id)
+        self._inner.emit(event_type, **data)
+
+    def subscribe(self, event_type: str, callback: Callable) -> None:
+        self._inner.subscribe(event_type, callback)
+
+    def unsubscribe(self, event_type: str, callback: Callable) -> None:
+        self._inner.unsubscribe(event_type, callback)
+
+    def clear(self) -> None:
+        self._inner.clear()

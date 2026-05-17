@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.12] - 2026-05-17
+
+### Fixed
+- **Run tab showed events from a foreign profile while the user looked at another one.** User report (17/05/2026): a v3.7.10 install was preceded by a manual cancel; on the next launch v3.7.11 was not yet running so the crash-recovery fix did not apply retroactively, and the scheduler crash-recovered the cancelled TestLoic backup. While that backup ran in the background, the user clicked L2 in the sidebar and the Run tab kept moving the progress bar, showing "Copying to Storage…" status, and listing file paths from ``F:\Documents\loicata`` (a TestLoic source, not an L2 source). The Run tab had no way to tell which profile each PROGRESS / LOG / STATUS / PHASE event was about because every event traveled on a single shared EventBus untagged.
+- Fix in two parts: **(a)** new ``ProfileTaggingEventBus`` wrapper in ``src/core/events.py`` is installed by ``BackupEngine.run_backup`` for the duration of the run; it ``setdefault``-tags every emit downstream (engine itself, ``PhaseLogger`` instances inside every phase module, individual phase modules) with the active profile id. The wrapper restores the unwrapped bus in the ``finally`` block so a long-lived engine reused across profiles does not bleed the previous profile's id into the next run. **(b)** ``RunTab`` learns its current profile via a new ``set_current_profile_id`` API called from ``BackupManagerApp._load_profile`` on every sidebar switch, and every event handler now drops events whose ``profile_id`` does not match. Untagged events still pass through (back-compat for the Verify tab's own emits, tests).
+
+### Tests
+- +10 tests in ``tests/unit/test_profile_tagging_events.py``: ``ProfileTaggingEventBus.emit`` injects ``profile_id``, respects an explicit override, delegates ``subscribe`` / ``unsubscribe`` to the inner bus; the RunTab passes through untagged events (back-compat), passes through matching events, drops foreign events (the 17/05/2026 scenario), accepts anything when no profile is bound yet (cold start), normalises ``None`` to empty string; end-to-end through a real ``EventBus`` — a tagged event reaches the matching profile's tab and a foreign one does not clobber the state; STATUS=success tagged with another profile does not flip the receiving tab's ``_backup_active`` flag (otherwise the next legitimate progress event would be silently dropped).
+
 ## [3.7.11] - 2026-05-17
 
 ### Fixed

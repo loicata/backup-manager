@@ -320,10 +320,26 @@ class BackupEngine:
         # Apply any pending rollback left by a double-crash on the
         # previous run BEFORE the pipeline examines ``backup_type``.
         self._apply_pending_rollback(profile)
+        # Wrap the events bus so every PROGRESS / LOG / STATUS / PHASE
+        # event emitted downstream carries ``profile_id`` without each
+        # call site having to know. The wrapper restores the original
+        # bus in the ``finally`` block so a long-lived engine reused
+        # across profiles does not bleed the previous profile's id
+        # into the next run. The UI side filters PROGRESS / LOG /
+        # STATUS / PHASE events whose ``profile_id`` does not match
+        # the currently-selected profile in the sidebar — that's how
+        # the Run tab stops conflating a background scheduler run on
+        # profile A with the user looking at profile B in the
+        # foreground (17/05/2026 user report).
+        from src.core.events import ProfileTaggingEventBus
+
+        original_events = self._events
+        tagged_events = ProfileTaggingEventBus(original_events, profile.id)
+        self._events = tagged_events
         ctx = PipelineContext(
             profile=profile,
             config_manager=self._config,
-            events=self._events,
+            events=tagged_events,
             result=BackupResult(),
         )
         self._current_result = ctx.result
@@ -394,6 +410,10 @@ class BackupEngine:
             raise
         finally:
             release(lock_path)
+            # Restore the unwrapped bus so a subsequent run on a
+            # different profile gets its own tagging scope (the
+            # next ``run_backup`` rewraps it).
+            self._events = original_events
 
     def _best_effort_cleanup(self, ctx: PipelineContext) -> None:
         """Remove the partial backup that was just created, if possible.

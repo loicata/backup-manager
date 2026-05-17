@@ -5,6 +5,16 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.5] - 2026-05-17
+
+### Fixed
+- **Creating a second profile via "New profile" auto-fired an unwanted backup of the brand-new profile** while the UI was still refreshing. Root cause: ``BackupManagerApp._new_profile`` called ``scheduler.mark_triggered_now`` AFTER ``self._load_profiles()`` — but ``_load_profiles`` is synchronous on the main Tk thread and takes 5-10 s on a populated config (28 KB schedule journal + 11-tab refresh). During that window the scheduler daemon (CHECK_INTERVAL = 30 s) ticks, sees the new profile with ``last_trigger is None`` in ``_state``, and ``_is_due`` returns True on its first branch — firing an unwanted backup of the profile the user had not yet had a chance to review. ``mark_triggered_now`` finally arrived too late. Fix: a new helper ``_seed_scheduler_for_new_profile`` arms BOTH the backup and the periodic-verify clocks on the new profile and is invoked IMMEDIATELY after ``save_profile``, BEFORE ``_load_profiles``. The race window collapses from ~10 s to the microseconds between two consecutive method calls.
+- **``mark_verify_now`` was not called at all on the ``_new_profile`` / ``_relaunch_wizard_after_delete`` paths.** The v3.7.4 fix seeded the periodic-verify timer only for profiles created via the first-launch wizard; second-and-later profiles went back to the v3.7.3 behaviour (immediate periodic verify on the first scheduler tick). The new helper now seeds both timers on every creation path, including the wizard-relaunch-after-delete branch.
+- **First-launch wizard post-save block consolidated** to use the same helper, removing the duplicated local-import-of-datetime + two-call dance.
+
+### Tests
+- +4 tests in ``tests/unit/test_app_new_profile_seeding.py``: the helper calls both ``mark_triggered_now`` and ``mark_verify_now`` with the same profile id and the same timestamp; ``inspect``-based static checks pin that ``_seed_scheduler_for_new_profile`` precedes ``_load_profiles`` in both ``_new_profile`` and ``_relaunch_wizard_after_delete``, so a future refactor cannot silently re-introduce the race.
+
 ## [3.7.4] - 2026-05-17
 
 ### Fixed

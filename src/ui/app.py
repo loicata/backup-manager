@@ -709,21 +709,15 @@ class BackupManagerApp:
         if "last_verify" in app_settings:
             self.tab_verify.update_last_verify(app_settings["last_verify"])
 
-        # After wizard: switch to Run tab, mark new profiles as
-        # already triggered so the scheduler won't auto-run them.
-        # Symmetric ``mark_verify_now`` seeds the periodic-verify clock
-        # at creation time so the first verify is due N days later, not
-        # ~30 s after the wizard closes (cf. scheduler._check_verify_due
-        # docstring for the v3.7.3 case study).
+        # After wizard: switch to Run tab, seed scheduler timers on every
+        # profile so the scheduler won't auto-run them. ``skip_startup_check``
+        # is set *before* ``scheduler.start()`` so the first-launch path
+        # also bypasses ``_check_startup_missed``.
         if self._from_wizard:
             self.notebook.select(self.tab_run)
             self.scheduler.skip_startup_check = True
-            from datetime import datetime
-
-            now = datetime.now()
             for p in self.config_manager.get_all_profiles():
-                self.scheduler.mark_triggered_now(p.id, now)
-                self.scheduler.mark_verify_now(p.id, now)
+                self._seed_scheduler_for_new_profile(p)
 
         # Start services
         self.scheduler.start()
@@ -1550,6 +1544,31 @@ class BackupManagerApp:
 
         return ""
 
+    def _seed_scheduler_for_new_profile(self, profile: BackupProfile) -> None:
+        """Pre-arm scheduler timers for a freshly-saved profile.
+
+        Must be called BEFORE any subsequent slow UI work that holds the
+        main thread (``_load_profiles``, ``_load_profile``, ``_update_health_dashboard``).
+        The scheduler daemon ticks every ``CHECK_INTERVAL`` (30 s) and on
+        a tick that lands during the post-save UI refresh it would:
+
+        - See the new profile via ``get_profiles()`` (already on disk).
+        - See ``last_trigger is None`` in ``_state`` → ``_is_due`` returns
+          True (cf. ``scheduler.py::_is_due`` first branch) → trigger an
+          unwanted backup of the brand-new profile.
+        - See ``last_verify is None`` → previously fired a periodic
+          verify immediately; v3.7.4 added a defence-in-depth seed in
+          ``_check_verify_due`` itself, but a wizard-style explicit seed
+          here is still the right place to record the user's intent.
+
+        Seeding before the refresh closes the race window down to the
+        microseconds between ``save_profile`` and the two scheduler API
+        calls below — well shorter than any plausible scheduler tick.
+        """
+        now = datetime.now()
+        self.scheduler.mark_triggered_now(profile.id, now)
+        self.scheduler.mark_verify_now(profile.id, now)
+
     def _new_profile(self):
         """Launch the setup wizard from step 0 (mode choice) to create a
         new profile. The wizard writes ``object_lock_enabled`` based on the
@@ -1577,10 +1596,12 @@ class BackupManagerApp:
             return
 
         self.config_manager.save_profile(profile)
+        # Seed BEFORE the slow UI refresh — see helper docstring for the
+        # race-condition rationale. v3.7.4 case study: a 2nd profile
+        # created via this code path triggered a spurious backup during
+        # the ~10 s ``_load_profiles`` + ``_load_profile`` freeze.
+        self._seed_scheduler_for_new_profile(profile)
         self._load_profiles()
-        from datetime import datetime
-
-        self.scheduler.mark_triggered_now(profile.id, datetime.now())
 
         # Select the newly created profile in the sidebar
         self.profile_listbox.selection_clear(0, "end")
@@ -1660,13 +1681,12 @@ class BackupManagerApp:
         if profile is None:
             return
         self.config_manager.save_profile(profile)
+        # Seed BEFORE _load_profiles, not after — the scheduler can tick
+        # during the synchronous UI refresh and trigger the brand new
+        # profile because its ``last_trigger`` / ``last_verify`` are
+        # still None on disk. See ``_seed_scheduler_for_new_profile``.
+        self._seed_scheduler_for_new_profile(profile)
         self._load_profiles()
-        # Prevent the scheduler from auto-firing the brand new profile
-        # on the very next tick — the user probably wants a review pass
-        # first, exactly like after the first-launch wizard.
-        from datetime import datetime
-
-        self.scheduler.mark_triggered_now(profile.id, datetime.now())
 
     def _delete_profile_backups_async(self, profile: BackupProfile) -> None:
         """Delete all backups for a profile, with a live progress dialog.

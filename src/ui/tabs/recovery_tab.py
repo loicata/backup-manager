@@ -1406,7 +1406,16 @@ class RecoveryTab(ScrollableTab):
             self._update_post_source_sections()
             return
 
-        has_encrypted = src.suffix == ".wbenc" or (src.is_dir() and any(src.rglob("*.wbenc")))
+        # Shallow glob, same rationale as ``_update_post_source_sections`` —
+        # ``{backup_name}.tar.wbenc`` always sits at the storage root.
+        # This trace callback fires on every profile switch (via
+        # ``load_profile -> _fill_fields -> backup_path_var.set``); a
+        # recursive walk over a 268 k-file USB destination added 3-5 s
+        # of latency to the click. The sister call inside
+        # ``_update_post_source_sections`` was fixed in v3.7.8 but this
+        # twin survived because it was a copy-paste rather than a
+        # shared helper.
+        has_encrypted = src.suffix == ".wbenc" or (src.is_dir() and any(src.glob("*.wbenc")))
         if has_encrypted and self._stored_password:
             self._user_modified_pw = False
             self.password_var.set(_PASSWORD_PLACEHOLDER)

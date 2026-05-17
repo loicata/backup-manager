@@ -47,6 +47,23 @@ def _executable_source(method) -> str:
     return ast.unparse(tree)
 
 
+_FORBIDDEN_RGLOB = re.compile(r"\.rglob\s*\(")
+_SHALLOW_GLOB = re.compile(r"\.glob\s*\(\s*['\"]\*\.wbenc['\"]\s*\)")
+
+
+def _assert_shallow_only(method, label: str) -> None:
+    code = _executable_source(method)
+    assert not _FORBIDDEN_RGLOB.search(code), (
+        f"{label} must not call rglob — encrypted backups are at the "
+        f"storage root, so a shallow glob is enough. rglob walks the "
+        f"entire USB tree (~3-6 s on a 268 k-file dest)."
+    )
+    assert _SHALLOW_GLOB.search(code), (
+        f"the shallow .wbenc detection in {label} is gone — if "
+        f"intentional, update the password-field logic accordingly."
+    )
+
+
 def test_update_post_source_sections_uses_shallow_glob_only() -> None:
     """The local-encrypted-detection branch must not walk recursively.
 
@@ -56,20 +73,25 @@ def test_update_post_source_sections_uses_shallow_glob_only() -> None:
     the contract is pinned by source inspection, not by a runtime
     timing assertion.
     """
-    code = _executable_source(RecoveryTab._update_post_source_sections)
-    # Match a real attribute call ``.rglob(`` rather than the bare word,
-    # so the explanatory docstring (which mentions rglob by name) does
-    # not trip the assertion.
-    assert not re.search(r"\.rglob\s*\(", code), (
-        "_update_post_source_sections must not call rglob — encrypted "
-        "backups are at the storage root, so a shallow glob is enough. "
-        "rglob walks the entire USB tree (~3-6 s on a 268 k-file dest)."
+    _assert_shallow_only(
+        RecoveryTab._update_post_source_sections,
+        "_update_post_source_sections",
     )
-    # Positive check: the shallow glob is still there. Without this we
-    # would also pass on a refactor that drops the detection entirely
-    # — which would silently hide the password field for legitimately
-    # encrypted local profiles.
-    assert re.search(r"\.glob\s*\(\s*['\"]\*\.wbenc['\"]\s*\)", code), (
-        "the shallow .wbenc detection on local destinations is gone — "
-        "if intentional, update the password-field logic accordingly."
+
+
+def test_on_backup_path_changed_uses_shallow_glob_only() -> None:
+    """The sister trace callback must obey the same contract.
+
+    The v3.7.8 fix only touched ``_update_post_source_sections``, but
+    the same encrypted-detection logic was copy-pasted into
+    ``_on_backup_path_changed``. The trace fires on every profile
+    switch via ``load_profile -> _fill_fields -> backup_path_var.set``,
+    so a surviving ``rglob`` here defeats the v3.7.8 fix entirely —
+    that's the 2026-05-17 case reported after the v3.7.8 install when
+    the freeze did not go away. Both call sites must be pinned because
+    the duplication was not refactored into a single helper.
+    """
+    _assert_shallow_only(
+        RecoveryTab._on_backup_path_changed,
+        "_on_backup_path_changed",
     )

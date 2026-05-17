@@ -5,6 +5,14 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.9] - 2026-05-17
+
+### Fixed
+- **Profile-switch click still froze 3-5 s after the v3.7.8 install.** v3.7.8 fixed only one of two identical ``rglob("*.wbenc")`` calls in ``RecoveryTab``: the sister copy survived inside ``_on_backup_path_changed`` (recovery_tab.py:1409) — a copy-paste twin of the fixed branch that was never refactored into a shared helper. The trace ``load_profile → _fill_fields → backup_path_var.set`` fires this twin on every profile switch, walking the entire USB destination just like the v3.7.8-targeted call did. Fix: same shallow ``glob("*.wbenc")``. ``{backup_name}.tar.wbenc`` always sits at the storage root (``backup_engine.py::_phase_write``); a non-recursive glob covers the legitimate case.
+
+### Tests
+- Extended ``tests/unit/test_recovery_tab_no_recursive_glob.py`` to cover ``_on_backup_path_changed`` in addition to ``_update_post_source_sections``. Both call sites are pinned by AST-level inspection; a future refactor that reintroduces ``rglob`` in either branch trips the regression immediately. The duplication is left in place (small enough that consolidation would be cosmetic), but the test guards against it.
+
 ## [3.7.8] - 2026-05-17
 
 ### Fixed

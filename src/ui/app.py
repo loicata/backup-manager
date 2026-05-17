@@ -2414,69 +2414,26 @@ class BackupManagerApp:
         self._show_post_backup_verify_dialog(profile)
 
     def _show_post_backup_verify_dialog(self, profile: BackupProfile) -> None:
-        """Build and show the post-backup verify-prompt Toplevel.
+        """Show the post-backup verify prompt as an inline card in the Run tab.
 
-        Modal-style relative to the main window (transient + grab_set).
-        Two buttons: Skip (just log) and Verify now (delegate to
-        _run_verify after switching to the Verify tab so the user
-        sees the progress bar moving). One checkbox: Don't ask again
-        for this profile (persisted onto the profile and saved).
+        Pre-v3.7.10 this was a modal ``tk.Toplevel`` with
+        ``transient + grab_set``. The grab_set stole focus and blocked
+        every other window, including the next backup-completion event
+        when the scheduler chained several profiles in sequence: the
+        second profile's prompt fired while the first was still
+        modally blocking, and the user ended up with a stack of N
+        modals to dismiss in order. The inline alerts area accepts N
+        prompts side-by-side and the user can act on them in any
+        order (or ignore them) while further backups keep running.
+
+        The user opt-out (``Don't ask again``) is committed eagerly
+        on toggle so it survives even if the user neither clicks
+        Verify now nor Dismiss (e.g. the app is closed with a pending
+        card visible).
         """
-        win = tk.Toplevel(self.root)
-        win.title("Backup complete")
-        win.transient(self.root)
-        win.grab_set()
-        win.resizable(False, False)
 
-        body = ttk.Frame(win, padding=Spacing.PAD)
-        body.pack(fill="both", expand=True)
-
-        ttk.Label(
-            body,
-            text="✓ Backup completed",
-            foreground=Colors.SUCCESS,
-            font=Fonts.bold(),
-        ).pack(anchor="w")
-
-        ttk.Label(
-            body,
-            text="Post-backup verification was skipped (Fast mode).",
-            foreground=Colors.TEXT_SECONDARY,
-        ).pack(anchor="w", pady=(Spacing.SMALL, 0))
-
-        if profile.schedule.verify_enabled:
-            interval = profile.schedule.verify_interval_days
-            day_word = "day" if interval == 1 else "days"
-            ttk.Label(
-                body,
-                text=(f"The next periodic verification will run in " f"{interval} {day_word}."),
-                foreground=Colors.TEXT_SECONDARY,
-            ).pack(anchor="w")
-        else:
-            ttk.Label(
-                body,
-                text=("No periodic verification is scheduled for this profile."),
-                foreground=Colors.DANGER,
-            ).pack(anchor="w")
-
-        ttk.Label(
-            body,
-            text="Would you like to verify this backup right now?",
-            font=Fonts.normal(),
-        ).pack(anchor="w", pady=(Spacing.MEDIUM, Spacing.SMALL))
-
-        dont_ask_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            body,
-            text="Don't ask again for this profile",
-            variable=dont_ask_var,
-        ).pack(anchor="w", pady=(0, Spacing.MEDIUM))
-
-        btn_row = ttk.Frame(body)
-        btn_row.pack(fill="x")
-
-        def _commit_dont_ask() -> None:
-            if dont_ask_var.get() and not profile.dont_prompt_verify_after_skip:
+        def _commit_dont_ask(ticked: bool) -> None:
+            if ticked and not profile.dont_prompt_verify_after_skip:
                 profile.dont_prompt_verify_after_skip = True
                 try:
                     self.config_manager.save_profile(profile)
@@ -2487,39 +2444,24 @@ class BackupManagerApp:
                         e,
                     )
 
-        def _on_skip() -> None:
-            _commit_dont_ask()
-            self.tab_run._append_log("Verification skipped by user (Fast mode).")
-            win.destroy()
-
         def _on_verify_now() -> None:
-            _commit_dont_ask()
-            win.destroy()
             # Switch to the Verify tab so the progress bar is visible,
-            # then trigger the verify on the current profile.
-            try:
+            # then trigger the verify on the (currently selected) profile.
+            with contextlib.suppress(tk.TclError):
                 self.notebook.select(self.tab_verify)
-            except tk.TclError:
-                pass
             self._run_verify()
 
-        ttk.Button(btn_row, text="Skip", command=_on_skip).pack(
-            side="right", padx=(Spacing.SMALL, 0)
-        )
-        ttk.Button(
-            btn_row,
-            text="Verify now",
-            command=_on_verify_now,
-        ).pack(side="right")
+        def _on_dismiss() -> None:
+            self.tab_run._append_log("Verification skipped by user (Fast mode).")
 
-        # Centre the dialog on the main window roughly
-        win.update_idletasks()
-        try:
-            x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
-            y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_height()) // 3
-            win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        except tk.TclError:
-            pass
+        self.tab_run.show_verify_prompt(
+            profile_name=profile.name,
+            periodic_armed=profile.schedule.verify_enabled,
+            interval_days=profile.schedule.verify_interval_days,
+            on_verify_now=_on_verify_now,
+            on_dismiss=_on_dismiss,
+            on_dont_ask_again=_commit_dont_ask,
+        )
 
     def _on_verify_result(self, bvr, checked: int = 0, total: int = 0):
         """Handle a single verification result on the main thread."""

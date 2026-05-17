@@ -5,6 +5,14 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.10] - 2026-05-17
+
+### Changed
+- **Post-backup "Verify now?" prompt is now an inline card in the Run tab, not a modal Toplevel.** Pre-v3.7.10 the prompt was a ``tk.Toplevel`` with ``transient + grab_set``. The ``grab_set`` confiscated focus from every other window and broke the scheduler-chained workflow: when N profiles finished Fast-mode backups in sequence, N modal Toplevels stacked on top of each other and the user had to dismiss them one by one in order. The new design appends a card to a ``ttk.Frame`` alerts area between the Progress section and the Log treeview in ``RunTab``. N cards coexist vertically, the user acts on each in any order (or ignores them), and further backups keep running with no UI blockage. The card carries the same content as the old dialog — ✓ Backup '<profile_name>' complete header, "verification skipped (Fast mode)" subtitle, "Next periodic in N days" / "No periodic scheduled" status line, **Verify now** / **Dismiss** buttons, and the persistent **Don't ask again for this profile** checkbox. The checkbox commit is now eager-on-toggle (was on-action) so the user opt-out is recorded even if a pending card is left open at app close. ``RunTab.clear_log`` also clears pending cards on profile-switch so a prompt tied to profile A cannot accidentally trigger a verify against profile B.
+
+### Tests
+- +9 tests in ``tests/unit/test_run_tab_inline_verify_prompt.py``: alerts area starts empty, prompt appends a card, three sequential prompts coexist (the user-reported regression scenario), card is parented to the alerts area, Verify-now / Dismiss buttons invoke their callback AND destroy the card, Don't-ask checkbox toggle fires the callback with the new state, ``clear_alerts`` and ``clear_log`` both drop pending cards.
+
 ## [3.7.9] - 2026-05-17
 
 ### Fixed

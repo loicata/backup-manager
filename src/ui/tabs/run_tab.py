@@ -146,6 +146,15 @@ class RunTab(ttk.Frame):
         )
         self.status_label.pack(side="left", fill="x", expand=True)
 
+        # Post-backup alerts area (Fast-mode verify prompts, etc.).
+        # Empty by default — zero vertical height when no cards. Each
+        # card is appended below previous ones, so a sequence of N
+        # Fast-mode backups produces N visible cards stacked here
+        # instead of N stacked modal Toplevels (the pre-v3.7.10 design
+        # blocked the user with grab_set and broke profile chaining).
+        self.alerts_frame = ttk.Frame(self)
+        self.alerts_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.MEDIUM))
+
         # Log output — Treeview-based to mirror the Schedule journal
         # styling (clear background, structured rows). Events with a
         # ``details`` payload (e.g. the collector's "Skipped N file(s)"
@@ -969,3 +978,120 @@ class RunTab(ttk.Frame):
         self._phase_weights.clear()
         self._last_pct = 0
         self.status_label.config(text="Waiting...", foreground=Colors.TEXT_SECONDARY)
+        # ``clear_log`` fires on profile-switch (see app.py::_load_profile).
+        # The previous profile's pending Fast-mode verify prompts are
+        # tied to *that* profile's id; carrying them over would let the
+        # user accidentally trigger a verify against the wrong profile.
+        # Drop them — if the user wanted to act on the old prompt they
+        # had the chance before switching.
+        self.clear_alerts()
+
+    def show_verify_prompt(
+        self,
+        profile_name: str,
+        periodic_armed: bool,
+        interval_days: int,
+        on_verify_now,
+        on_dismiss,
+        on_dont_ask_again,
+    ) -> ttk.Frame:
+        """Append an inline "Verify now?" prompt to the alerts area.
+
+        Replaces the v3.7.9 modal Toplevel (``grab_set`` + ``transient``)
+        which blocked the user and stacked when several Fast-mode
+        backups completed in sequence. The alerts area accepts N
+        prompts side-by-side (well, stacked vertically) and the user
+        can act on them in any order — including ignoring some — while
+        further backups keep running.
+
+        Args:
+            profile_name: Display name of the profile that just finished.
+            periodic_armed: Whether periodic verify is scheduled.
+                Drives the secondary line copy + colour.
+            interval_days: Days until the next periodic verify.
+                Ignored when ``periodic_armed`` is False.
+            on_verify_now: Callback fired when the user clicks
+                "Verify now". The card is dismissed first, then this
+                runs. Receives no arguments.
+            on_dismiss: Callback fired when the user clicks "Dismiss".
+                Same lifecycle as ``on_verify_now``.
+            on_dont_ask_again: Callback fired when the user ticks the
+                "Don't ask again for this profile" checkbox. Receives
+                a single bool argument (the new checkbox state). May
+                fire multiple times if the user toggles it before
+                hitting an action button.
+
+        Returns:
+            The card Frame, primarily for tests that want to assert
+            on the widget tree without simulating button clicks.
+        """
+        card = ttk.Frame(self.alerts_frame, relief="solid", borderwidth=1)
+        card.pack(fill="x", pady=(0, Spacing.SMALL))
+
+        body = ttk.Frame(card, padding=Spacing.PAD)
+        body.pack(fill="x")
+
+        title = ttk.Label(
+            body,
+            text=f"✓ Backup '{profile_name}' complete — verification skipped (Fast mode)",
+            foreground=Colors.SUCCESS,
+            font=Fonts.bold(),
+        )
+        title.pack(anchor="w")
+
+        if periodic_armed:
+            day_word = "day" if interval_days == 1 else "days"
+            secondary_text = f"Next periodic verification in {interval_days} {day_word}."
+            secondary_colour = Colors.TEXT_SECONDARY
+        else:
+            secondary_text = "No periodic verification is scheduled for this profile."
+            secondary_colour = Colors.DANGER
+
+        ttk.Label(body, text=secondary_text, foreground=secondary_colour).pack(
+            anchor="w", pady=(Spacing.SMALL, Spacing.SMALL)
+        )
+
+        dont_ask_var = tk.BooleanVar(value=False)
+
+        def _on_toggle_dont_ask(*_args) -> None:
+            on_dont_ask_again(dont_ask_var.get())
+
+        dont_ask_var.trace_add("write", _on_toggle_dont_ask)
+        ttk.Checkbutton(
+            body,
+            text="Don't ask again for this profile",
+            variable=dont_ask_var,
+        ).pack(anchor="w")
+
+        btn_row = ttk.Frame(body)
+        btn_row.pack(fill="x", pady=(Spacing.SMALL, 0))
+
+        def _destroy_card() -> None:
+            with contextlib.suppress(tk.TclError):
+                card.destroy()
+
+        def _verify_now() -> None:
+            _destroy_card()
+            on_verify_now()
+
+        def _dismiss() -> None:
+            _destroy_card()
+            on_dismiss()
+
+        ttk.Button(btn_row, text="Dismiss", command=_dismiss).pack(
+            side="right", padx=(Spacing.SMALL, 0)
+        )
+        ttk.Button(btn_row, text="Verify now", command=_verify_now).pack(side="right")
+
+        return card
+
+    def clear_alerts(self) -> None:
+        """Destroy every card currently in the alerts area.
+
+        Called on profile switch (``clear_log``) so a pending prompt
+        from profile A does not accidentally trigger a verify against
+        profile B after the user clicks "Verify now".
+        """
+        with contextlib.suppress(tk.TclError):
+            for child in list(self.alerts_frame.winfo_children()):
+                child.destroy()

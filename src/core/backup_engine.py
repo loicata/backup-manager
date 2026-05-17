@@ -377,6 +377,11 @@ class BackupEngine:
             self._emit_status("idle")
             self._rollback_backup_type_on_failure(ctx, original_backup_type)
             self._best_effort_cleanup(ctx)
+            # User cancel is intentional, not a crash. Clear the
+            # interrupt-recovery flags so ``_check_startup_missed``
+            # does not auto-fire this backup again on the next launch
+            # (see ``_mark_cancelled`` docstring for the 17/05/2026 case).
+            self._mark_cancelled(ctx)
             raise
 
         except Exception as e:
@@ -682,6 +687,42 @@ class BackupEngine:
             ctx.profile.backup_type = BackupType.DIFFERENTIAL
 
         ctx.config_manager.save_profile(ctx.profile)
+
+    def _mark_cancelled(self, ctx: PipelineContext) -> None:
+        """Reset interrupt-recovery flags after a clean user cancel.
+
+        A user-initiated cancel is *not* a crash. The pre-v3.7.11
+        behaviour left ``last_backup_completed=False`` and
+        ``incomplete_backup_name`` set on the profile, which then made
+        ``_check_startup_missed`` re-trigger the backup as
+        crash-recovery the next time the app booted. The user reported
+        the case on 17/05/2026: install of v3.7.10 cancelled an
+        in-flight backup, and the next launch auto-fired it again.
+
+        Side effects mirror ``_mark_completed`` because the persistent
+        crash-recovery semantics is "no pending interrupted state",
+        not "the backup succeeded" — the success/failure verdict lives
+        in the ``ScheduleJournal``, which is updated independently.
+        ``_best_effort_cleanup`` is called before this from the
+        ``except CancelledError`` block, so the partial bytes are gone
+        by the time the flags are cleared.
+        """
+        ctx.profile.last_backup_completed = True
+        ctx.profile.incomplete_backup_name = ""
+        ctx.profile.incomplete_backup_was_full = False
+        ctx.profile.crash_recovery_attempts = 0
+
+        if getattr(ctx, "forced_full", False):
+            ctx.profile.backup_type = BackupType.DIFFERENTIAL
+
+        try:
+            ctx.config_manager.save_profile(ctx.profile)
+        except OSError as exc:
+            # Persisting the reset is best-effort: even if it fails the
+            # in-memory flag flip is what matters this session, and
+            # crash-recovery already has a circuit breaker (cf.
+            # MAX_CRASH_RECOVERY_ATTEMPTS) on the next launch.
+            logger.warning("Failed to persist mark_cancelled state: %s", exc)
 
     def _phase_cleanup(self, ctx: PipelineContext) -> None:
         """Phase 11: Remove temporary artifacts from backup directory."""

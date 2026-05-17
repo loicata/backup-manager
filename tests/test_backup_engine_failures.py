@@ -383,6 +383,116 @@ class TestCancellation:
             engine.run_backup(profile)
 
 
+class TestCancelClearsCrashRecoveryFlags:
+    """v3.7.11 regression guard.
+
+    Pre-v3.7.11, a user-initiated cancel left
+    ``profile.last_backup_completed=False`` and
+    ``profile.incomplete_backup_name`` populated. On the next app
+    launch ``InAppScheduler._check_startup_missed`` saw those flags
+    and re-fired the backup as crash-recovery — the 17/05/2026 case
+    where v3.7.10's install was preceded by a cancelled run and the
+    user found the backup auto-running on the next launch.
+
+    The fix lives in the ``except CancelledError`` block of
+    ``run_backup``: ``_mark_cancelled`` clears the flags so the
+    persistent state matches the user's intent (no pending work).
+    """
+
+    def test_cancel_clears_last_backup_completed_flag(self, env, profile):
+        """``last_backup_completed`` must be True after a clean cancel."""
+        engine = _engine(env)
+        original = engine._phase_write
+
+        def cancel_then_run(ctx):
+            engine.cancel()
+            return original(ctx)
+
+        with (
+            patch.object(engine, "_phase_write", side_effect=cancel_then_run),
+            pytest.raises(CancelledError),
+        ):
+            engine.run_backup(profile)
+
+        # In-memory flag (the engine just flipped it)
+        assert profile.last_backup_completed is True, (
+            "User cancel must clear the interrupt-recovery flag — otherwise "
+            "the next app launch will treat the run as a crash and auto-fire "
+            "the backup again."
+        )
+
+    def test_cancel_clears_incomplete_backup_name(self, env, profile):
+        """``incomplete_backup_name`` must be empty after a clean cancel."""
+        engine = _engine(env)
+        original = engine._phase_write
+
+        def cancel_then_run(ctx):
+            engine.cancel()
+            return original(ctx)
+
+        with (
+            patch.object(engine, "_phase_write", side_effect=cancel_then_run),
+            pytest.raises(CancelledError),
+        ):
+            engine.run_backup(profile)
+
+        assert profile.incomplete_backup_name == "", (
+            "User cancel must clear the incomplete-backup pointer — "
+            "_check_startup_missed reads this field to decide whether to "
+            "auto-fire a crash-recovery backup."
+        )
+
+    def test_cancel_resets_crash_recovery_attempts(self, env, profile):
+        """The crash-recovery circuit breaker counter must be cleared.
+
+        Without this reset, a sequence of user-cancels would leave the
+        counter incremented from prior crash-recovery attempts forever,
+        eventually tripping ``MAX_CRASH_RECOVERY_ATTEMPTS`` and
+        permanently disabling auto-recovery for real crashes.
+        """
+        profile.crash_recovery_attempts = 2
+        engine = _engine(env)
+        original = engine._phase_write
+
+        def cancel_then_run(ctx):
+            engine.cancel()
+            return original(ctx)
+
+        with (
+            patch.object(engine, "_phase_write", side_effect=cancel_then_run),
+            pytest.raises(CancelledError),
+        ):
+            engine.run_backup(profile)
+
+        assert profile.crash_recovery_attempts == 0
+
+    def test_cancel_persists_cleared_flags_on_disk(self, env, profile):
+        """The reset must be written to the profile JSON, not only to
+        the in-memory object — ``_check_startup_missed`` reads the
+        next session's freshly-loaded profile, which lives on disk.
+        """
+        env["config_manager"].save_profile(profile)  # baseline on disk
+        engine = _engine(env)
+        original = engine._phase_write
+
+        def cancel_then_run(ctx):
+            engine.cancel()
+            return original(ctx)
+
+        with (
+            patch.object(engine, "_phase_write", side_effect=cancel_then_run),
+            pytest.raises(CancelledError),
+        ):
+            engine.run_backup(profile)
+
+        # Read back the saved profile from disk to assert persistence.
+        all_profiles = env["config_manager"].get_all_profiles()
+        reloaded = next((p for p in all_profiles if p.id == profile.id), None)
+        assert reloaded is not None
+        assert reloaded.last_backup_completed is True
+        assert reloaded.incomplete_backup_name == ""
+
+
 # ---------------------------------------------------------------------------
 # 9. Empty backup — all files filtered out
 # ---------------------------------------------------------------------------

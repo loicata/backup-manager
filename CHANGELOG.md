@@ -5,6 +5,14 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.11] - 2026-05-17
+
+### Fixed
+- **User-cancelled backup was treated as a crash on the next app launch.** User report (17/05/2026): cancelled a Fast-mode backup to install v3.7.10; on the next launch ``_check_startup_missed`` auto-fired the backup as crash-recovery. Root cause: ``BackupEngine.run_backup``'s ``except CancelledError`` block ran ``_best_effort_cleanup`` to drop the partial bytes but left ``profile.last_backup_completed=False`` and ``profile.incomplete_backup_name`` populated on the profile JSON. ``_check_startup_missed`` reads exactly those two flags to decide whether to relaunch (``scheduler.py::_check_startup_missed``, ``crash_recovery_due`` branch), and could not tell a clean user-cancel apart from a real crash. Fix: new ``_mark_cancelled`` helper resets the interrupt-recovery flags (``last_backup_completed=True``, ``incomplete_backup_name=""``, ``incomplete_backup_was_full=False``, ``crash_recovery_attempts=0``, restore differential type if forced full) and persists them; the ``except CancelledError`` path now calls it after the bytes have been cleaned up. The crash-recovery circuit breaker counter is also reset because a user-cancel is not a transient failure that should count against the auto-recovery budget — only real crashes should accumulate.
+
+### Tests
+- +4 tests in ``tests/test_backup_engine_failures.py::TestCancelClearsCrashRecoveryFlags``: ``last_backup_completed`` is True after cancel, ``incomplete_backup_name`` is empty, ``crash_recovery_attempts`` is reset to 0 (even when pre-seeded to 2 to simulate prior recoveries), and the cleared state is persisted to the profile JSON on disk (re-reading the profile via ``get_all_profiles`` shows the same cleared flags — important because ``_check_startup_missed`` reads from disk, not from the in-memory engine state).
+
 ## [3.7.10] - 2026-05-17
 
 ### Changed

@@ -1129,36 +1129,64 @@ class BackupManagerApp:
         self._load_profile(new_profile)
 
     def _load_profile(self, profile: BackupProfile):
-        """Load a profile into all tabs."""
+        """Load a profile into all tabs.
+
+        v3.7.7 INSTRUMENTATION (temporary): per-step ``time.monotonic``
+        timing is logged at INFO level with the ``[LP-PROFILE]`` tag so
+        ``backup_manager.log`` reveals which tab dominates the wall-clock
+        on a profile switch. The 17/05/2026 case study reports ~6 s
+        between click and tab re-paint; before optimising we want to
+        know whether the cost is in one tab, the health dashboard, the
+        retention/protection swap, or fan-out across all tabs.
+        Remove this block once the culprit is fixed and pinned by a
+        regression test.
+        """
+        import time
+
+        t0 = time.monotonic()
         previous_id = self._current_profile.id if self._current_profile else None
         self._current_profile = profile
 
-        self.tab_general.load_profile(profile)
-        self.tab_storage.load_profile(profile)
-        self.tab_mirror1.load_profile(profile)
-        self.tab_mirror2.load_profile(profile)
-        self.tab_encryption.load_profile(profile)
-        self.tab_schedule.load_profile(profile)
-        self.tab_email.load_profile(profile)
-        self.tab_recovery.load_profile(profile)
+        def _step(label: str, fn) -> None:
+            start = time.monotonic()
+            fn()
+            ms = int((time.monotonic() - start) * 1000)
+            logger.info("[LP-PROFILE] %s: %d ms", label, ms)
 
-        # Swap Retention ↔ Protection tab based on Object Lock mode
-        self._update_retention_protection_tab(profile)
+        _step("tab_general", lambda: self.tab_general.load_profile(profile))
+        _step("tab_storage", lambda: self.tab_storage.load_profile(profile))
+        _step("tab_mirror1", lambda: self.tab_mirror1.load_profile(profile))
+        _step("tab_mirror2", lambda: self.tab_mirror2.load_profile(profile))
+        _step("tab_encryption", lambda: self.tab_encryption.load_profile(profile))
+        _step("tab_schedule", lambda: self.tab_schedule.load_profile(profile))
+        _step("tab_email", lambda: self.tab_email.load_profile(profile))
+        _step("tab_recovery", lambda: self.tab_recovery.load_profile(profile))
 
-        self.tab_retention.load_profile(profile)
-        self.tab_protection.load_profile(profile)
+        _step(
+            "_update_retention_protection_tab",
+            lambda: self._update_retention_protection_tab(profile),
+        )
 
-        self.tab_run.update_profile_info(
-            profile.name,
-            profile.backup_type.value,
-            profile.last_backup,
-            profile.last_full_backup or "",
+        _step("tab_retention", lambda: self.tab_retention.load_profile(profile))
+        _step("tab_protection", lambda: self.tab_protection.load_profile(profile))
+
+        _step(
+            "tab_run.update_profile_info",
+            lambda: self.tab_run.update_profile_info(
+                profile.name,
+                profile.backup_type.value,
+                profile.last_backup,
+                profile.last_full_backup or "",
+            ),
         )
         # Only clear log when switching to a different profile
         if profile.id != previous_id:
-            self.tab_run.clear_log()
+            _step("tab_run.clear_log", self.tab_run.clear_log)
 
-        self._update_health_dashboard(profile)
+        _step("_update_health_dashboard", lambda: self._update_health_dashboard(profile))
+
+        total_ms = int((time.monotonic() - t0) * 1000)
+        logger.info("[LP-PROFILE] TOTAL: %d ms (profile=%s)", total_ms, profile.name)
 
     def _update_retention_protection_tab(self, profile: BackupProfile) -> None:
         """Show Protection tab or Retention tab based on profile mode.
@@ -1204,9 +1232,14 @@ class BackupManagerApp:
         Args:
             profile: The currently selected profile.
         """
+        import time
+
         # Card 1: Last backup — use journal timestamp (more accurate
         # than profile.last_backup which only updates on success)
+        t = time.monotonic()
         last_run = self.scheduler.journal.get_last_run(profile.id)
+        logger.info("[LP-HEALTH] journal.get_last_run: %d ms", int((time.monotonic() - t) * 1000))
+
         files_count = 0
         bytes_source = 0
         success = True
@@ -1217,6 +1250,8 @@ class BackupManagerApp:
             bytes_source = last_run.get("bytes_source", 0)
             last_timestamp = last_run.get("timestamp", last_timestamp)
         is_diff = profile.backup_type == BackupType.DIFFERENTIAL
+
+        t = time.monotonic()
         self.tab_run.update_last_backup_card(
             last_timestamp,
             files_count=files_count,
@@ -1226,12 +1261,27 @@ class BackupManagerApp:
             last_full_backup=profile.last_full_backup or "",
             last_full_files_count=profile.last_full_files_count,
         )
+        logger.info(
+            "[LP-HEALTH] update_last_backup_card: %d ms", int((time.monotonic() - t) * 1000)
+        )
 
         # Card 2: Next scheduled
+        t = time.monotonic()
         next_info = self.scheduler.get_next_run_info(profile)
+        logger.info(
+            "[LP-HEALTH] scheduler.get_next_run_info: %d ms",
+            int((time.monotonic() - t) * 1000),
+        )
+
+        t = time.monotonic()
         self.tab_run.update_next_scheduled_card(next_info)
+        logger.info(
+            "[LP-HEALTH] update_next_scheduled_card: %d ms",
+            int((time.monotonic() - t) * 1000),
+        )
 
         # Card 3: Destinations (with async checks)
+        t = time.monotonic()
         destinations = []
         try:
             profile.storage.validate()
@@ -1246,8 +1296,13 @@ class BackupManagerApp:
                 )
             except ValueError:
                 pass
+        logger.info("[LP-HEALTH] validate destinations: %d ms", int((time.monotonic() - t) * 1000))
 
+        t = time.monotonic()
         self.tab_run.update_destinations_card(destinations)
+        logger.info(
+            "[LP-HEALTH] update_destinations_card: %d ms", int((time.monotonic() - t) * 1000)
+        )
 
         # Track destination configs for continuous health polling
         self._health_configs: dict[int, tuple[StorageConfig, str]] = {}

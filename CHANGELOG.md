@@ -5,6 +5,11 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.7] - 2026-05-17
+
+### Added (diagnostic build, temporary)
+- **``_load_profile`` and ``_update_health_dashboard`` are instrumented with per-step ``time.monotonic`` timing**, logged at INFO level with the ``[LP-PROFILE]`` and ``[LP-HEALTH]`` prefixes in ``backup_manager.log``. Each tab.load_profile, the retention/protection swap, the Run-tab refresh, the journal lookup, the destination-validate fan-out, and the dashboard card updates are timed independently. Reported on 17/05/2026: ~6 s freeze on every profile-switch click — before fixing we want to know whether the cost concentrates in one tab, the health dashboard, or fans out evenly. This instrumentation will be removed in v3.7.8 once the dominant cost is pinned and replaced by a regression test on the fix.
+
 ## [3.7.6] - 2026-05-17
 
 ### Fixed

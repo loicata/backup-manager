@@ -27,7 +27,7 @@ from src.core.config import (
 )
 from src.core.events import STATUS, EventBus
 from src.core.health_checker import check_destinations_async
-from src.core.run_history import RunHistoryStore
+from src.core.run_history import RunHistoryStore, VerifyPromptStore
 from src.core.scheduler import AutoStart, InAppScheduler
 from src.ui.tabs.email_tab import EmailTab
 from src.ui.tabs.encryption_tab import EncryptionTab
@@ -670,6 +670,14 @@ class BackupManagerApp:
         # (``_finalize_profile_deletion``) can drop a profile's file
         # alongside the JSON config.
         self.run_history = RunHistoryStore(self.config_manager.config_dir / "run_history")
+        # Pending Fast-mode verify prompts — one entry per profile.
+        # A backup that ends while the user is on another profile, or
+        # while the app is closed (scheduled run), still leaves an
+        # actionable prompt behind. ``_finalize_profile_deletion``
+        # drops the entry when a profile is deleted.
+        self.verify_prompts = VerifyPromptStore(
+            self.config_manager.config_dir / "verify_prompts.json"
+        )
         self.engine: BackupEngine | None = None
         self._current_profile: BackupProfile | None = None
         # True while a backup thread is active. Read by _save_profile
@@ -901,6 +909,8 @@ class BackupManagerApp:
             self.notebook,
             events=self.events,
             history_store=self.run_history,
+            verify_prompt_store=self.verify_prompts,
+            verify_prompt_factory=self._make_verify_prompt_handlers,
         )
         self.tab_general = GeneralTab(self.notebook)
         self.tab_storage = StorageTab(self.notebook)
@@ -1689,6 +1699,7 @@ class BackupManagerApp:
         """
         self.config_manager.delete_profile(profile.id)
         self.run_history.delete(profile.id)
+        self.verify_prompts.clear(profile.id)
         self._current_profile = None
         self._load_profiles()
         if self._current_profile is None:
@@ -2476,6 +2487,7 @@ class BackupManagerApp:
             self.tab_run._append_log("Verification skipped by user (Fast mode).")
 
         self.tab_run.show_verify_prompt(
+            profile_id=profile.id,
             profile_name=profile.name,
             periodic_armed=profile.schedule.verify_enabled,
             interval_days=profile.schedule.verify_interval_days,
@@ -2483,6 +2495,50 @@ class BackupManagerApp:
             on_dismiss=_on_dismiss,
             on_dont_ask_again=_commit_dont_ask,
         )
+
+    def _make_verify_prompt_handlers(self, profile_id: str):
+        """Build the three callbacks bound to ``profile_id``.
+
+        Used by ``RunTab._restore_pending_verify_prompt`` when a
+        prompt is replayed from disk: the closures from the original
+        ``_show_post_backup_verify_dialog`` call are gone, so we
+        rebuild them by looking up the profile fresh. Returns a
+        no-op triple when the profile has been deleted between
+        persistence and replay.
+        """
+        profile = next(
+            (
+                p
+                for p in self.config_manager.get_all_profiles()
+                if p.id == profile_id
+            ),
+            None,
+        )
+        if profile is None:
+            return (lambda: None, lambda: None, lambda _state: None)
+
+        def _on_verify_now() -> None:
+            with contextlib.suppress(tk.TclError):
+                self.notebook.select(self.tab_verify)
+            self._run_verify()
+
+        def _on_dismiss() -> None:
+            self.tab_run._append_log("Verification skipped by user (Fast mode).")
+
+        def _on_dont_ask(ticked: bool) -> None:
+            if ticked and not profile.dont_prompt_verify_after_skip:
+                profile.dont_prompt_verify_after_skip = True
+                try:
+                    self.config_manager.save_profile(profile)
+                except OSError as exc:
+                    logger.warning(
+                        "Could not persist dont_prompt_verify_after_skip "
+                        "for %s: %s",
+                        profile.name,
+                        exc,
+                    )
+
+        return _on_verify_now, _on_dismiss, _on_dont_ask
 
     def _on_verify_result(self, bvr, checked: int = 0, total: int = 0):
         """Handle a single verification result on the main thread."""
@@ -2690,6 +2746,15 @@ class BackupManagerApp:
             profile.last_backup = completed_at
             self.config_manager.save_profile(profile)
             self.root.after(0, self._update_health_dashboard, profile)
+            # Fast-mode "Verify now?" prompt also for scheduled runs.
+            # Pre-fix: only the manual path called this — a scheduled
+            # Fast-mode run that finished while the user was looking
+            # at the app left no actionable trace once the toast
+            # disappeared. The prompt is persisted by the RunTab
+            # store so it survives switches and app restarts; if no
+            # Fast-mode applies (verify ran inline / Object Lock /
+            # user opted out) the call is a no-op.
+            self.root.after(0, self._maybe_prompt_post_backup_verify, profile)
 
             if profile.email.enabled:
                 # v3.7.0 case 3 detection: this is a scheduled run that

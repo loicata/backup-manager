@@ -171,3 +171,72 @@ class RunHistoryStore:
                     profile_id,
                     exc,
                 )
+
+
+class VerifyPromptStore:
+    """Pending Fast-mode verify prompts, one per profile.
+
+    A single JSON dict ``{profile_id: prompt_data}`` so a prompt
+    raised by a Fast-mode backup survives every place the in-memory
+    card would disappear: profile switches, app restarts, scheduler
+    runs that complete while the window is hidden. The store is
+    rewritten atomically (``.tmp`` + ``replace``) under a lock; the
+    lock is uncontended outside the brief I/O window.
+
+    Args:
+        path: JSON file path. Parent directory is created on first
+            write if missing.
+    """
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._lock = threading.Lock()
+
+    def set(self, profile_id: str, prompt_data: dict) -> None:
+        """Persist (or replace) the pending prompt for a profile."""
+        if not profile_id:
+            return
+        with self._lock:
+            data = self._load_unlocked()
+            data[profile_id] = prompt_data
+            self._save_unlocked(data)
+
+    def get(self, profile_id: str) -> dict | None:
+        """Return the pending prompt data for a profile, or ``None``."""
+        if not profile_id:
+            return None
+        with self._lock:
+            return self._load_unlocked().get(profile_id)
+
+    def clear(self, profile_id: str) -> None:
+        """Drop the pending prompt for a profile, if any."""
+        if not profile_id:
+            return
+        with self._lock:
+            data = self._load_unlocked()
+            if profile_id in data:
+                del data[profile_id]
+                self._save_unlocked(data)
+
+    def _load_unlocked(self) -> dict:
+        if not self._path.exists():
+            return {}
+        try:
+            raw = self._path.read_text(encoding="utf-8")
+            obj = json.loads(raw) if raw.strip() else {}
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("VerifyPromptStore: load failed: %s", exc)
+            return {}
+        return obj if isinstance(obj, dict) else {}
+
+    def _save_unlocked(self, data: dict) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(self._path)
+        except OSError as exc:
+            logger.warning("VerifyPromptStore: save failed: %s", exc)

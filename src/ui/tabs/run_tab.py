@@ -21,7 +21,7 @@ from src.core.file_categorizer import (
     extension_of,
 )
 from src.core.health_checker import DestinationHealth, format_bytes
-from src.core.run_history import RunHistoryStore
+from src.core.run_history import RunHistoryStore, VerifyPromptStore
 from src.ui._status_text import truncate_status_text
 from src.ui.theme import Colors, Fonts, Spacing
 
@@ -76,6 +76,8 @@ class RunTab(ttk.Frame):
         parent,
         events: EventBus = None,
         history_store: RunHistoryStore | None = None,
+        verify_prompt_store: VerifyPromptStore | None = None,
+        verify_prompt_factory=None,
         **kwargs,
     ):
         super().__init__(parent, **kwargs)
@@ -124,6 +126,15 @@ class RunTab(ttk.Frame):
         # profiles drops in-flight prompts (rare; the periodic verify
         # cron still fires later if armed).
         self._verify_prompts: dict[str, dict] = {}
+        # Persistent counterpart of ``_verify_prompts``: a Fast-mode
+        # prompt raised by ``show_verify_prompt`` is recorded here so
+        # it can be restored on profile switch / app restart. The
+        # factory rematerialises the callbacks (verify-now, dismiss,
+        # don't-ask-again) bound to the right profile id since the
+        # original closures from the create call die with the run's
+        # call stack.
+        self._verify_prompt_store = verify_prompt_store
+        self._verify_prompt_factory = verify_prompt_factory
         self._build_ui()
         self._subscribe_events()
 
@@ -655,6 +666,37 @@ class RunTab(ttk.Frame):
         if profile_id and profile_id != previous_id:
             self._clear_run_state()
             self._reload_log_history()
+            self._restore_pending_verify_prompt(profile_id)
+
+    def _restore_pending_verify_prompt(self, profile_id: str) -> None:
+        """Re-insert a Fast-mode prompt row set that survived a switch.
+
+        ``_clear_log_widget`` (called by ``_reload_log_history`` just
+        above) drops every Treeview row including any in-flight
+        prompt. We replay the prompt from the persistent store so the
+        user can still act on a Fast-mode verify offer that was
+        raised while they were looking at another profile.
+
+        The callback factory rematerialises ``on_verify_now`` /
+        ``on_dismiss`` / ``on_dont_ask_again`` bound to the right
+        profile (the original closures from the engine-side
+        ``show_verify_prompt`` call have long been garbage-collected).
+        """
+        if self._verify_prompt_store is None or self._verify_prompt_factory is None:
+            return
+        data = self._verify_prompt_store.get(profile_id)
+        if not data:
+            return
+        on_verify, on_dismiss, on_dont_ask = self._verify_prompt_factory(profile_id)
+        self._insert_verify_prompt_rows(
+            profile_id=profile_id,
+            profile_name=data.get("profile_name", ""),
+            periodic_armed=bool(data.get("periodic_armed", False)),
+            interval_days=int(data.get("interval_days", 0)),
+            on_verify_now=on_verify,
+            on_dismiss=on_dismiss,
+            on_dont_ask_again=on_dont_ask,
+        )
 
     def _reload_log_history(self) -> None:
         """Repopulate the log_tree from the current profile's history.
@@ -1306,7 +1348,8 @@ class RunTab(ttk.Frame):
         on_verify_now,
         on_dismiss,
         on_dont_ask_again,
-    ) -> str:
+        profile_id: str = "",
+    ) -> str | None:
         """Insert an inline Fast-mode verify prompt into the log tree.
 
         Four rows are appended:
@@ -1338,8 +1381,49 @@ class RunTab(ttk.Frame):
                 checkbox row. Receives the new bool state.
 
         Returns:
-            The parent row's item id (useful for tests).
+            The parent row's item id, or ``None`` when ``profile_id``
+            is set and points to a non-selected profile (the prompt
+            is then only persisted; the rows materialise on the next
+            ``set_current_profile_id`` for that profile).
         """
+        # Persist FIRST so a chained scheduler run that completes
+        # while the user is looking at another profile still leaves
+        # a prompt behind. Cleared on user action (Verify / Dismiss).
+        if self._verify_prompt_store is not None and profile_id:
+            self._verify_prompt_store.set(
+                profile_id,
+                {
+                    "profile_name": profile_name,
+                    "periodic_armed": periodic_armed,
+                    "interval_days": interval_days,
+                },
+            )
+        # If the prompt is tagged to a profile we are not viewing,
+        # do not render — the store will replay it when the user
+        # opens that profile in the sidebar.
+        if profile_id and profile_id != self._current_profile_id:
+            return None
+        return self._insert_verify_prompt_rows(
+            profile_id=profile_id,
+            profile_name=profile_name,
+            periodic_armed=periodic_armed,
+            interval_days=interval_days,
+            on_verify_now=on_verify_now,
+            on_dismiss=on_dismiss,
+            on_dont_ask_again=on_dont_ask_again,
+        )
+
+    def _insert_verify_prompt_rows(
+        self,
+        profile_id: str,
+        profile_name: str,
+        periodic_armed: bool,
+        interval_days: int,
+        on_verify_now,
+        on_dismiss,
+        on_dont_ask_again,
+    ) -> str:
+        """Build the four-row prompt under the current view's log tree."""
         parent_text = (
             f"✓ Backup '{profile_name}' complete — verification skipped (Fast mode)"
         )
@@ -1386,6 +1470,7 @@ class RunTab(ttk.Frame):
         )
 
         self._verify_prompts[parent_id] = {
+            "profile_id": profile_id,
             "verify_item": verify_item,
             "dismiss_item": dismiss_item,
             "dont_ask_item": dont_ask_item,
@@ -1437,10 +1522,17 @@ class RunTab(ttk.Frame):
         del parent_id
 
     def _destroy_verify_prompt(self, parent_id: str) -> None:
-        """Remove the four rows of a verify prompt and forget callbacks."""
+        """Remove the four rows of a verify prompt and forget callbacks.
+
+        Also drops the persisted entry from the prompt store so a
+        future profile switch / app restart does not resurrect a
+        prompt the user already acted on.
+        """
+        spec = self._verify_prompts.pop(parent_id, None)
         with contextlib.suppress(tk.TclError):
             self.log_tree.delete(parent_id)
-        self._verify_prompts.pop(parent_id, None)
+        if spec is not None and self._verify_prompt_store is not None:
+            self._verify_prompt_store.clear(spec.get("profile_id", ""))
 
     def clear_alerts(self) -> None:
         """Remove every pending verify prompt and clear the alerts frame.

@@ -16,13 +16,20 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.run_history import RunHistoryStore
+from unittest.mock import MagicMock
+
+from src.core.run_history import RunHistoryStore, VerifyPromptStore
 from src.ui.tabs.run_tab import RunTab
 
 
 @pytest.fixture()
 def store(tmp_path):
     return RunHistoryStore(tmp_path / "run_history")
+
+
+@pytest.fixture()
+def prompt_store(tmp_path):
+    return VerifyPromptStore(tmp_path / "verify_prompts.json")
 
 
 @pytest.fixture()
@@ -274,6 +281,94 @@ class TestQueuedEventsDoNotCrossProfileSwitch:
             for child in run_tab.log_tree.get_children("")
         ]
         assert "A-side row" not in texts
+
+
+class TestVerifyPromptPersistence:
+    """A Fast-mode prompt must outlive profile switches and app
+    restarts so a scheduled run that completed on profile A still
+    has an actionable prompt next time the user opens A in the
+    sidebar — not just when the prompt was first raised."""
+
+    @pytest.fixture()
+    def tab_with_prompt_store(self, tk_root, store, prompt_store):
+        factory = MagicMock(
+            return_value=(MagicMock(), MagicMock(), MagicMock())
+        )
+        tab = RunTab(
+            tk_root,
+            history_store=store,
+            verify_prompt_store=prompt_store,
+            verify_prompt_factory=factory,
+        )
+        yield tab, prompt_store, factory
+        tab.destroy()
+
+    def test_prompt_persisted_when_raised_for_non_current_profile(
+        self, tab_with_prompt_store
+    ) -> None:
+        tab, prompt_store, _factory = tab_with_prompt_store
+        tab.set_current_profile_id("A")
+
+        # Prompt raised for B while A is selected — must NOT render
+        # on A but MUST land in the store.
+        rendered = tab.show_verify_prompt(
+            profile_id="B",
+            profile_name="ProfB",
+            periodic_armed=True,
+            interval_days=3,
+            on_verify_now=MagicMock(),
+            on_dismiss=MagicMock(),
+            on_dont_ask_again=MagicMock(),
+        )
+
+        assert rendered is None
+        assert tab.log_tree.get_children("") == ()
+        assert prompt_store.get("B") == {
+            "profile_name": "ProfB",
+            "periodic_armed": True,
+            "interval_days": 3,
+        }
+
+    def test_switch_to_profile_with_pending_prompt_restores_rows(
+        self, tab_with_prompt_store
+    ) -> None:
+        tab, prompt_store, factory = tab_with_prompt_store
+        prompt_store.set(
+            "B",
+            {"profile_name": "ProfB", "periodic_armed": False, "interval_days": 7},
+        )
+
+        tab.set_current_profile_id("B")
+
+        children = tab.log_tree.get_children("")
+        assert len(children) == 1
+        parent_text = tab.log_tree.item(children[0], "text")
+        assert "ProfB" in parent_text
+        factory.assert_called_once_with("B")
+
+    def test_dismissing_restored_prompt_clears_store(
+        self, tab_with_prompt_store
+    ) -> None:
+        tab, prompt_store, _factory = tab_with_prompt_store
+        prompt_store.set(
+            "B",
+            {"profile_name": "ProfB", "periodic_armed": True, "interval_days": 7},
+        )
+        tab.set_current_profile_id("B")
+
+        parent_id = tab.log_tree.get_children("")[0]
+        tab._destroy_verify_prompt(parent_id)
+
+        assert prompt_store.get("B") is None
+
+    def test_switch_to_profile_without_prompt_does_not_call_factory(
+        self, tab_with_prompt_store
+    ) -> None:
+        tab, _prompt_store, factory = tab_with_prompt_store
+
+        tab.set_current_profile_id("never-had-a-prompt")
+
+        factory.assert_not_called()
 
 
 class TestPersistedEntryShape:

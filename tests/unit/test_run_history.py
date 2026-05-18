@@ -7,7 +7,11 @@ import threading
 
 import pytest
 
-from src.core.run_history import _MAX_ENTRIES_PER_PROFILE, RunHistoryStore
+from src.core.run_history import (
+    _MAX_ENTRIES_PER_PROFILE,
+    RunHistoryStore,
+    VerifyPromptStore,
+)
 
 
 @pytest.fixture
@@ -156,3 +160,69 @@ def test_isolation_between_profiles(store):
 
     assert store.load("alpha") == [{"msg": "A1"}, {"msg": "A2"}]
     assert store.load("beta") == [{"msg": "B1"}]
+
+
+@pytest.fixture
+def prompt_store(tmp_path):
+    return VerifyPromptStore(tmp_path / "verify_prompts.json")
+
+
+class TestVerifyPromptStore:
+    def test_set_get_round_trip(self, prompt_store):
+        data = {"profile_name": "X", "periodic_armed": True, "interval_days": 7}
+        prompt_store.set("p1", data)
+
+        assert prompt_store.get("p1") == data
+
+    def test_get_missing_returns_none(self, prompt_store):
+        assert prompt_store.get("never") is None
+
+    def test_clear_removes_entry(self, prompt_store):
+        prompt_store.set("p1", {"profile_name": "X"})
+        prompt_store.clear("p1")
+
+        assert prompt_store.get("p1") is None
+
+    def test_clear_leaves_other_profiles_intact(self, prompt_store):
+        prompt_store.set("a", {"profile_name": "A"})
+        prompt_store.set("b", {"profile_name": "B"})
+
+        prompt_store.clear("a")
+
+        assert prompt_store.get("a") is None
+        assert prompt_store.get("b") == {"profile_name": "B"}
+
+    def test_set_then_replace_overwrites(self, prompt_store):
+        prompt_store.set("p1", {"profile_name": "X", "periodic_armed": True})
+        prompt_store.set("p1", {"profile_name": "Y", "periodic_armed": False})
+
+        assert prompt_store.get("p1") == {
+            "profile_name": "Y",
+            "periodic_armed": False,
+        }
+
+    def test_empty_profile_id_is_noop(self, prompt_store, tmp_path):
+        prompt_store.set("", {"profile_name": "X"})
+
+        assert not (tmp_path / "verify_prompts.json").exists()
+        assert prompt_store.get("") is None
+
+    def test_clear_empty_id_is_noop(self, prompt_store):
+        # No assertion needed — must simply not raise.
+        prompt_store.clear("")
+
+    def test_load_resilient_to_corrupt_file(self, prompt_store, tmp_path):
+        path = tmp_path / "verify_prompts.json"
+        path.write_text("{ this is not JSON", encoding="utf-8")
+
+        # Corrupt file → empty dict on load, set still works.
+        prompt_store.set("p1", {"profile_name": "X"})
+        assert prompt_store.get("p1") == {"profile_name": "X"}
+
+    def test_survives_new_instance_on_same_path(self, tmp_path):
+        path = tmp_path / "verify_prompts.json"
+        first = VerifyPromptStore(path)
+        first.set("p1", {"profile_name": "X", "v": 1})
+
+        second = VerifyPromptStore(path)
+        assert second.get("p1") == {"profile_name": "X", "v": 1}

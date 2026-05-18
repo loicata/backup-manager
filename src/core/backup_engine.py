@@ -371,6 +371,14 @@ class BackupEngine:
                 mirror.validate()
 
             self._emit_status("running")
+            # Run-boundary markers in the Run-tab log: a blank separator
+            # row then a timestamp header. Emitted AFTER STATUS=running
+            # so the Run-tab's ``_backup_active`` gate is already open
+            # — otherwise the markers would be dropped as "stray LOG
+            # while no run is in flight". Persisted alongside every
+            # other LOG event so they survive profile switches and app
+            # restarts.
+            self._log_run_boundary()
             self._run_pipeline(ctx)
             ctx.result.duration_seconds = time.monotonic() - start_time
             self._emit_status("success")
@@ -2279,6 +2287,29 @@ class BackupEngine:
     def _log(self, message: str) -> None:
         logger.info(message)
         self._events.emit(LOG, message=message, level="info")
+
+    def _log_run_boundary(self) -> None:
+        """Emit the blank-line + timestamp pair that opens a new run.
+
+        Run as the very first LOG events of ``run_backup`` so the
+        Run-tab log_tree shows a visual gap and a date stamp before
+        the engine starts announcing pipeline phases. Both events
+        go through the tagged bus, so they pick up the profile_id
+        and land in the right per-profile history file.
+        """
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Empty LOG event renders as a blank row in the Treeview and
+        # serves as the separator between two consecutive runs in the
+        # same profile's log. Skip the Python file logger for the
+        # empty line — it would clutter ``backup_manager.log`` with
+        # blank entries without adding information.
+        self._events.emit(LOG, message="", level="info")
+        logger.info("━━━━ Backup started %s ━━━━", ts)
+        self._events.emit(
+            LOG,
+            message=f"━━━━ Backup started {ts} ━━━━",
+            level="info",
+        )
 
     def _capture_log(self, message: str, **_kwargs) -> None:
         """Capture all LOG events (engine + phases) into BackupResult."""

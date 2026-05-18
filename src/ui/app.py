@@ -1327,12 +1327,29 @@ class BackupManagerApp:
         Stops if the profile changed (generation mismatch) or no
         destinations are configured.
 
+        Skipped while a backup is in flight: the writer is actively
+        touching the destination and the health probe's ``test_file``
+        write would PermissionError or stall on the same I/O queue.
+        Surfacing that as "Destination is read-only or locked" on
+        the card alarms the user every 30 s during a perfectly
+        normal long-running backup. The skipped tick still
+        re-schedules itself so polling resumes the moment the run
+        clears ``_backup_running``.
+
         Args:
             generation: Poll generation to detect profile changes.
         """
         if generation != getattr(self, "_health_poll_generation", -1):
             return
         if not getattr(self, "_health_configs", {}):
+            return
+
+        if getattr(self, "_backup_running", False):
+            self.root.after(
+                HEALTH_POLL_INTERVAL_MS,
+                self._poll_health,
+                generation,
+            )
             return
 
         for index, (config, label) in self._health_configs.items():

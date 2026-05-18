@@ -8,10 +8,71 @@ from src.core.health_checker import (
     DestinationHealth,
     _check_destination,
     _is_transient_wakeup_error,
+    _lightweight_local_check,
     _parse_free_space,
     check_destinations_async,
     format_bytes,
 )
+
+
+class TestLightweightLocalCheck:
+    """When a backup is in flight, ``_check_destination(lightweight=True)``
+    avoids the write-probe path on local destinations so the
+    concurrent writer cannot trigger a spurious read-only error on
+    the card. ``shutil.disk_usage`` still populates ``free_bytes``."""
+
+    def test_existing_path_reports_online_and_free_bytes(self, tmp_path):
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path=str(tmp_path),
+        )
+
+        health = _check_destination(config, "Storage", lightweight=True)
+
+        assert health.online is True
+        assert health.error == ""
+        assert health.free_bytes is not None
+        assert health.free_bytes > 0
+
+    def test_missing_path_reports_offline_with_error(self, tmp_path):
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path=str(tmp_path / "does-not-exist"),
+        )
+
+        health = _check_destination(config, "Storage", lightweight=True)
+
+        assert health.online is False
+        assert "Path not found" in health.error
+        assert health.free_bytes is None
+
+    def test_does_not_create_test_file(self, tmp_path):
+        """The whole point of lightweight mode is to NOT write
+        anything on the drive — confirm no probe artifact remains."""
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path=str(tmp_path),
+        )
+
+        _check_destination(config, "Storage", lightweight=True)
+
+        # The full probe writes ``.backup_manager_test`` and deletes
+        # it. Lightweight must not even create it transiently.
+        assert list(tmp_path.iterdir()) == []
+
+    def test_lightweight_helper_directly(self, tmp_path):
+        """Sanity check on the helper used by ``_check_destination``."""
+        config = StorageConfig(
+            storage_type=StorageType.LOCAL,
+            destination_path=str(tmp_path),
+        )
+        health = DestinationHealth(label="Storage", backend_type="local")
+
+        result = _lightweight_local_check(config, health)
+
+        assert result is health
+        assert result.online is True
+        assert result.free_bytes is not None
 
 
 class TestFormatBytes:

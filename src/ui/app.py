@@ -26,7 +26,6 @@ from src.core.config import (
     StorageConfig,
 )
 from src.core.events import STATUS, EventBus
-from src.core.health_checker import check_destinations_async
 from src.core.run_history import RunHistoryStore, VerifyPromptStore
 from src.core.scheduler import AutoStart, InAppScheduler
 from src.ui.tabs.email_tab import EmailTab
@@ -1293,19 +1292,18 @@ class BackupManagerApp:
         self._health_poll_generation = getattr(self, "_health_poll_generation", 0) + 1
 
         if destinations:
-            # Skip the immediate probe when a backup is in flight —
-            # the writer is occupying the drive and a concurrent
-            # ``test_connection`` would PermissionError, surfacing as
-            # "Destination is read-only or locked" the moment the user
-            # opens this profile. The polling task is still scheduled
-            # because it has its own skip-if-running guard and will
-            # refresh the card the first tick after the run clears.
-            if not getattr(self, "_backup_running", False):
-                check_destinations_async(
-                    profile.storage,
-                    profile.mirror_destinations,
-                    callback=self._on_health_result,
-                )
+            # When a backup is running on a local destination, the
+            # writer occupies the drive and a write probe would
+            # PermissionError. Fall back to a read-only probe
+            # (``shutil.disk_usage``) so the card still shows the
+            # current free space rather than going blank or red.
+            for index, (cfg, label) in self._health_configs.items():
+                threading.Thread(
+                    target=self._check_single_destination,
+                    args=(index, cfg, label),
+                    daemon=True,
+                    name=f"HealthCheck-{label}",
+                ).start()
             # Schedule continuous polling every 30s
             self.root.after(
                 HEALTH_POLL_INTERVAL_MS,
@@ -1333,16 +1331,11 @@ class BackupManagerApp:
         """Re-check all destinations periodically.
 
         Stops if the profile changed (generation mismatch) or no
-        destinations are configured.
-
-        Skipped while a backup is in flight: the writer is actively
-        touching the destination and the health probe's ``test_file``
-        write would PermissionError or stall on the same I/O queue.
-        Surfacing that as "Destination is read-only or locked" on
-        the card alarms the user every 30 s during a perfectly
-        normal long-running backup. The skipped tick still
-        re-schedules itself so polling resumes the moment the run
-        clears ``_backup_running``.
+        destinations are configured. While a backup is running,
+        ``_check_single_destination`` switches the local probe to a
+        read-only path so the card stays informative (current free
+        space) without flipping to a spurious "read-only" caused by
+        the writer holding the I/O queue.
 
         Args:
             generation: Poll generation to detect profile changes.
@@ -1350,14 +1343,6 @@ class BackupManagerApp:
         if generation != getattr(self, "_health_poll_generation", -1):
             return
         if not getattr(self, "_health_configs", {}):
-            return
-
-        if getattr(self, "_backup_running", False):
-            self.root.after(
-                HEALTH_POLL_INTERVAL_MS,
-                self._poll_health,
-                generation,
-            )
             return
 
         for index, (config, label) in self._health_configs.items():
@@ -1378,6 +1363,13 @@ class BackupManagerApp:
     def _check_single_destination(self, index: int, config: "StorageConfig", label: str) -> None:
         """Check one destination and report result via callback.
 
+        While a backup is running, the local probe is switched to the
+        lightweight read-only path so a concurrent writer cannot
+        flip the card to "read-only" (the write test would race for
+        the I/O queue and PermissionError). Remote backends are
+        unaffected by the local writer and always use the regular
+        probe.
+
         Args:
             index: Destination index (0=storage, 1+=mirrors).
             config: Storage configuration.
@@ -1385,7 +1377,8 @@ class BackupManagerApp:
         """
         from src.core.health_checker import _check_destination
 
-        result = _check_destination(config, label)
+        lightweight = bool(getattr(self, "_backup_running", False))
+        result = _check_destination(config, label, lightweight=lightweight)
         self._on_health_result(index, result)
 
     def _save_profile(self, silent: bool = False) -> bool:

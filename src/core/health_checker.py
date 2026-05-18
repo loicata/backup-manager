@@ -6,11 +6,13 @@ Checks connectivity and free space for each configured destination
 
 import logging
 import re
+import shutil
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 from src.core.backup_engine import create_backend
-from src.core.config import StorageConfig
+from src.core.config import StorageConfig, StorageType
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,46 @@ _TRANSIENT_WAKEUP_PATTERNS = (
 )
 
 
+def _lightweight_local_check(
+    config: StorageConfig,
+    health: DestinationHealth,
+) -> DestinationHealth:
+    """Populate ``health`` without writing a test file on the drive.
+
+    Used during a backup to keep the Destinations card showing the
+    current free space (read-only ``shutil.disk_usage``) while the
+    writer holds the drive busy. The destination is considered
+    online whenever its path exists — there is no way to detect
+    read-only mounts without a write attempt, and a backup in flight
+    proves writability anyway (any read-only state would have already
+    failed the pipeline).
+
+    Args:
+        config: Local storage configuration.
+        health: Pre-populated ``DestinationHealth`` to fill in.
+
+    Returns:
+        The same ``health`` instance, mutated.
+    """
+    try:
+        path = Path(config.destination_path)
+        if not path.exists():
+            health.online = False
+            health.error = f"Path not found: {path}"
+            return health
+        health.online = True
+        usage = shutil.disk_usage(path)
+        health.free_bytes = usage.free
+    except OSError as exc:
+        # ``disk_usage`` can OSError if the drive disappears between
+        # ``exists`` and the syscall (USB unplugged). Mark offline so
+        # the user sees the change rather than a stale "free space"
+        # value that would be misleading.
+        health.online = False
+        health.error = str(exc)
+    return health
+
+
 def _is_transient_wakeup_error(message: str) -> bool:
     """Match the local-storage messages that indicate a USB drive
     still spinning up rather than a genuine failure.
@@ -67,7 +109,11 @@ def _is_transient_wakeup_error(message: str) -> bool:
     return any(p in low for p in _TRANSIENT_WAKEUP_PATTERNS)
 
 
-def _check_destination(config: StorageConfig, label: str) -> DestinationHealth:
+def _check_destination(
+    config: StorageConfig,
+    label: str,
+    lightweight: bool = False,
+) -> DestinationHealth:
     """Check a single destination's health.
 
     Implements a one-shot silent retry on transient wake-up errors
@@ -80,6 +126,16 @@ def _check_destination(config: StorageConfig, label: str) -> DestinationHealth:
     Args:
         config: Storage configuration to check.
         label: Display label for this destination.
+        lightweight: When True (used while a backup is in flight),
+            skip the write-probe path for LOCAL destinations and rely
+            on ``Path.exists`` + ``shutil.disk_usage`` to populate
+            connectivity and free space. The write probe would
+            otherwise race the concurrent writer for the I/O queue
+            and frequently PermissionError, surfacing as a misleading
+            "Destination is read-only or locked" card while the
+            backup is succeeding. Remote backends (SFTP / S3) are
+            unaffected by a local writer, so they fall through to
+            the regular full probe.
 
     Returns:
         DestinationHealth with connectivity and space info.
@@ -88,6 +144,9 @@ def _check_destination(config: StorageConfig, label: str) -> DestinationHealth:
         label=label,
         backend_type=config.storage_type.value,
     )
+
+    if lightweight and config.storage_type == StorageType.LOCAL:
+        return _lightweight_local_check(config, health)
 
     try:
         backend = create_backend(config)

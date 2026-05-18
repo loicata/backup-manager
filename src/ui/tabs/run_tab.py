@@ -663,7 +663,12 @@ class RunTab(ttk.Frame):
         which is invoked from the UI's profile-switch path). Each
         entry is rendered through ``_append_log`` so structured payloads
         (skipped categories, exclude patterns) keep their lazy-load
-        tree shape just like a live run.
+        tree shape just like a live run. When the last persisted line
+        is a terminal one (``Backup complete|failed|cancelled``) the
+        success-pill style (green label, bar at 100 %) is restored so
+        that re-selecting a profile right after its run finishes does
+        not flash a misleading "Waiting..." over the log of a clearly
+        successful backup.
 
         When no history store is attached the widget is just cleared,
         matching the legacy "blank slate on switch" behaviour.
@@ -671,13 +676,52 @@ class RunTab(ttk.Frame):
         self._clear_log_widget()
         if self._history_store is None or not self._current_profile_id:
             return
-        for entry in self._history_store.load(self._current_profile_id):
+        entries = self._history_store.load(self._current_profile_id)
+        for entry in entries:
             self._append_log(
                 entry.get("msg", ""),
                 entry.get("level", "info"),
                 entry.get("phase", ""),
                 entry.get("details"),
             )
+        self._restore_terminal_status(entries)
+
+    def _restore_terminal_status(self, entries: list[dict]) -> None:
+        """Re-apply the status pill colour after a reload.
+
+        ``_clear_run_state`` (called just before this on profile
+        switch) reset the progress bar to 0 % and the status label to
+        "Waiting...". For a profile whose last run already completed,
+        that overwrite hides the "Success" / "Failed" visual cue. We
+        scan from the tail of ``entries`` for the last terminal log
+        line and re-apply the matching style — but only when it is
+        unambiguously the trailing event of the history, otherwise a
+        random "Backup complete" buried under later activity would
+        wrongly flip the bar to 100 %.
+        """
+        if not entries:
+            return
+        last_msg = entries[-1].get("msg", "")
+        if not _is_terminal_log_message(last_msg):
+            return
+        with contextlib.suppress(tk.TclError):
+            if last_msg.lower().startswith("backup complete"):
+                self.progress_bar["value"] = 100
+                self.percent_label.config(text="100%")
+                self.status_label.config(
+                    text="Backup complete!",
+                    foreground=Colors.SUCCESS,
+                )
+            elif last_msg.lower().startswith("backup failed"):
+                self.status_label.config(
+                    text="Backup failed!",
+                    foreground=Colors.DANGER,
+                )
+            elif last_msg.lower().startswith("backup cancelled"):
+                self.status_label.config(
+                    text="Backup cancelled",
+                    foreground=Colors.TEXT_SECONDARY,
+                )
 
     def _clear_log_widget(self) -> None:
         """Remove every row from the log tree and reset lazy state.

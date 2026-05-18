@@ -148,6 +148,79 @@ class TestSwitchResetsVolatileWidgets:
         assert run_tab._last_pct == 0
 
 
+class TestTerminalStatusRestoredAfterSwitch:
+    """When the last persisted line is a terminal message, the pill
+    (label colour, progress bar) must reflect it after a swap.
+
+    Pre-fix: switching profile reset to "Waiting..." 0 % and stayed
+    there even when the profile's last persisted event was
+    ``Backup complete: ...`` — so a successful run looked idle after
+    a side-trip to another profile."""
+
+    def _emit_terminal(
+        self,
+        tab: RunTab,
+        profile_id: str,
+        message: str,
+        level: str = "info",
+    ) -> None:
+        # Terminal lines are exempt from the ``_backup_active`` gate
+        # so they always reach ``_append_log`` regardless of state.
+        tab._on_log(message=message, level=level, profile_id=profile_id)
+        tab.update_idletasks()
+        tab.update()
+
+    def test_switch_back_after_success_restores_complete_pill(
+        self, run_tab
+    ) -> None:
+        run_tab.set_current_profile_id("A")
+        self._emit_terminal(run_tab, "A", "Backup complete: 7 files in 0.5 min")
+
+        run_tab.set_current_profile_id("B")
+        run_tab.set_current_profile_id("A")
+
+        assert run_tab.progress_bar["value"] == 100
+        assert run_tab.percent_label.cget("text") == "100%"
+        assert run_tab.status_label.cget("text") == "Backup complete!"
+
+    def test_switch_back_after_failure_shows_failed_pill(self, run_tab) -> None:
+        run_tab.set_current_profile_id("A")
+        self._emit_terminal(
+            run_tab, "A", "Backup failed: disk full", level="error"
+        )
+
+        run_tab.set_current_profile_id("B")
+        run_tab.set_current_profile_id("A")
+
+        assert run_tab.status_label.cget("text") == "Backup failed!"
+
+    def test_switch_back_after_cancel_shows_cancelled_pill(self, run_tab) -> None:
+        run_tab.set_current_profile_id("A")
+        self._emit_terminal(run_tab, "A", "Backup cancelled by user")
+
+        run_tab.set_current_profile_id("B")
+        run_tab.set_current_profile_id("A")
+
+        assert run_tab.status_label.cget("text") == "Backup cancelled"
+
+    def test_profile_with_no_terminal_event_keeps_waiting_baseline(
+        self, run_tab
+    ) -> None:
+        """Mid-run (or never-run) profiles must still show "Waiting..."
+        after a swap — the restore only fires on terminal lines."""
+        run_tab.set_current_profile_id("A")
+        run_tab._on_log(
+            message="Collecting files...", level="info", profile_id="A"
+        )
+        run_tab.update_idletasks()
+
+        run_tab.set_current_profile_id("B")
+        run_tab.set_current_profile_id("A")
+
+        assert run_tab.progress_bar["value"] == 0
+        assert run_tab.status_label.cget("text") == "Waiting..."
+
+
 class TestPersistedEntryShape:
     def test_persisted_entry_carries_message_level_phase(
         self, run_tab, store

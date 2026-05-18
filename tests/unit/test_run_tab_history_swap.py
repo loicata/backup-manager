@@ -104,6 +104,50 @@ class TestSwitchKeepsPerProfileHistory:
         assert _log_messages(run_tab) == ["row-1", "row-2"]
 
 
+class TestSwitchResetsVolatileWidgets:
+    """Progress bar, percent label, status label, and phase counters
+    must be reset on profile switch so the previous profile's live
+    state does not bleed into the new view. The 3.7.13 first-cut
+    forgot this and a TestLoic-mid-scan ``Scanning... 99534 files in
+    9859 folders`` was visible on every other profile until the next
+    PROGRESS event for that profile arrived."""
+
+    def test_switch_resets_progress_bar_to_zero(self, run_tab) -> None:
+        run_tab.set_current_profile_id("A")
+        # Pretend a PROGRESS event landed and bumped the bar.
+        run_tab.progress_bar["value"] = 78
+        run_tab.percent_label.config(text="78%")
+
+        run_tab.set_current_profile_id("B")
+
+        assert run_tab.progress_bar["value"] == 0
+        assert run_tab.percent_label.cget("text") == "0%"
+
+    def test_switch_resets_status_label_to_waiting(self, run_tab) -> None:
+        run_tab.set_current_profile_id("A")
+        run_tab.status_label.config(text="Scanning... 99534 files in 9859 folders")
+
+        run_tab.set_current_profile_id("B")
+
+        assert run_tab.status_label.cget("text") == "Waiting..."
+
+    def test_switch_clears_phase_counter_dicts(self, run_tab) -> None:
+        run_tab.set_current_profile_id("A")
+        run_tab._phase_totals["collector"] = 100
+        run_tab._phase_done["collector"] = 42
+        run_tab._phase_order.append("collector")
+        run_tab._phase_weights["collector"] = 1
+        run_tab._last_pct = 42
+
+        run_tab.set_current_profile_id("B")
+
+        assert run_tab._phase_totals == {}
+        assert run_tab._phase_done == {}
+        assert run_tab._phase_order == []
+        assert run_tab._phase_weights == {}
+        assert run_tab._last_pct == 0
+
+
 class TestPersistedEntryShape:
     def test_persisted_entry_carries_message_level_phase(
         self, run_tab, store

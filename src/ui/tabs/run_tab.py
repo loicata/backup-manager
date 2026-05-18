@@ -611,16 +611,20 @@ class RunTab(ttk.Frame):
         switch. After this call, only events tagged with
         ``profile_id`` (or untagged events) reach the handlers.
 
-        Also triggers a re-render of the log_tree from the new
-        profile's persisted history. The previous profile's rows are
-        cleared first; the new profile's full history (capped at the
-        store's tail window) is reinserted oldest-first. No-ops when
-        the id is unchanged so re-selecting the same profile in the
-        sidebar does not blink the log.
+        Triggers (in order) a reset of the volatile widgets (progress
+        bar, status label, phase counters) and a re-render of the
+        log_tree from the new profile's persisted history. Without
+        the reset, the bar and the "Scanning..." text would stay
+        frozen on the previous profile's values when its run is the
+        active one and we switch to a non-running profile (the
+        live PROGRESS events get filtered out and never overwrite
+        the stale state). No-ops when the id is unchanged so
+        re-selecting the same profile does not blink the log.
         """
         previous_id = self._current_profile_id
         self._current_profile_id = profile_id or ""
         if profile_id and profile_id != previous_id:
+            self._clear_run_state()
             self._reload_log_history()
 
     def _reload_log_history(self) -> None:
@@ -1134,19 +1138,37 @@ class RunTab(ttk.Frame):
         the current profile so the previous run's UI is gone.
 
         Profile-switch goes through ``set_current_profile_id`` (which
-        only calls ``_clear_log_widget``) instead — switching must
-        not lose the alerts pertaining to the new profile's history.
+        also resets the volatile state via ``_clear_run_state`` but
+        keeps alerts so a Fast-mode prompt for the new profile is
+        not lost).
         """
         self._clear_log_widget()
-        self.progress_bar["value"] = 0
-        self.percent_label.config(text="0%")
+        self._clear_run_state()
+        self.clear_alerts()
+
+    def _clear_run_state(self) -> None:
+        """Reset the progress bar, status label and phase counters.
+
+        Extracted from ``clear_log`` so the profile-switch path can
+        return the bar/label to their idle baseline without also
+        wiping the log_tree (which is repopulated separately from
+        the per-profile history file) or the alerts. Leaves
+        ``_backup_active`` untouched — that flag is the cross-tab
+        contract that gates PROGRESS events from the Verify tab and
+        must follow STATUS events, not user navigation.
+        """
+        with contextlib.suppress(tk.TclError):
+            self.progress_bar["value"] = 0
+            self.percent_label.config(text="0%")
+            self.status_label.config(
+                text="Waiting...",
+                foreground=Colors.TEXT_SECONDARY,
+            )
         self._phase_totals.clear()
         self._phase_done.clear()
         self._phase_order.clear()
         self._phase_weights.clear()
         self._last_pct = 0
-        self.status_label.config(text="Waiting...", foreground=Colors.TEXT_SECONDARY)
-        self.clear_alerts()
 
     def show_verify_prompt(
         self,

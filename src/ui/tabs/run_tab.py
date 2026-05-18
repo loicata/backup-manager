@@ -3,6 +3,7 @@
 import contextlib
 import re
 import tkinter as tk
+from datetime import datetime
 from tkinter import ttk
 
 from src.core.events import (
@@ -20,6 +21,7 @@ from src.core.file_categorizer import (
     extension_of,
 )
 from src.core.health_checker import DestinationHealth, format_bytes
+from src.core.run_history import RunHistoryStore
 from src.ui._status_text import truncate_status_text
 from src.ui.theme import Colors, Fonts, Spacing
 
@@ -69,7 +71,13 @@ def _is_terminal_log_message(message: str) -> bool:
 class RunTab(ttk.Frame):
     """Backup execution: progress bar, log output, start/cancel."""
 
-    def __init__(self, parent, events: EventBus = None, **kwargs):
+    def __init__(
+        self,
+        parent,
+        events: EventBus = None,
+        history_store: RunHistoryStore | None = None,
+        **kwargs,
+    ):
         super().__init__(parent, **kwargs)
         self._events = events or EventBus()
         self._phase_totals: dict[str, int] = {}
@@ -100,6 +108,13 @@ class RunTab(ttk.Frame):
         # run on profile A stops bleeding into the Run-tab view of
         # profile B (17/05/2026 user report).
         self._current_profile_id: str = ""
+        # Per-profile persisted history of LOG events. ``None`` disables
+        # persistence (kept for tests and embedding contexts that don't
+        # care about cross-session restore). When set, every LOG event
+        # with a non-empty profile_id is appended on the worker thread,
+        # and ``set_current_profile_id`` re-renders the log_tree from
+        # the new profile's file on every sidebar switch.
+        self._history_store = history_store
         self._build_ui()
         self._subscribe_events()
 
@@ -595,8 +610,85 @@ class RunTab(ttk.Frame):
         Called by ``BackupManagerApp._load_profile`` on every sidebar
         switch. After this call, only events tagged with
         ``profile_id`` (or untagged events) reach the handlers.
+
+        Also triggers a re-render of the log_tree from the new
+        profile's persisted history. The previous profile's rows are
+        cleared first; the new profile's full history (capped at the
+        store's tail window) is reinserted oldest-first. No-ops when
+        the id is unchanged so re-selecting the same profile in the
+        sidebar does not blink the log.
         """
+        previous_id = self._current_profile_id
         self._current_profile_id = profile_id or ""
+        if profile_id and profile_id != previous_id:
+            self._reload_log_history()
+
+    def _reload_log_history(self) -> None:
+        """Repopulate the log_tree from the current profile's history.
+
+        Runs on the main thread (called from ``set_current_profile_id``
+        which is invoked from the UI's profile-switch path). Each
+        entry is rendered through ``_append_log`` so structured payloads
+        (skipped categories, exclude patterns) keep their lazy-load
+        tree shape just like a live run.
+
+        When no history store is attached the widget is just cleared,
+        matching the legacy "blank slate on switch" behaviour.
+        """
+        self._clear_log_widget()
+        if self._history_store is None or not self._current_profile_id:
+            return
+        for entry in self._history_store.load(self._current_profile_id):
+            self._append_log(
+                entry.get("msg", ""),
+                entry.get("level", "info"),
+                entry.get("phase", ""),
+                entry.get("details"),
+            )
+
+    def _clear_log_widget(self) -> None:
+        """Remove every row from the log tree and reset lazy state.
+
+        Extracted from ``clear_log`` so the profile-switch swap can
+        clear just the log without also resetting progress bar / phase
+        counters / alerts (those are reset by ``clear_log`` for the
+        "new run" entry point).
+        """
+        with contextlib.suppress(tk.TclError):
+            self.log_tree.delete(*self.log_tree.get_children(""))
+        self._lazy_subtrees.clear()
+        # Reset the current phase tracker so the first row of the
+        # next backup ("Backup type: full" etc.) does not inherit
+        # the previous run's last phase.
+        self._current_phase = ""
+
+    def _persist_log(
+        self,
+        message: str,
+        level: str,
+        phase: str,
+        details: dict | None,
+        profile_id: str,
+    ) -> None:
+        """Append a LOG event to the profile's persistent history.
+
+        Called from the worker thread on every LOG arrival, BEFORE
+        the per-profile widget filter so that background runs on a
+        non-selected profile are still preserved in their own
+        history file. No-op when persistence is disabled or the
+        event carries no profile id.
+        """
+        if self._history_store is None or not profile_id:
+            return
+        entry: dict = {
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "msg": message,
+            "level": level,
+            "phase": phase,
+        }
+        if details is not None:
+            entry["details"] = details
+        self._history_store.append(profile_id, entry)
 
     def _on_phase_count(self, weights=None, profile_id="", **kw):
         """Receive phase weights for progress bar calculation.
@@ -746,7 +838,13 @@ class RunTab(ttk.Frame):
         ``Backup complete|failed|cancelled`` which the Verify tab
         never emits), so an unconditional exemption is safe from
         cross-tab pollution.
+
+        Persistence happens BEFORE the per-profile widget filter so
+        that a background scheduler run on a non-selected profile
+        still feeds its own history file — re-selecting that profile
+        later restores the full row stream via ``_reload_log_history``.
         """
+        self._persist_log(message, level, phase, details, profile_id)
         if not self._event_belongs_to_current_profile(profile_id):
             return
         is_terminal = _is_terminal_log_message(message)
@@ -1028,15 +1126,18 @@ class RunTab(ttk.Frame):
         return abs((t1 - t2).total_seconds()) < 300.0
 
     def clear_log(self):
-        with contextlib.suppress(tk.TclError):
-            self.log_tree.delete(*self.log_tree.get_children(""))
-        # Drop the lazy-load registry so reopened items don't try to
-        # materialize children that no longer exist.
-        self._lazy_subtrees.clear()
-        # Reset the current phase tracker so the first row of the
-        # next backup ("Backup type: full" etc.) does not inherit
-        # the previous run's last phase.
-        self._current_phase = ""
+        """Reset the Run tab to a blank slate.
+
+        Wipes the log tree plus the volatile run state (progress bar,
+        phase counters, status label) and dismisses any pending
+        Fast-mode verify alerts. Called when a new backup starts on
+        the current profile so the previous run's UI is gone.
+
+        Profile-switch goes through ``set_current_profile_id`` (which
+        only calls ``_clear_log_widget``) instead — switching must
+        not lose the alerts pertaining to the new profile's history.
+        """
+        self._clear_log_widget()
         self.progress_bar["value"] = 0
         self.percent_label.config(text="0%")
         self._phase_totals.clear()
@@ -1045,12 +1146,6 @@ class RunTab(ttk.Frame):
         self._phase_weights.clear()
         self._last_pct = 0
         self.status_label.config(text="Waiting...", foreground=Colors.TEXT_SECONDARY)
-        # ``clear_log`` fires on profile-switch (see app.py::_load_profile).
-        # The previous profile's pending Fast-mode verify prompts are
-        # tied to *that* profile's id; carrying them over would let the
-        # user accidentally trigger a verify against the wrong profile.
-        # Drop them — if the user wanted to act on the old prompt they
-        # had the chance before switching.
         self.clear_alerts()
 
     def show_verify_prompt(

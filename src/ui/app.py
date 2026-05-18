@@ -27,6 +27,7 @@ from src.core.config import (
 )
 from src.core.events import STATUS, EventBus
 from src.core.health_checker import check_destinations_async
+from src.core.run_history import RunHistoryStore
 from src.core.scheduler import AutoStart, InAppScheduler
 from src.ui.tabs.email_tab import EmailTab
 from src.ui.tabs.encryption_tab import EncryptionTab
@@ -663,6 +664,12 @@ class BackupManagerApp:
         # Core components
         self.config_manager = ConfigManager()
         self.events = EventBus()
+        # Per-profile LOG history persisted under ``<config_dir>/run_history``.
+        # Lets the Run tab restore message+phase rows on profile switch
+        # and across app restarts. Kept on the app so the deletion path
+        # (``_finalize_profile_deletion``) can drop a profile's file
+        # alongside the JSON config.
+        self.run_history = RunHistoryStore(self.config_manager.config_dir / "run_history")
         self.engine: BackupEngine | None = None
         self._current_profile: BackupProfile | None = None
         # True while a backup thread is active. Read by _save_profile
@@ -890,7 +897,11 @@ class BackupManagerApp:
         self.notebook.pack(fill="both", expand=True)
 
         # Create tabs
-        self.tab_run = RunTab(self.notebook, events=self.events)
+        self.tab_run = RunTab(
+            self.notebook,
+            events=self.events,
+            history_store=self.run_history,
+        )
         self.tab_general = GeneralTab(self.notebook)
         self.tab_storage = StorageTab(self.notebook)
         self.tab_mirror1 = MirrorTab(self.notebook, mirror_index=0)
@@ -1130,7 +1141,6 @@ class BackupManagerApp:
 
     def _load_profile(self, profile: BackupProfile):
         """Load a profile into all tabs."""
-        previous_id = self._current_profile.id if self._current_profile else None
         self._current_profile = profile
 
         self.tab_general.load_profile(profile)
@@ -1158,10 +1168,11 @@ class BackupManagerApp:
         # with a different profile_id (e.g. a background scheduler
         # backup of another profile) do not move the bar / status /
         # log of this view (v3.7.12 ProfileTaggingEventBus contract).
+        # ``set_current_profile_id`` also swaps the log_tree contents to
+        # the new profile's persisted history (no explicit clear_log
+        # needed here — that's reserved for "new run" entry points
+        # which still want to reset progress bar / status / alerts).
         self.tab_run.set_current_profile_id(profile.id)
-        # Only clear log when switching to a different profile
-        if profile.id != previous_id:
-            self.tab_run.clear_log()
 
         self._update_health_dashboard(profile)
 
@@ -1671,8 +1682,13 @@ class BackupManagerApp:
         When the deleted profile was the last one on disk, relaunch the
         setup wizard exactly the way the cold start does — an empty app
         with no way to create a profile is a dead end for the user.
+
+        Also drops the profile's persisted Run-tab history so a recycled
+        profile id (rare but possible after a manual JSON edit) does
+        not resurrect the old messages on the next selection.
         """
         self.config_manager.delete_profile(profile.id)
+        self.run_history.delete(profile.id)
         self._current_profile = None
         self._load_profiles()
         if self._current_profile is None:

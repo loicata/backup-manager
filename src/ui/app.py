@@ -677,7 +677,17 @@ class BackupManagerApp:
         self.verify_prompts = VerifyPromptStore(
             self.config_manager.config_dir / "verify_prompts.json"
         )
-        self.engine: BackupEngine | None = None
+        # In-flight backup engines, keyed by profile id. The same UI
+        # process can host two simultaneous runs (a scheduler-triggered
+        # one in the background plus a manual one in the foreground —
+        # the lock guards same-profile collisions, not cross-profile
+        # parallelism). The previous ``self.engine`` singleton was
+        # overwritten by the second ``BackupEngine(...)`` call, leaving
+        # the cancel button and result lookups pointing at the wrong
+        # run. Keying by profile id lets ``_cancel_backup`` route to
+        # the engine that owns the profile currently displayed in
+        # the sidebar.
+        self._active_engines: dict[str, BackupEngine] = {}
         self._current_profile: BackupProfile | None = None
         # True while a backup thread is active. Read by _save_profile
         # to avoid mutating the shared BackupProfile instance that the
@@ -2044,7 +2054,7 @@ class BackupManagerApp:
                     )
                     return
 
-        self.engine = BackupEngine(self.config_manager, events=self.events)
+        engine = BackupEngine(self.config_manager, events=self.events)
 
         # Queue everything after the first profile; _backup_thread picks
         # the next one off the queue when it finishes. Clear first in
@@ -2053,9 +2063,14 @@ class BackupManagerApp:
         # Move the sidebar selection to the first profile so the user
         # sees tabs updated for the profile actually being run.
         self._select_profile_in_sidebar(active_profiles[0])
-        self._precheck_and_run(active_profiles[0])
+        self._precheck_and_run(active_profiles[0], engine)
 
-    def _precheck_and_run(self, profile: BackupProfile, _retry_attempt: int = 0) -> None:
+    def _precheck_and_run(
+        self,
+        profile: BackupProfile,
+        engine: BackupEngine,
+        _retry_attempt: int = 0,
+    ) -> None:
         """Run target pre-check in background thread, then start backup.
 
         Shows a "Checking destinations..." message immediately so the user
@@ -2068,6 +2083,13 @@ class BackupManagerApp:
         drive two full wake-up rounds before telling the user something
         is wrong — the first round may have nudged the drive out of deep
         sleep without fully re-enumerating in time.
+
+        Args:
+            profile: Profile to back up.
+            engine: Engine instance dedicated to this run. Carried
+                through to ``_start_backup_thread`` so the cancel button
+                can later reach exactly this instance via
+                ``_active_engines``.
         """
         if _retry_attempt == 0:
             # Only show the "Checking..." overlay on the first attempt;
@@ -2078,7 +2100,7 @@ class BackupManagerApp:
         result: list = [None]  # [None] = pending, [list] = done
 
         def _do_check() -> None:
-            result[0] = self.engine.precheck_targets(profile)
+            result[0] = engine.precheck_targets(profile)
 
         def _poll() -> None:
             if result[0] is None:
@@ -2088,7 +2110,7 @@ class BackupManagerApp:
             failures = [r for r in result[0] if not r[2]]
             if not failures:
                 self._hide_target_alert()  # Remove "Checking..." message
-                self._start_backup_thread(profile)
+                self._start_backup_thread(profile, engine)
                 return
 
             # One silent retry before showing the popup. Half a second
@@ -2097,7 +2119,7 @@ class BackupManagerApp:
             if _retry_attempt == 0:
                 self.root.after(
                     500,
-                    lambda: self._precheck_and_run(profile, _retry_attempt=1),
+                    lambda: self._precheck_and_run(profile, engine, _retry_attempt=1),
                 )
                 return
 
@@ -2109,10 +2131,14 @@ class BackupManagerApp:
             # previous form wrapped only the true-branch, making
             # on_continue always truthy and rendering a no-op
             # "Continue without mirror" button in every case.
-            on_continue = (lambda: self._on_precheck_continue(profile)) if primary_ok else None
+            on_continue = (
+                (lambda: self._on_precheck_continue(profile, engine))
+                if primary_ok
+                else None
+            )
             self._show_target_alert(
                 failures,
-                on_retry=lambda: self._on_precheck_retry(profile),
+                on_retry=lambda: self._on_precheck_retry(profile, engine),
                 on_cancel=lambda: self._on_precheck_cancel(),
                 on_continue=on_continue,
             )
@@ -2148,25 +2174,38 @@ class BackupManagerApp:
             bg=Colors.CARD_BG,
         ).pack()
 
-    def _on_precheck_retry(self, profile: BackupProfile) -> None:
+    def _on_precheck_retry(
+        self, profile: BackupProfile, engine: BackupEngine
+    ) -> None:
         """User clicked Retry — hide alert and re-run precheck."""
         self._hide_target_alert()
-        self._precheck_and_run(profile)
+        self._precheck_and_run(profile, engine)
 
-    def _on_precheck_continue(self, profile: BackupProfile) -> None:
+    def _on_precheck_continue(
+        self, profile: BackupProfile, engine: BackupEngine
+    ) -> None:
         """User clicked Continue without mirror — run backup anyway."""
         self._hide_target_alert()
-        self._start_backup_thread(profile)
+        self._start_backup_thread(profile, engine)
 
     def _on_precheck_cancel(self) -> None:
         """User clicked Cancel — hide alert, set tray to error."""
         self._hide_target_alert()
         self.tray.set_state(TrayState.BACKUP_ERROR)
 
-    def _start_backup_thread(self, profile: BackupProfile) -> None:
-        """Start the actual backup in a background thread."""
+    def _start_backup_thread(
+        self, profile: BackupProfile, engine: BackupEngine
+    ) -> None:
+        """Start the actual backup in a background thread.
+
+        The ``engine`` instance is the one created (and pre-checked) by
+        ``_run_backup``. It is registered in ``_active_engines`` so the
+        cancel button routes to this exact run regardless of how many
+        other backups are in flight.
+        """
         self.tab_run.clear_log()
         self.tab_run._append_log(f"Backup started — {profile.name}")
+        self._active_engines[profile.id] = engine
 
         # Raise the running flag BEFORE spawning the thread so any UI save
         # queued between this point and the engine's _maybe_force_full sees
@@ -2216,7 +2255,7 @@ class BackupManagerApp:
 
             try:
                 self.tray.set_state(TrayState.BACKUP_RUNNING)
-                stats = self.engine.run_backup(profile)
+                stats = engine.run_backup(profile)
                 self.tray.set_state(TrayState.BACKUP_SUCCESS)
                 self.tray.notify(
                     "Backup complete",
@@ -2272,7 +2311,7 @@ class BackupManagerApp:
                     "Backup cancelled",
                     f"[{profile.name}] Cancelled by user",
                 )
-                result = self.engine._current_result if self.engine else None
+                result = engine._current_result
                 with self.scheduler.op_lock:
                     self.scheduler.journal.update_last(status="cancelled")
                 if result:
@@ -2289,7 +2328,7 @@ class BackupManagerApp:
                 run_failed[0] = True
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 self.tray.notify("Backup failed", str(e))
-                result = self.engine._current_result if self.engine else None
+                result = engine._current_result
                 with self.scheduler.op_lock:
                     self.scheduler.journal.update_last(
                         status="failed",
@@ -2308,6 +2347,10 @@ class BackupManagerApp:
                 # Lower the flag so the next Save collects UI edits made
                 # during the backup (and warnings stop firing).
                 self._backup_running = False
+                # Drop the engine reference now that the pipeline has
+                # released its profile lock. Keeps ``_cancel_backup``
+                # from routing a UI click to a finished engine.
+                self._active_engines.pop(profile.id, None)
                 # Release the scheduler's in-progress mark so the next
                 # tick of ``_check_schedules`` is free to fire the
                 # normal scheduled trigger.  Idempotent — safe even
@@ -2360,7 +2403,11 @@ class BackupManagerApp:
         # Track the active profile visually so the sidebar and tabs
         # reflect which backup is running right now.
         self._select_profile_in_sidebar(next_profile)
-        self._precheck_and_run(next_profile)
+        # Each queued profile gets its own engine so cancel routing
+        # via ``_active_engines`` stays per-profile and the wrapper
+        # bus tag is rebuilt for the new profile id.
+        next_engine = BackupEngine(self.config_manager, events=self.events)
+        self._precheck_and_run(next_profile, next_engine)
 
     def _select_profile_in_sidebar(self, profile: BackupProfile) -> None:
         """Highlight a profile in the sidebar and load its tabs.
@@ -2378,9 +2425,21 @@ class BackupManagerApp:
                 return
 
     def _cancel_backup(self):
-        if self.engine:
+        """Cancel the run that owns the currently-selected profile.
+
+        Routes via ``_active_engines`` so a background scheduler run
+        on another profile is left alone (the cancel button visually
+        belongs to the profile the user is looking at). When the
+        current profile has no run in flight the click is a no-op —
+        matching the pre-refactor behaviour where the cancel button
+        on an idle tab silently did nothing.
+        """
+        if not self._current_profile:
+            return
+        engine = self._active_engines.get(self._current_profile.id)
+        if engine is not None:
             self.tab_run._append_log("Cancelling backup...")
-            self.engine.cancel()
+            engine.cancel()
 
     # --- Integrity Verification ---
 
@@ -2721,15 +2780,15 @@ class BackupManagerApp:
             logger.warning("Skipping scheduled backup for '%s': %s", profile.name, e)
             return
 
-        self.engine = BackupEngine(self.config_manager, events=self.events)
+        engine = BackupEngine(self.config_manager, events=self.events)
 
         # Pre-check targets (blocking — we're in the scheduler thread)
-        results = self.engine.precheck_targets(profile)
+        results = engine.precheck_targets(profile)
         failures = [r for r in results if not r[2]]
 
         if failures:
             # Show alert on main thread and wait for user decision
-            user_choice = self._scheduled_precheck_prompt(failures, profile)
+            user_choice = self._scheduled_precheck_prompt(failures, profile, engine)
             if user_choice == "cancel":
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 raise RuntimeError("Backup cancelled: destinations unavailable")
@@ -2739,9 +2798,13 @@ class BackupManagerApp:
         # UI save cannot overwrite the JSON on disk while the scheduler is
         # mid-pipeline.
         self._backup_running = True
+        # Register the scheduler's engine so a cancel click on its
+        # profile (sidebar selection) reaches it. The manual path
+        # registers the same way in ``_start_backup_thread``.
+        self._active_engines[profile.id] = engine
         try:
             self.tray.set_state(TrayState.BACKUP_RUNNING)
-            stats = self.engine.run_backup(profile)
+            stats = engine.run_backup(profile)
             self.tray.set_state(TrayState.BACKUP_SUCCESS)
             self.tray.notify(
                 "Scheduled backup complete",
@@ -2804,7 +2867,7 @@ class BackupManagerApp:
                 f"[{profile.name}] Cancelled by user",
             )
             if profile.email.enabled:
-                result = self.engine._current_result if self.engine else None
+                result = engine._current_result
                 self._send_backup_email(
                     profile,
                     False,
@@ -2821,7 +2884,7 @@ class BackupManagerApp:
             )
 
             if profile.email.enabled:
-                result = self.engine._current_result if self.engine else None
+                result = engine._current_result
                 self._send_backup_email(
                     profile,
                     False,
@@ -2833,11 +2896,16 @@ class BackupManagerApp:
             raise
         finally:
             self._backup_running = False
+            # Always drop the engine reference, even on cancel / error,
+            # so the next scheduler tick or manual click can spawn a
+            # fresh one without colliding with a stale entry.
+            self._active_engines.pop(profile.id, None)
 
     def _scheduled_precheck_prompt(
         self,
         failures: list[tuple[str, str, bool, str]],
         profile: BackupProfile,
+        engine: BackupEngine,
     ) -> str:
         """Show target alert from scheduler thread, wait for user response.
 
@@ -2905,7 +2973,7 @@ class BackupManagerApp:
 
             # User clicked retry — hide alert and re-check
             self.root.after(0, self._hide_target_alert)
-            results = self.engine.precheck_targets(profile)
+            results = engine.precheck_targets(profile)
             new_failures = [r for r in results if not r[2]]
 
             if not new_failures:

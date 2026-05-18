@@ -246,6 +246,15 @@ def _setup_logging():
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
+    # Tag every record with the active profile name when one is set
+    # in the per-thread context. Two parallel runs (scheduler +
+    # manual on a different profile) used to interleave their
+    # messages into ``backup_manager.log`` without any way to tell
+    # whose line was whose. ``[<profile_name>]`` in front of each
+    # message lets ``grep '\[TestLoic\]'`` split the streams.
+    from src.core.log_context import ProfilePrefixFilter
+
+    handler.addFilter(ProfilePrefixFilter())
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)

@@ -336,6 +336,17 @@ class BackupEngine:
         original_events = self._events
         tagged_events = ProfileTaggingEventBus(original_events, profile.id)
         self._events = tagged_events
+        # Tag every Python log record produced from this thread with
+        # ``[<profile_name>]`` so the rotating file can be split per
+        # run when two profiles back up in parallel (cf.
+        # ``src.core.log_context.ProfilePrefixFilter``). Cleared in the
+        # finally block.
+        from src.core.log_context import (
+            clear_profile_context,
+            set_profile_context,
+        )
+
+        set_profile_context(profile.name)
         ctx = PipelineContext(
             profile=profile,
             config_manager=self._config,
@@ -422,6 +433,11 @@ class BackupEngine:
             # different profile gets its own tagging scope (the
             # next ``run_backup`` rewraps it).
             self._events = original_events
+            # Drop the per-thread profile tag so app-level log lines
+            # (scheduler housekeeping, tray, etc.) that run on this
+            # thread after the pipeline returns are not still
+            # prefixed with the just-completed profile name.
+            clear_profile_context()
 
     def _best_effort_cleanup(self, ctx: PipelineContext) -> None:
         """Remove the partial backup that was just created, if possible.

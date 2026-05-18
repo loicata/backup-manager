@@ -221,6 +221,61 @@ class TestTerminalStatusRestoredAfterSwitch:
         assert run_tab.status_label.cget("text") == "Waiting..."
 
 
+class TestQueuedEventsDoNotCrossProfileSwitch:
+    """PROGRESS / STATUS / LOG handlers queue their widget update via
+    ``after(0)``. The worker-thread filter rejects events for other
+    profiles, but a queued callback for profile A can still drain
+    AFTER the user has switched to profile B — landing the stale
+    update on the wrong view. Each main-thread handler re-checks
+    ``profile_id`` so the late arrival is dropped silently.
+
+    Without this guard, a TestLoic-mid-hashing PROGRESS event would
+    set the My Backup progress bar to ``hashing: ...entities.pyi``
+    8 % the instant the user clicked My Backup in the sidebar."""
+
+    def test_progress_for_old_profile_drops_after_switch(self, run_tab) -> None:
+        run_tab.set_current_profile_id("A")
+        run_tab._backup_active = True
+        run_tab._on_progress(
+            current=50, total=100, filename="A-file.py", phase="hashing", profile_id="A"
+        )
+        run_tab.set_current_profile_id("B")
+        run_tab.update_idletasks()
+        run_tab.update()
+
+        assert run_tab.progress_bar["value"] == 0
+        assert run_tab.percent_label.cget("text") == "0%"
+
+    def test_status_for_old_profile_drops_after_switch(self, run_tab) -> None:
+        run_tab.set_current_profile_id("A")
+        run_tab._on_status(state="success", profile_id="A")
+        run_tab.set_current_profile_id("B")
+        run_tab.update_idletasks()
+        run_tab.update()
+
+        # Status label must stay at the new-profile baseline, not flip
+        # to "Backup complete!" because of the stale A event.
+        assert run_tab.status_label.cget("text") == "Waiting..."
+
+    def test_log_for_old_profile_drops_after_switch(self, run_tab) -> None:
+        run_tab.set_current_profile_id("A")
+        run_tab._backup_active = True
+        run_tab._on_log(
+            message="A-side row", level="info", phase="manifest", profile_id="A"
+        )
+        run_tab.set_current_profile_id("B")
+        run_tab.update_idletasks()
+        run_tab.update()
+
+        # B's log_tree must be empty — the A-side row is queued but
+        # the main-thread guard drops it on the floor.
+        texts = [
+            run_tab.log_tree.item(child, "text")
+            for child in run_tab.log_tree.get_children("")
+        ]
+        assert "A-side row" not in texts
+
+
 class TestPersistedEntryShape:
     def test_persisted_entry_carries_message_level_phase(
         self, run_tab, store

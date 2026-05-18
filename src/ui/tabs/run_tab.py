@@ -792,14 +792,27 @@ class RunTab(ttk.Frame):
         verify launched from there would otherwise push the bar back
         to a "verifying..." view even when the user is just looking
         at this tab between runs.
+
+        The worker-thread filter is racy on its own: between the time
+        ``after(0)`` queues the callback and Tk pops it, the user can
+        switch sidebar profiles. A stale PROGRESS from the previous
+        profile then lands on the new profile's bar. We forward
+        ``profile_id`` to ``_update_progress`` so it can re-check the
+        owning profile under the main-thread invariant.
         """
         if not self._event_belongs_to_current_profile(profile_id):
             return
         if not self._backup_active:
             return
-        self.after(0, self._update_progress, current, total, filename, phase)
+        self.after(0, self._update_progress, current, total, filename, phase, profile_id)
 
-    def _update_progress(self, current, total, filename, phase):
+    def _update_progress(self, current, total, filename, phase, profile_id=""):
+        # Main-thread re-check: between the worker-thread filter and
+        # this drain, the sidebar selection may have changed. Drop the
+        # event silently so it cannot overwrite the new profile's
+        # restored state.
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
         # Indeterminate scan heartbeat (collector walking the source
         # tree): ``total == 0`` signals "no total yet, just keep the
         # UI alive". Update the status label only — the determinate
@@ -945,7 +958,34 @@ class RunTab(ttk.Frame):
                 if inferred:
                     self._current_phase = inferred
                 phase = self._current_phase
-        self.after(0, self._append_log, message, level, phase, details)
+        self.after(
+            0,
+            self._dispatch_log_event,
+            message,
+            level,
+            phase,
+            details,
+            profile_id,
+        )
+
+    def _dispatch_log_event(
+        self,
+        message,
+        level,
+        phase,
+        details,
+        profile_id,
+    ) -> None:
+        """Main-thread guard: drop late events from another profile.
+
+        ``_append_log`` is also used by ``_reload_log_history`` (which
+        only ever feeds entries from the currently-selected profile),
+        so the cross-profile check lives here in the deferred path
+        rather than inside ``_append_log`` itself.
+        """
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
+        self._append_log(message, level, phase, details)
 
     def _append_log(self, message, level="info", phase="", details=None):
         """Insert a log entry into the Treeview.
@@ -1127,12 +1167,21 @@ class RunTab(ttk.Frame):
                 self.log_tree.see(children[-1])
 
     def _on_status(self, state="", profile_id="", **kw):
-        """Schedule status update on the main thread."""
+        """Schedule status update on the main thread.
+
+        Re-checks ``profile_id`` inside the deferred callback so a
+        STATUS that crossed the switch fence cannot flip the bar /
+        label of the new profile to a state owned by the previous
+        one (e.g. ``success`` for TestLoic landing on My Backup
+        after the user switched the sidebar mid-run).
+        """
         if not self._event_belongs_to_current_profile(profile_id):
             return
-        self.after(0, self._update_status, state)
+        self.after(0, self._update_status, state, profile_id)
 
-    def _update_status(self, state):
+    def _update_status(self, state, profile_id=""):
+        if not self._event_belongs_to_current_profile(profile_id):
+            return
         # Track whether a backup is currently active here so PROGRESS
         # events from other tabs (e.g. Verify) are filtered out.
         if state == "running":

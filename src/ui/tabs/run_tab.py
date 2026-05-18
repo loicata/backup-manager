@@ -115,6 +115,15 @@ class RunTab(ttk.Frame):
         # and ``set_current_profile_id`` re-renders the log_tree from
         # the new profile's file on every sidebar switch.
         self._history_store = history_store
+        # Fast-mode verify prompts inserted as clickable rows inside
+        # the log tree (since this iteration the cards live inline,
+        # not in a separate alerts area). Keyed by the parent row's
+        # item id. Each value tracks the action child ids + the
+        # callbacks bound when the prompt was created. Not persisted
+        # because callbacks die with the running session — switching
+        # profiles drops in-flight prompts (rare; the periodic verify
+        # cron still fires later if armed).
+        self._verify_prompts: dict[str, dict] = {}
         self._build_ui()
         self._subscribe_events()
 
@@ -228,6 +237,21 @@ class RunTab(ttk.Frame):
         self.log_tree.tag_configure("warning", background="#fff8e0")
         self.log_tree.tag_configure("error", background="#fde8e8")
         self.log_tree.tag_configure("muted", foreground="#666666")
+        # Inline Fast-mode verify prompt rows. Parent reuses the
+        # success palette so it visually flags the run completion;
+        # action rows render in the accent color so the user reads
+        # them as clickable. The toggle row keeps the default
+        # foreground because it is a checkbox-style line, not a
+        # primary action.
+        self.log_tree.tag_configure(
+            "verify_parent",
+            foreground=Colors.SUCCESS,
+        )
+        self.log_tree.tag_configure(
+            "verify_action",
+            foreground=Colors.ACCENT,
+        )
+        self.log_tree.tag_configure("verify_toggle")
 
         # Lazy-load state for the Skipped subtree. The full payload
         # (which can run into hundreds of thousands of paths on a
@@ -236,6 +260,11 @@ class RunTab(ttk.Frame):
         # IDs, values describe what to materialize on demand.
         self._lazy_subtrees: dict[str, dict] = {}
         self.log_tree.bind("<<TreeviewOpen>>", self._on_tree_open)
+        # ``add="+"`` so the binding coexists with the default
+        # Treeview selection handlers — without it Tk drops the
+        # built-in row selection visual that helps users see which
+        # action they are about to fire.
+        self.log_tree.bind("<Button-1>", self._on_log_tree_click, add="+")
 
         # Buttons
         btn_frame = ttk.Frame(self)
@@ -661,6 +690,12 @@ class RunTab(ttk.Frame):
         with contextlib.suppress(tk.TclError):
             self.log_tree.delete(*self.log_tree.get_children(""))
         self._lazy_subtrees.clear()
+        # Inline verify prompts live as Treeview rows; deleting all
+        # children drops them too, so the callback registry must be
+        # cleared as well — otherwise a click on a future row that
+        # happens to share an item id would dispatch to a stale
+        # callback.
+        self._verify_prompts.clear()
         # Reset the current phase tracker so the first row of the
         # next backup ("Backup type: full" etc.) does not inherit
         # the previous run's last phase.
@@ -1178,104 +1213,151 @@ class RunTab(ttk.Frame):
         on_verify_now,
         on_dismiss,
         on_dont_ask_again,
-    ) -> ttk.Frame:
-        """Append an inline "Verify now?" prompt to the alerts area.
+    ) -> str:
+        """Insert an inline Fast-mode verify prompt into the log tree.
 
-        Replaces the v3.7.9 modal Toplevel (``grab_set`` + ``transient``)
-        which blocked the user and stacked when several Fast-mode
-        backups completed in sequence. The alerts area accepts N
-        prompts side-by-side (well, stacked vertically) and the user
-        can act on them in any order — including ignoring some — while
-        further backups keep running.
+        Four rows are appended:
+
+        * parent — ``✓ Backup '<name>' complete — verification skipped``
+        * info — periodic verify status / "no periodic" warning
+        * ``▶ Verify now`` — click fires ``on_verify_now`` and removes
+          the four rows
+        * ``✕ Dismiss`` — click fires ``on_dismiss`` and removes them
+        * ``☐ Don't ask again for this profile`` — click toggles the
+          checkbox glyph and forwards the new state to ``on_dont_ask_again``
+
+        The action rows survive scrolling (they are real Treeview rows,
+        not overlay widgets) and are removed atomically with their
+        parent when an action is taken. Switching profile clears them
+        — there is no persistence because the callbacks are tied to
+        the running app session.
 
         Args:
             profile_name: Display name of the profile that just finished.
             periodic_armed: Whether periodic verify is scheduled.
-                Drives the secondary line copy + colour.
+                Drives the info line copy + colour.
             interval_days: Days until the next periodic verify.
                 Ignored when ``periodic_armed`` is False.
-            on_verify_now: Callback fired when the user clicks
-                "Verify now". The card is dismissed first, then this
-                runs. Receives no arguments.
-            on_dismiss: Callback fired when the user clicks "Dismiss".
-                Same lifecycle as ``on_verify_now``.
-            on_dont_ask_again: Callback fired when the user ticks the
-                "Don't ask again for this profile" checkbox. Receives
-                a single bool argument (the new checkbox state). May
-                fire multiple times if the user toggles it before
-                hitting an action button.
+            on_verify_now: Callback fired on ``Verify now``. The four
+                rows are removed first, then this runs. No arguments.
+            on_dismiss: Callback fired on ``Dismiss``. Same lifecycle.
+            on_dont_ask_again: Callback fired on every toggle of the
+                checkbox row. Receives the new bool state.
 
         Returns:
-            The card Frame, primarily for tests that want to assert
-            on the widget tree without simulating button clicks.
+            The parent row's item id (useful for tests).
         """
-        card = ttk.Frame(self.alerts_frame, relief="solid", borderwidth=1)
-        card.pack(fill="x", pady=(0, Spacing.SMALL))
-
-        body = ttk.Frame(card, padding=Spacing.PAD)
-        body.pack(fill="x")
-
-        title = ttk.Label(
-            body,
-            text=f"✓ Backup '{profile_name}' complete — verification skipped (Fast mode)",
-            foreground=Colors.SUCCESS,
-            font=Fonts.bold(),
+        parent_text = (
+            f"✓ Backup '{profile_name}' complete — verification skipped (Fast mode)"
         )
-        title.pack(anchor="w")
+        parent_id = self.log_tree.insert(
+            "",
+            "end",
+            text=parent_text,
+            values=("",),
+            tags=("verify_parent",),
+            open=True,
+        )
 
         if periodic_armed:
             day_word = "day" if interval_days == 1 else "days"
-            secondary_text = f"Next periodic verification in {interval_days} {day_word}."
-            secondary_colour = Colors.TEXT_SECONDARY
+            info_text = f"Next periodic verification in {interval_days} {day_word}."
+            info_tag: tuple[str, ...] = ("muted",)
         else:
-            secondary_text = "No periodic verification is scheduled for this profile."
-            secondary_colour = Colors.DANGER
-
-        ttk.Label(body, text=secondary_text, foreground=secondary_colour).pack(
-            anchor="w", pady=(Spacing.SMALL, Spacing.SMALL)
+            info_text = "No periodic verification is scheduled for this profile."
+            info_tag = ("warning",)
+        self.log_tree.insert(
+            parent_id, "end", text=info_text, values=("",), tags=info_tag
         )
 
-        dont_ask_var = tk.BooleanVar(value=False)
-
-        def _on_toggle_dont_ask(*_args) -> None:
-            on_dont_ask_again(dont_ask_var.get())
-
-        dont_ask_var.trace_add("write", _on_toggle_dont_ask)
-        ttk.Checkbutton(
-            body,
-            text="Don't ask again for this profile",
-            variable=dont_ask_var,
-        ).pack(anchor="w")
-
-        btn_row = ttk.Frame(body)
-        btn_row.pack(fill="x", pady=(Spacing.SMALL, 0))
-
-        def _destroy_card() -> None:
-            with contextlib.suppress(tk.TclError):
-                card.destroy()
-
-        def _verify_now() -> None:
-            _destroy_card()
-            on_verify_now()
-
-        def _dismiss() -> None:
-            _destroy_card()
-            on_dismiss()
-
-        ttk.Button(btn_row, text="Dismiss", command=_dismiss).pack(
-            side="right", padx=(Spacing.SMALL, 0)
+        verify_item = self.log_tree.insert(
+            parent_id,
+            "end",
+            text="▶  Verify now",
+            values=("",),
+            tags=("verify_action",),
         )
-        ttk.Button(btn_row, text="Verify now", command=_verify_now).pack(side="right")
+        dismiss_item = self.log_tree.insert(
+            parent_id,
+            "end",
+            text="✕  Dismiss",
+            values=("",),
+            tags=("verify_action",),
+        )
+        dont_ask_item = self.log_tree.insert(
+            parent_id,
+            "end",
+            text="☐  Don't ask again for this profile",
+            values=("",),
+            tags=("verify_toggle",),
+        )
 
-        return card
+        self._verify_prompts[parent_id] = {
+            "verify_item": verify_item,
+            "dismiss_item": dismiss_item,
+            "dont_ask_item": dont_ask_item,
+            "dont_ask_state": False,
+            "on_verify": on_verify_now,
+            "on_dismiss": on_dismiss,
+            "on_dont_ask": on_dont_ask_again,
+        }
+        self._scroll_to_end()
+        return parent_id
+
+    def _on_log_tree_click(self, event) -> None:
+        """Dispatch clicks on actionable verify-prompt rows.
+
+        Identifies the row under the cursor and matches it against
+        every registered prompt's action items. Returns silently for
+        non-prompt rows so the default Treeview selection behaviour
+        is preserved everywhere else.
+        """
+        item = self.log_tree.identify_row(event.y)
+        if not item:
+            return
+        for parent_id, spec in list(self._verify_prompts.items()):
+            if item == spec["verify_item"]:
+                self._destroy_verify_prompt(parent_id)
+                spec["on_verify"]()
+                return
+            if item == spec["dismiss_item"]:
+                self._destroy_verify_prompt(parent_id)
+                spec["on_dismiss"]()
+                return
+            if item == spec["dont_ask_item"]:
+                self._toggle_dont_ask(parent_id, spec)
+                return
+
+    def _toggle_dont_ask(self, parent_id: str, spec: dict) -> None:
+        """Flip the ``Don't ask again`` glyph and notify the callback."""
+        new_state = not spec["dont_ask_state"]
+        spec["dont_ask_state"] = new_state
+        glyph = "☑" if new_state else "☐"
+        with contextlib.suppress(tk.TclError):
+            self.log_tree.item(
+                spec["dont_ask_item"],
+                text=f"{glyph}  Don't ask again for this profile",
+            )
+        spec["on_dont_ask"](new_state)
+        # ``parent_id`` is unused here but kept in the signature so the
+        # call site reads as a coherent "toggle this prompt's row".
+        del parent_id
+
+    def _destroy_verify_prompt(self, parent_id: str) -> None:
+        """Remove the four rows of a verify prompt and forget callbacks."""
+        with contextlib.suppress(tk.TclError):
+            self.log_tree.delete(parent_id)
+        self._verify_prompts.pop(parent_id, None)
 
     def clear_alerts(self) -> None:
-        """Destroy every card currently in the alerts area.
+        """Remove every pending verify prompt and clear the alerts frame.
 
-        Called on profile switch (``clear_log``) so a pending prompt
-        from profile A does not accidentally trigger a verify against
-        profile B after the user clicks "Verify now".
+        Inline verify prompts (since this iteration) live as rows of
+        the log tree; the legacy ``alerts_frame`` is still emptied for
+        any external code path that might still parent widgets there.
         """
+        for parent_id in list(self._verify_prompts):
+            self._destroy_verify_prompt(parent_id)
         with contextlib.suppress(tk.TclError):
             for child in list(self.alerts_frame.winfo_children()):
                 child.destroy()

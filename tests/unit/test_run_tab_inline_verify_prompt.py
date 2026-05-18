@@ -1,10 +1,22 @@
-"""Tests for the v3.7.10 inline Fast-mode verify prompt.
+"""Tests for the inline Fast-mode verify prompt rows.
 
-Replaces the v3.7.9 modal Toplevel that broke when the scheduler
-chained multiple Fast-mode profile backups (``grab_set`` stole focus
-and the second prompt stacked on top of the first). The new design
-appends cards to a ``ttk.Frame`` alerts area in the Run tab — N
-cards coexist freely, no modality.
+Originally (v3.7.10) the prompt rendered as a card stacked in a
+separate ``alerts_frame`` above the log_tree. The user found the
+dedicated zone too prominent and asked for the prompt to live inside
+the Message panel itself.
+
+This iteration replaces the card with four log_tree rows:
+
+* parent (success-coloured) — the completion announcement
+* info — periodic verify status
+* ``▶  Verify now`` — clickable action
+* ``✕  Dismiss`` — clickable action
+* ``☐  Don't ask again for this profile`` — clickable toggle
+
+A ``<Button-1>`` handler on the log_tree dispatches to the right
+callback based on which child row sits under the cursor. Rows
+survive scrolling naturally (real Treeview rows, not overlay
+widgets) and are deleted atomically when an action fires.
 """
 
 from __future__ import annotations
@@ -19,187 +31,161 @@ from src.ui.tabs.run_tab import RunTab
 
 @pytest.fixture()
 def run_tab(tk_root):
-    """Fresh RunTab. Shared session-scope tk_root from conftest.py."""
     tab = RunTab(tk_root)
     yield tab
     tab.destroy()
 
 
-class TestAlertsFrameStartsEmpty:
-    """The alerts area is in the widget tree but has zero cards by default."""
-
-    def test_alerts_frame_exists_and_is_empty(self, run_tab) -> None:
-        assert isinstance(run_tab.alerts_frame, tk.Widget)
-        assert run_tab.alerts_frame.winfo_children() == []
-
-
-class TestShowVerifyPromptCard:
-    """``show_verify_prompt`` appends a card without modality."""
-
-    def test_card_is_appended_to_alerts_frame(self, run_tab) -> None:
-        card = run_tab.show_verify_prompt(
-            profile_name="TestLoic",
-            periodic_armed=True,
-            interval_days=7,
-            on_verify_now=MagicMock(),
-            on_dismiss=MagicMock(),
-            on_dont_ask_again=MagicMock(),
-        )
-        assert card in run_tab.alerts_frame.winfo_children()
-
-    def test_multiple_cards_coexist(self, run_tab) -> None:
-        """Two consecutive Fast-mode backups produce two stacked cards.
-
-        This is the user-reported regression v3.7.9 → v3.7.10: a
-        scheduled cycle of N profiles in Fast mode used to stack N
-        modal Toplevels; now N cards sit side by side in the alerts
-        area and the user picks any of them.
-        """
-        for name in ("Profile A", "Profile B", "Profile C"):
-            run_tab.show_verify_prompt(
-                profile_name=name,
-                periodic_armed=False,
-                interval_days=7,
-                on_verify_now=MagicMock(),
-                on_dismiss=MagicMock(),
-                on_dont_ask_again=MagicMock(),
-            )
-        assert len(run_tab.alerts_frame.winfo_children()) == 3
-
-    def test_returned_card_is_a_top_level_child(self, run_tab) -> None:
-        """The card is parented to alerts_frame, not to root — so
-        destroying the run_tab also disposes of pending prompts."""
-        card = run_tab.show_verify_prompt(
-            profile_name="X",
-            periodic_armed=True,
-            interval_days=1,
-            on_verify_now=MagicMock(),
-            on_dismiss=MagicMock(),
-            on_dont_ask_again=MagicMock(),
-        )
-        assert card.master is run_tab.alerts_frame
+def _make_prompt(run_tab: RunTab, **overrides) -> str:
+    defaults = dict(
+        profile_name="TestLoic",
+        periodic_armed=True,
+        interval_days=7,
+        on_verify_now=MagicMock(),
+        on_dismiss=MagicMock(),
+        on_dont_ask_again=MagicMock(),
+    )
+    defaults.update(overrides)
+    return run_tab.show_verify_prompt(**defaults)
 
 
-class TestVerifyPromptButtons:
-    """The two action buttons must fire their callback AND destroy the card."""
+def _fire_click_on_item(run_tab: RunTab, item_id: str) -> None:
+    """Simulate a left-click landing on a specific Treeview row.
 
-    def _find_buttons(self, card) -> dict:
-        """Walk the card's widget tree, return {button_text: widget}."""
-        found: dict[str, tk.Widget] = {}
-
-        def _walk(widget):
-            from tkinter import ttk
-
-            if isinstance(widget, ttk.Button):
-                found[str(widget.cget("text"))] = widget
-            for child in widget.winfo_children():
-                _walk(child)
-
-        _walk(card)
-        return found
-
-    def test_verify_now_invokes_callback_then_destroys_card(self, run_tab) -> None:
-        on_verify = MagicMock()
-        card = run_tab.show_verify_prompt(
-            profile_name="X",
-            periodic_armed=True,
-            interval_days=1,
-            on_verify_now=on_verify,
-            on_dismiss=MagicMock(),
-            on_dont_ask_again=MagicMock(),
-        )
-        buttons = self._find_buttons(card)
-        buttons["Verify now"].invoke()
-        on_verify.assert_called_once()
-        assert card not in run_tab.alerts_frame.winfo_children()
-
-    def test_dismiss_invokes_callback_then_destroys_card(self, run_tab) -> None:
-        on_dismiss = MagicMock()
-        card = run_tab.show_verify_prompt(
-            profile_name="X",
-            periodic_armed=False,
-            interval_days=7,
-            on_verify_now=MagicMock(),
-            on_dismiss=on_dismiss,
-            on_dont_ask_again=MagicMock(),
-        )
-        buttons = self._find_buttons(card)
-        buttons["Dismiss"].invoke()
-        on_dismiss.assert_called_once()
-        assert card not in run_tab.alerts_frame.winfo_children()
-
-
-class TestDontAskAgainCheckbox:
-    """The ``Don't ask again`` checkbox fires the callback on toggle.
-
-    Eager commit (rather than commit-on-action) protects the user
-    choice if they tick the box and then leave the card unanswered
-    — e.g. close the app with a pending card visible.
+    The handler reads ``event.y`` to call ``identify_row``; we cannot
+    fake the y-coordinate reliably across Tk versions on Windows, so
+    we patch ``identify_row`` for the duration of the call to return
+    the target item id deterministically.
     """
+    original = run_tab.log_tree.identify_row
+    run_tab.log_tree.identify_row = lambda _y: item_id  # type: ignore[assignment]
+    try:
+        event = tk.Event()
+        event.y = 0
+        run_tab._on_log_tree_click(event)
+    finally:
+        run_tab.log_tree.identify_row = original  # type: ignore[assignment]
 
-    def test_toggle_fires_callback_with_new_state(self, run_tab) -> None:
+
+class TestPromptInsertsIntoLogTree:
+    def test_prompt_creates_parent_plus_action_children(self, run_tab) -> None:
+        parent_id = _make_prompt(run_tab)
+        children = run_tab.log_tree.get_children(parent_id)
+        # info + verify + dismiss + dont-ask = 4 children
+        assert len(children) == 4
+        texts = [run_tab.log_tree.item(c, "text") for c in children]
+        assert any("Verify now" in t for t in texts)
+        assert any("Dismiss" in t for t in texts)
+        assert any("Don't ask again" in t for t in texts)
+
+    def test_parent_text_mentions_profile_and_fast_mode(self, run_tab) -> None:
+        parent_id = _make_prompt(run_tab, profile_name="MyBackup")
+        text = run_tab.log_tree.item(parent_id, "text")
+        assert "MyBackup" in text
+        assert "Fast mode" in text
+
+    def test_periodic_armed_info_shows_interval(self, run_tab) -> None:
+        parent_id = _make_prompt(run_tab, periodic_armed=True, interval_days=14)
+        info_id = run_tab.log_tree.get_children(parent_id)[0]
+        info_text = run_tab.log_tree.item(info_id, "text")
+        assert "14 days" in info_text
+
+    def test_periodic_disarmed_info_warns(self, run_tab) -> None:
+        parent_id = _make_prompt(run_tab, periodic_armed=False)
+        info_id = run_tab.log_tree.get_children(parent_id)[0]
+        info_text = run_tab.log_tree.item(info_id, "text")
+        assert "No periodic" in info_text
+
+    def test_returned_id_is_a_top_level_item(self, run_tab) -> None:
+        parent_id = _make_prompt(run_tab)
+        assert parent_id in run_tab.log_tree.get_children("")
+
+    def test_multiple_prompts_coexist_as_siblings(self, run_tab) -> None:
+        ids = [_make_prompt(run_tab, profile_name=f"P{i}") for i in range(3)]
+        top_level = run_tab.log_tree.get_children("")
+        for pid in ids:
+            assert pid in top_level
+
+
+class TestActionClicks:
+    def test_verify_now_click_fires_callback_and_removes_rows(
+        self, run_tab
+    ) -> None:
+        on_verify = MagicMock()
+        parent_id = _make_prompt(run_tab, on_verify_now=on_verify)
+        verify_item = run_tab._verify_prompts[parent_id]["verify_item"]
+
+        _fire_click_on_item(run_tab, verify_item)
+
+        on_verify.assert_called_once()
+        assert parent_id not in run_tab.log_tree.get_children("")
+        assert parent_id not in run_tab._verify_prompts
+
+    def test_dismiss_click_fires_callback_and_removes_rows(self, run_tab) -> None:
+        on_dismiss = MagicMock()
+        parent_id = _make_prompt(run_tab, on_dismiss=on_dismiss)
+        dismiss_item = run_tab._verify_prompts[parent_id]["dismiss_item"]
+
+        _fire_click_on_item(run_tab, dismiss_item)
+
+        on_dismiss.assert_called_once()
+        assert parent_id not in run_tab.log_tree.get_children("")
+
+    def test_dont_ask_toggle_flips_glyph_and_notifies(self, run_tab) -> None:
         on_toggle = MagicMock()
-        card = run_tab.show_verify_prompt(
-            profile_name="X",
-            periodic_armed=True,
-            interval_days=1,
-            on_verify_now=MagicMock(),
-            on_dismiss=MagicMock(),
-            on_dont_ask_again=on_toggle,
-        )
-        # Find the BooleanVar via the Checkbutton's variable option.
-        from tkinter import ttk
+        parent_id = _make_prompt(run_tab, on_dont_ask_again=on_toggle)
+        dont_ask_item = run_tab._verify_prompts[parent_id]["dont_ask_item"]
 
-        checkbutton = None
-        for widget in card.winfo_children():
-            for sub in widget.winfo_children():
-                if isinstance(sub, ttk.Checkbutton):
-                    checkbutton = sub
-                    break
-            if checkbutton:
-                break
-        assert checkbutton is not None
-        # Pull the variable name then resolve it to a BooleanVar instance.
-        var_name = checkbutton.cget("variable")
-        var = tk.BooleanVar(name=var_name)
-
-        var.set(True)
+        # First click ticks the box.
+        _fire_click_on_item(run_tab, dont_ask_item)
+        assert run_tab._verify_prompts[parent_id]["dont_ask_state"] is True
+        assert "☑" in run_tab.log_tree.item(dont_ask_item, "text")
         on_toggle.assert_called_with(True)
-        var.set(False)
+
+        # Second click unticks it.
+        _fire_click_on_item(run_tab, dont_ask_item)
+        assert run_tab._verify_prompts[parent_id]["dont_ask_state"] is False
+        assert "☐" in run_tab.log_tree.item(dont_ask_item, "text")
         on_toggle.assert_called_with(False)
+
+    def test_toggle_does_not_remove_prompt_rows(self, run_tab) -> None:
+        parent_id = _make_prompt(run_tab)
+        dont_ask_item = run_tab._verify_prompts[parent_id]["dont_ask_item"]
+
+        _fire_click_on_item(run_tab, dont_ask_item)
+
+        assert parent_id in run_tab.log_tree.get_children("")
+
+    def test_click_on_unrelated_row_is_a_noop(self, run_tab) -> None:
+        on_verify = MagicMock()
+        _make_prompt(run_tab, on_verify_now=on_verify)
+        # Insert a regular log row and click it.
+        unrelated = run_tab.log_tree.insert(
+            "", "end", text="Backup type: full", values=("",)
+        )
+
+        _fire_click_on_item(run_tab, unrelated)
+
+        on_verify.assert_not_called()
 
 
 class TestClearAlerts:
-    """``clear_alerts`` removes every pending card.
+    def test_clear_alerts_removes_every_prompt_row(self, run_tab) -> None:
+        for i in range(3):
+            _make_prompt(run_tab, profile_name=f"P{i}")
+        assert len(run_tab._verify_prompts) == 3
 
-    Called by ``clear_log`` on profile switch so a pending prompt
-    tied to profile A is not still hanging around when the user is
-    looking at profile B.
-    """
-
-    def test_clear_alerts_removes_all_cards(self, run_tab) -> None:
-        for _ in range(3):
-            run_tab.show_verify_prompt(
-                profile_name="X",
-                periodic_armed=True,
-                interval_days=1,
-                on_verify_now=MagicMock(),
-                on_dismiss=MagicMock(),
-                on_dont_ask_again=MagicMock(),
-            )
-        assert len(run_tab.alerts_frame.winfo_children()) == 3
         run_tab.clear_alerts()
-        assert run_tab.alerts_frame.winfo_children() == []
 
-    def test_clear_log_also_clears_alerts(self, run_tab) -> None:
-        run_tab.show_verify_prompt(
-            profile_name="X",
-            periodic_armed=True,
-            interval_days=1,
-            on_verify_now=MagicMock(),
-            on_dismiss=MagicMock(),
-            on_dont_ask_again=MagicMock(),
-        )
-        assert len(run_tab.alerts_frame.winfo_children()) == 1
+        assert run_tab._verify_prompts == {}
+        # All four-row prompts must be gone from the log tree.
+        assert run_tab.log_tree.get_children("") == ()
+
+    def test_clear_log_also_clears_prompts(self, run_tab) -> None:
+        _make_prompt(run_tab)
+        assert run_tab._verify_prompts
+
         run_tab.clear_log()
-        assert run_tab.alerts_frame.winfo_children() == []
+
+        assert run_tab._verify_prompts == {}
+        assert run_tab.log_tree.get_children("") == ()

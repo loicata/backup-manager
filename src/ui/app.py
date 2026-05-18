@@ -1293,11 +1293,19 @@ class BackupManagerApp:
         self._health_poll_generation = getattr(self, "_health_poll_generation", 0) + 1
 
         if destinations:
-            check_destinations_async(
-                profile.storage,
-                profile.mirror_destinations,
-                callback=self._on_health_result,
-            )
+            # Skip the immediate probe when a backup is in flight —
+            # the writer is occupying the drive and a concurrent
+            # ``test_connection`` would PermissionError, surfacing as
+            # "Destination is read-only or locked" the moment the user
+            # opens this profile. The polling task is still scheduled
+            # because it has its own skip-if-running guard and will
+            # refresh the card the first tick after the run clears.
+            if not getattr(self, "_backup_running", False):
+                check_destinations_async(
+                    profile.storage,
+                    profile.mirror_destinations,
+                    callback=self._on_health_result,
+                )
             # Schedule continuous polling every 30s
             self.root.after(
                 HEALTH_POLL_INTERVAL_MS,

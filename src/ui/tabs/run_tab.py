@@ -60,7 +60,17 @@ def _infer_phase(announcement: str) -> str:
 # mid-pipeline) is not the *current* phase — nothing is running. We
 # match these messages explicitly so the Phase column on the final
 # row stays blank, signalling "done" without dragging a stale tag.
-_TERMINAL_LOG_PATTERN: re.Pattern[str] = re.compile(r"^Backup (complete|failed|cancelled)", re.I)
+#
+# ``rejected`` covers the early-bail case from
+# ``backup_engine.run_backup`` when the profile lock is already held
+# by a concurrent run. It is emitted BEFORE ``_emit_status("running")``,
+# i.e. while ``_backup_active`` is still False, and the legacy three-
+# word pattern (``complete|failed|cancelled``) used to drop it from
+# the log tree — leaving the user with a "Backup failed!" pill and
+# no message explaining why.
+_TERMINAL_LOG_PATTERN: re.Pattern[str] = re.compile(
+    r"^Backup (complete|failed|cancelled|rejected)", re.I
+)
 
 
 def _is_terminal_log_message(message: str) -> bool:
@@ -763,6 +773,16 @@ class RunTab(ttk.Frame):
                 self.status_label.config(
                     text="Backup cancelled",
                     foreground=Colors.TEXT_SECONDARY,
+                )
+            elif last_msg.lower().startswith("backup rejected"):
+                # Concurrent-run rejection: the previous attempt did
+                # not write anything to storage; reuse the failed
+                # styling so the user sees "this did not work" at a
+                # glance without conflating it with a true pipeline
+                # crash.
+                self.status_label.config(
+                    text="Backup rejected",
+                    foreground=Colors.DANGER,
                 )
 
     def _clear_log_widget(self) -> None:

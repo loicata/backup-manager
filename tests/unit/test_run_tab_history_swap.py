@@ -210,6 +210,36 @@ class TestTerminalStatusRestoredAfterSwitch:
 
         assert run_tab.status_label.cget("text") == "Backup cancelled"
 
+    def test_switch_back_after_rejected_shows_rejected_pill(
+        self, run_tab
+    ) -> None:
+        # ``Backup rejected: ...`` is emitted by the engine BEFORE
+        # STATUS=running when the per-profile lock is already taken.
+        # ``_backup_active`` is still False at that point — the
+        # message must still survive the per-active-tab gate (it
+        # matches the terminal pattern) and the pill restore must
+        # treat it as a failure-style outcome.
+        run_tab.set_current_profile_id("A")
+        # Reproduce the real condition: backup not flagged active.
+        run_tab._backup_active = False
+        self._emit_terminal(
+            run_tab,
+            "A",
+            "Backup rejected: Another backup is already running for this profile.",
+        )
+
+        # Confirm the message rendered even though the gate was closed.
+        texts = [
+            run_tab.log_tree.item(c, "text")
+            for c in run_tab.log_tree.get_children("")
+        ]
+        assert any(t.startswith("Backup rejected") for t in texts)
+
+        # And the restore on swap-back applies the danger pill.
+        run_tab.set_current_profile_id("B")
+        run_tab.set_current_profile_id("A")
+        assert run_tab.status_label.cget("text") == "Backup rejected"
+
     def test_profile_with_no_terminal_event_keeps_waiting_baseline(
         self, run_tab
     ) -> None:

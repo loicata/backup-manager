@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 
 import pytest
 
@@ -160,6 +162,84 @@ def test_isolation_between_profiles(store):
 
     assert store.load("alpha") == [{"msg": "A1"}, {"msg": "A2"}]
     assert store.load("beta") == [{"msg": "B1"}]
+
+
+class TestRewrite:
+    """``RunHistoryStore.rewrite`` replaces a profile's JSONL atomically.
+
+    Needed by the one-shot legacy-phase migration (pre-v3.7.16 entries
+    have ``phase=""`` on engine-level messages — see ``migrate_legacy_phase_tags``
+    in ``src/ui/tabs/run_tab.py``). Append-only ``append()`` cannot
+    update existing rows, hence this dedicated writer.
+    """
+
+    def test_rewrite_replaces_existing_entries(self, store, tmp_path):
+        store.append("p1", {"msg": "old1", "phase": ""})
+        store.append("p1", {"msg": "old2", "phase": ""})
+
+        store.rewrite(
+            "p1",
+            [
+                {"msg": "new1", "phase": "manifest"},
+                {"msg": "new2", "phase": "writer"},
+            ],
+        )
+
+        assert store.load("p1") == [
+            {"msg": "new1", "phase": "manifest"},
+            {"msg": "new2", "phase": "writer"},
+        ]
+
+    def test_rewrite_creates_file_when_missing(self, store):
+        # No prior append — file does not exist yet.
+        store.rewrite("fresh", [{"msg": "X", "phase": "rotator"}])
+        assert store.load("fresh") == [{"msg": "X", "phase": "rotator"}]
+
+    def test_rewrite_empty_profile_id_is_noop(self, store, tmp_path):
+        store.rewrite("", [{"msg": "lost"}])
+        # No file should appear in the run_history directory.
+        assert list((tmp_path / "run_history").iterdir()) == []
+
+    def test_rewrite_is_atomic_under_concurrent_readers(
+        self, store, tmp_path
+    ) -> None:
+        """A reader that opens the file mid-rewrite must see EITHER the
+        old content OR the new content, never a truncated mix.
+
+        Implemented via the standard ``.tmp`` + ``os.replace`` pattern.
+        """
+        # Seed with N entries so the file is large enough that a
+        # non-atomic rewrite would be observable.
+        store.append("p", {"msg": "seed", "phase": "manifest"})
+        # Build a large new payload so the rewrite spends some time
+        # in the write phase.
+        new_entries = [
+            {"msg": f"line-{i}", "phase": "writer", "ts": "2026-05-21"}
+            for i in range(500)
+        ]
+
+        readers_saw_torn = []
+
+        def reader():
+            for _ in range(50):
+                data = store.load("p")
+                # Each entry must be a complete dict — no partial
+                # decode results, no mixed old/new.
+                for e in data:
+                    if not isinstance(e, dict) or "msg" not in e:
+                        readers_saw_torn.append(e)
+                time.sleep(0.001)
+
+        rt = threading.Thread(target=reader)
+        rt.start()
+        for _ in range(10):
+            store.rewrite("p", new_entries)
+        rt.join()
+
+        assert readers_saw_torn == [], (
+            "Atomic rewrite must never expose a torn / partial JSONL "
+            f"to a concurrent reader; saw: {readers_saw_torn[:3]}"
+        )
 
 
 @pytest.fixture

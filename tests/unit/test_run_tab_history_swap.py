@@ -431,3 +431,161 @@ class TestPersistedEntryShape:
         run_tab.update_idletasks()
 
         assert store.load("p1") == []
+
+
+class TestPersistedPhaseInference:
+    """The persisted JSONL must carry the inferred Phase tag, not an
+    empty string.
+
+    Regression guard for the 21/05/2026 captured anomaly: after a
+    profile-switch (or app restart) the reloaded log_tree showed an
+    empty Phase column on every engine-level message — ``Saving
+    manifest…``, ``Writing commit marker…``, ``Updating manifest…``,
+    ``Rotating old backups…``, ``Building integrity manifest…``,
+    ``Copying to Storage…``, ``Backup complete: …``. Live runs filled
+    those tags via inference in ``_on_log``, but ``_persist_log`` ran
+    BEFORE the inference and wrote ``phase=""`` into the JSONL. On
+    reload, the column went blank because ``_reload_log_history`` does
+    not re-infer.
+
+    Two contracts these tests pin:
+
+    1. ``_persist_log`` infers the phase from the message text when
+       the event arrives without an explicit tag.
+    2. The per-profile phase tracker is isolated — a background
+       scheduler run on profile B cannot bleed its phase into
+       profile A's persisted history.
+    """
+
+    def test_persisted_phase_inferred_from_engine_message(
+        self, run_tab, store
+    ) -> None:
+        """``Saving manifest…`` → ``manifest`` in JSONL."""
+        run_tab.set_current_profile_id("p1")
+
+        run_tab._on_log(message="Saving manifest...", level="info", profile_id="p1")
+        run_tab._on_log(
+            message="Writing commit marker...", level="info", profile_id="p1"
+        )
+        run_tab._on_log(
+            message="Updating manifest...", level="info", profile_id="p1"
+        )
+        run_tab._on_log(
+            message="Rotating old backups...", level="info", profile_id="p1"
+        )
+        run_tab.update_idletasks()
+
+        entries = store.load("p1")
+        phases_by_msg = {e["msg"]: e["phase"] for e in entries}
+        assert phases_by_msg["Saving manifest..."] == "manifest"
+        assert phases_by_msg["Writing commit marker..."] == "commit_marker"
+        assert phases_by_msg["Updating manifest..."] == "manifest"
+        assert phases_by_msg["Rotating old backups..."] == "rotator"
+
+    def test_persisted_phase_inherits_previous_for_unmatched_message(
+        self, run_tab, store
+    ) -> None:
+        """Engine messages without a pattern match inherit the previous
+        phase per profile (so ``Backup written: …`` keeps the ``writer``
+        tag set by the preceding ``Copying to Storage…``).
+        """
+        run_tab.set_current_profile_id("p1")
+
+        # "Copying to Storage..." matches the writer pattern.
+        run_tab._on_log(
+            message="Copying to Storage — Connect USB drive D:/...",
+            level="info",
+            profile_id="p1",
+        )
+        # "Backup written: ..." does not match any pattern; it must
+        # inherit ``writer`` from the prior message.
+        run_tab._on_log(
+            message="Backup written: 42 files to D:\\backups\\X",
+            level="info",
+            profile_id="p1",
+        )
+        run_tab.update_idletasks()
+
+        entries = store.load("p1")
+        phases_by_msg = {e["msg"]: e["phase"] for e in entries}
+        assert phases_by_msg["Copying to Storage — Connect USB drive D:/..."] == "writer"
+        assert (
+            phases_by_msg["Backup written: 42 files to D:\\backups\\X"] == "writer"
+        ), "Phase must inherit from previous unmatched message"
+
+    def test_persisted_phase_resets_on_terminal_message(
+        self, run_tab, store
+    ) -> None:
+        """``Backup complete: …`` is terminal — its phase is empty and
+        a follow-up run starts fresh (no leak of the previous run's
+        ``rotator`` into the next run's first messages).
+        """
+        run_tab.set_current_profile_id("p1")
+
+        run_tab._on_log(
+            message="Rotating old backups...", level="info", profile_id="p1"
+        )
+        run_tab._on_log(
+            message="Backup complete: 7 files in 0.1 min",
+            level="info",
+            profile_id="p1",
+        )
+        # Simulate the start of the next run — an "empty" message
+        # (run-boundary marker emitted by the engine) followed by
+        # "Backup type: full" must NOT carry the previous run's
+        # ``rotator`` tag.
+        run_tab._on_log(message="", level="info", profile_id="p1")
+        run_tab._on_log(
+            message="Backup type: full", level="info", profile_id="p1"
+        )
+        run_tab.update_idletasks()
+
+        entries = store.load("p1")
+        # Find the entry that opens the new run.
+        boundary_idx = next(
+            i for i, e in enumerate(entries) if e["msg"] == ""
+        )
+        backup_type_entry = entries[boundary_idx + 1]
+        assert backup_type_entry["msg"] == "Backup type: full"
+        assert backup_type_entry["phase"] == "", (
+            f"Run-boundary must reset the persistent phase tracker; "
+            f"got phase={backup_type_entry['phase']!r}"
+        )
+
+    def test_persisted_phase_isolated_per_profile(
+        self, run_tab, store
+    ) -> None:
+        """Two profiles emitting concurrent events must keep their
+        phase trackers separate. A background run on profile B that
+        reaches ``rotator`` must not contaminate profile A's next
+        message persisted under A's id.
+        """
+        # The widget is bound to A; B's events flow through
+        # ``_on_log`` (persisted) but are filtered from the widget.
+        run_tab.set_current_profile_id("A")
+
+        # A: collector phase via the pattern matcher.
+        run_tab._on_log(
+            message="Collecting files...", level="info", profile_id="A"
+        )
+        # B: advances to rotator on a background run.
+        run_tab._on_log(
+            message="Rotating old backups...", level="info", profile_id="B"
+        )
+        # A: a message that would inherit the previous phase if the
+        # tracker were shared — but A's last phase was ``collector``.
+        run_tab._on_log(
+            message="Backup written: 1 files to D:\\", level="info", profile_id="A"
+        )
+        run_tab.update_idletasks()
+
+        a_entries = {e["msg"]: e["phase"] for e in store.load("A")}
+        b_entries = {e["msg"]: e["phase"] for e in store.load("B")}
+        a_written_phase = a_entries.get(
+            "Backup written: 1 files to D:\\", "<missing>"
+        )
+        assert a_written_phase == "collector", (
+            f"A's unmatched message must inherit A's phase, not B's; "
+            f"got {a_written_phase!r}"
+        )
+        assert b_entries["Rotating old backups..."] == "rotator"

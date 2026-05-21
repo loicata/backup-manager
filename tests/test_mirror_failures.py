@@ -358,3 +358,156 @@ class TestMirrorRotation:
         engine.run_backup(profile)
 
         assert mock_rotate.call_count == 1
+
+
+class TestMirrorTransientNetworkRetry:
+    """Mirror-level retry with fresh backend on transient network errors.
+
+    Regression guard for the 15/05/2026 incident: a remote mirror upload
+    failed with ``WriteError: Failed to write tar-stream: Socket is closed``
+    and the scheduler's 35-minute retry hit the same failure identically.
+    A mirror-level retry that rebuilds the backend (new SSH session) lets
+    a single Mirror upload survive a transient connection drop without
+    propagating it to the whole-backup retry budget.
+    """
+
+    def test_retries_on_socket_closed_with_fresh_backend(self, tmp_path):
+        """First write_remote raises 'Socket is closed', second succeeds."""
+        from src.core.exceptions import WriteError
+
+        files = [_make_file_info(tmp_path)]
+        backends_created = []
+
+        def factory(cfg):
+            b = MagicMock()
+            backends_created.append(b)
+            return b
+
+        call_count = {"n": 0}
+
+        def flaky_write_remote(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise WriteError("tar-stream", OSError("Socket is closed"))
+            # Second call succeeds (no return needed).
+
+        with patch(
+            "src.core.phases.mirror.write_remote", side_effect=flaky_write_remote
+        ):
+            # Should NOT raise — the retry succeeds.
+            mirror_backup(
+                backup_path=tmp_path,
+                files=files,
+                mirror_configs=[_remote_config()],
+                backup_name="bk",
+                get_backend=factory,
+            )
+
+        # A new backend was built for the retry (fresh SSH transport).
+        assert len(backends_created) == 2
+        assert call_count["n"] == 2
+
+    def test_does_not_retry_on_non_transient_error(self, tmp_path):
+        """A ValueError (config error) must not trigger a reconnect retry."""
+        files = [_make_file_info(tmp_path)]
+        backends_created = []
+
+        def factory(cfg):
+            b = MagicMock()
+            backends_created.append(b)
+            return b
+
+        call_count = {"n": 0}
+
+        def bad_config_raise(*args, **kwargs):
+            call_count["n"] += 1
+            raise ValueError("Bad config")
+
+        with patch(
+            "src.core.phases.mirror.write_remote", side_effect=bad_config_raise
+        ):
+            with pytest.raises(RuntimeError, match="Mirror upload failed"):
+                mirror_backup(
+                    backup_path=tmp_path,
+                    files=files,
+                    mirror_configs=[_remote_config()],
+                    backup_name="bk",
+                    get_backend=factory,
+                )
+
+        # No retry for a config-level error.
+        assert len(backends_created) == 1
+        assert call_count["n"] == 1
+
+    def test_gives_up_after_one_retry_when_failure_persists(self, tmp_path):
+        """Two consecutive 'Socket is closed' → mirror fails with RuntimeError."""
+        from src.core.exceptions import WriteError
+
+        files = [_make_file_info(tmp_path)]
+        backends_created = []
+
+        def factory(cfg):
+            b = MagicMock()
+            backends_created.append(b)
+            return b
+
+        call_count = {"n": 0}
+
+        def always_socket_closed(*args, **kwargs):
+            call_count["n"] += 1
+            raise WriteError("tar-stream", OSError("Socket is closed"))
+
+        with patch(
+            "src.core.phases.mirror.write_remote",
+            side_effect=always_socket_closed,
+        ):
+            with pytest.raises(RuntimeError, match="Mirror upload failed"):
+                mirror_backup(
+                    backup_path=tmp_path,
+                    files=files,
+                    mirror_configs=[_remote_config()],
+                    backup_name="bk",
+                    get_backend=factory,
+                )
+
+        # Exactly 2 attempts total (1 initial + 1 retry), then bubble up.
+        assert len(backends_created) == 2
+        assert call_count["n"] == 2
+
+    def test_disconnect_called_between_retries_when_available(self, tmp_path):
+        """The dead backend's disconnect() runs before the new one is built.
+
+        Hygiene check: a backend that exposes ``disconnect`` (SFTP /
+        Network) gets a best-effort close so its socket is recycled
+        instead of left lingering until garbage collection.
+        """
+        from src.core.exceptions import WriteError
+
+        files = [_make_file_info(tmp_path)]
+        backends_created = []
+
+        def factory(cfg):
+            b = MagicMock()
+            # disconnect must be present so the retry path notices it.
+            b.disconnect = MagicMock()
+            backends_created.append(b)
+            return b
+
+        call_count = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise WriteError("tar-stream", OSError("Connection reset"))
+
+        with patch("src.core.phases.mirror.write_remote", side_effect=flaky):
+            mirror_backup(
+                backup_path=tmp_path,
+                files=files,
+                mirror_configs=[_remote_config()],
+                backup_name="bk",
+                get_backend=factory,
+            )
+
+        # The first backend must have been disconnected before retry.
+        assert backends_created[0].disconnect.called

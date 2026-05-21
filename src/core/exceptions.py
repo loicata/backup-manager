@@ -51,6 +51,48 @@ class SecretsProtectionError(Exception):
         )
 
 
+class PrecheckUserTimeoutError(Exception):
+    """Raised when the scheduler's "destinations unavailable" modal
+    is left unanswered until the hard timeout fires.
+
+    The condition is a user-absence event, not a backup failure: the
+    backup pipeline never started because the user could not confirm
+    that the targets were back online. Conflating this with a real
+    crash incremented ``crash_recovery_attempts`` on every overnight
+    drift, eventually tripping the circuit breaker for profiles that
+    had no actual integrity problem (18/05/2026 incident).
+
+    The scheduler classifies this exception as ``skipped`` in the
+    journal (same bucket as the concurrent-run case) and explicitly
+    bypasses the retry budget — re-prompting in 2 minutes when the
+    user is asleep or away from the desk is pure noise.
+
+    Args:
+        profile_name: Human-readable name shown in the journal /
+            email subject / tray notification.
+        timeout_seconds: How long the prompt was offered before the
+            scheduler thread reclaimed itself. Used by surface UX
+            to compose a meaningful message.
+    """
+
+    def __init__(self, profile_name: str, timeout_seconds: int):
+        self.profile_name = profile_name
+        self.timeout_seconds = timeout_seconds
+        minutes = timeout_seconds // 60
+        super().__init__(
+            f"Precheck prompt for '{profile_name}' timed out after "
+            f"{timeout_seconds}s ({minutes} min) — no user response. "
+            f"Backup skipped, not retried."
+        )
+
+    def __reduce__(self):
+        # Default Exception.__reduce__ pickles the message only — the
+        # ``profile_name`` and ``timeout_seconds`` attributes would be
+        # lost on a thread-pool or email queue round-trip. Explicit
+        # __reduce__ preserves the structured payload.
+        return (self.__class__, (self.profile_name, self.timeout_seconds))
+
+
 class StorageDeleteError(Exception):
     """Raised when a storage backend cannot fully delete a backup.
 

@@ -8,6 +8,7 @@ All mirrors are attempted even if one fails, but any failure
 causes the entire backup to be marked as failed.
 """
 
+import contextlib
 import logging
 import shutil
 import tarfile
@@ -24,6 +25,50 @@ from src.security.encryption import EncryptingWriter
 from src.storage.base import long_path_mkdir, long_path_str
 
 logger = logging.getLogger(__name__)
+
+
+# Total attempts per mirror when a transient network error fires. The
+# default is 2 (initial + 1 retry) — enough to survive the 15/05/2026
+# server-side connection drop while keeping the latency penalty bounded
+# on a permanently-down mirror (whole-backup retry takes over from there).
+_MIRROR_MAX_ATTEMPTS = 2
+
+
+# Substrings that mark a network blip worth retrying with a fresh
+# backend. Match is on the exception message because paramiko wraps
+# socket-level failures in generic ``SSHException`` / ``OSError`` /
+# ``WriteError`` whose Python type tells us nothing about the cause.
+_TRANSIENT_NETWORK_MARKERS = (
+    "socket is closed",
+    "connection reset",
+    "broken pipe",
+    "connection refused",
+    "no route to host",
+    "ssh session not active",
+    "server connection dropped",
+    "transport endpoint is not connected",
+)
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """Return True when ``exc`` looks like a network blip worth retrying.
+
+    Matches the exception message (and its full chain via ``__cause__`` /
+    ``__context__``) against a curated list of socket-level failure
+    phrases. False positives are acceptable here: at worst we burn one
+    extra mirror attempt; the alternative — a permanent mirror failure
+    on a transient drop — costs the user a full scheduler-level retry
+    window (35+ minutes).
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        msg = str(current).lower()
+        if any(marker in msg for marker in _TRANSIENT_NETWORK_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def mirror_backup(
@@ -80,117 +125,151 @@ def mirror_backup(
         if cancel_check is not None:
             cancel_check()
 
-        try:
-            backend = get_backend(config)
+        # Determine if this mirror should be encrypted (outside the retry
+        # loop — it depends on config / flags, not on the attempt).
+        should_encrypt = i < len(flags) and flags[i]
+        mirror_pw = encrypt_password if should_encrypt else ""
+        logger.info(
+            "Mirror %d: should_encrypt=%s, flags=%s, " "has_password=%s, is_remote=%s",
+            i + 1,
+            should_encrypt,
+            flags,
+            bool(encrypt_password),
+            config.is_remote(),
+        )
 
-            # Enable responsive cancel during uploads
-            if cancel_check is not None:
-                backend.set_cancel_check(cancel_check)
+        has_local_backup = (
+            backup_path is not None and backup_path != Path(".") and backup_path.is_dir()
+        )
+        primary_is_tar_wbenc = (
+            backup_path is not None
+            and backup_path.is_file()
+            and backup_path.name.endswith(".tar.wbenc")
+        )
 
-            # Apply bandwidth throttle if configured
-            if apply_throttle is not None:
-                apply_throttle(backend, mirror_name)
-                # ``apply_throttle`` emits a "Measuring bandwidth (Mirror N)..."
-                # PHASE_CHANGED that sticks on the Run-tab status label for
-                # the entire mirror upload (43 min on a 260 k-file run) —
-                # confusing because the log feed has already moved on to
-                # "Uploading N files to remote...". Re-announce the phase
-                # here so the label tracks the actual work.
-                if events is not None:
-                    events.emit(PHASE_CHANGED, phase=f"Uploading to {mirror_name}...")
+        # Retry loop: a transient network drop (server closes SSH session
+        # mid-upload, see 15/05/2026 incident) is recoverable by rebuilding
+        # the backend (fresh SSH transport) and retrying ONCE before
+        # surfacing the failure to the scheduler-level retry budget.
+        last_exc: BaseException | None = None
+        last_backend = None
+        for attempt in range(1, _MIRROR_MAX_ATTEMPTS + 1):
+            try:
+                backend = get_backend(config)
+                last_backend = backend
 
-            # Determine if this mirror should be encrypted
-            should_encrypt = i < len(flags) and flags[i]
-            mirror_pw = encrypt_password if should_encrypt else ""
-            logger.info(
-                "Mirror %d: should_encrypt=%s, flags=%s, " "has_password=%s, is_remote=%s",
-                i + 1,
-                should_encrypt,
-                flags,
-                bool(encrypt_password),
-                config.is_remote(),
-            )
+                # Enable responsive cancel during uploads
+                if cancel_check is not None:
+                    backend.set_cancel_check(cancel_check)
 
-            has_local_backup = (
-                backup_path is not None and backup_path != Path(".") and backup_path.is_dir()
-            )
+                # Apply bandwidth throttle if configured. Only on the
+                # first attempt: re-measuring on retry would burn ~30 s
+                # of bandwidth probing for no real benefit (the throttle
+                # ceiling is a property of the link, not the session).
+                if attempt == 1 and apply_throttle is not None:
+                    apply_throttle(backend, mirror_name)
+                    # ``apply_throttle`` emits a "Measuring bandwidth (Mirror N)..."
+                    # PHASE_CHANGED that sticks on the Run-tab status label for
+                    # the entire mirror upload (43 min on a 260 k-file run) —
+                    # confusing because the log feed has already moved on to
+                    # "Uploading N files to remote...". Re-announce the phase
+                    # here so the label tracks the actual work.
+                    if events is not None:
+                        events.emit(PHASE_CHANGED, phase=f"Uploading to {mirror_name}...")
 
-            # If primary backup is a .tar.wbenc, reuse it for encrypted mirrors
-            primary_is_tar_wbenc = (
-                backup_path is not None
-                and backup_path.is_file()
-                and backup_path.name.endswith(".tar.wbenc")
-            )
+                if config.is_remote() and should_encrypt and primary_is_tar_wbenc:
+                    # Upload the existing .tar.wbenc directly (no rebuild)
+                    _upload_existing_archive(
+                        backend,
+                        backup_path,
+                        backup_name,
+                        phase_log,
+                    )
+                elif config.is_remote():
+                    # Stream files directly to remote mirror
+                    write_remote(
+                        files,
+                        backend,
+                        backup_name,
+                        encrypt_password=mirror_pw,
+                        events=events,
+                        cancel_check=cancel_check,
+                        integrity_manifest=integrity_manifest if mirror_pw else None,
+                    )
+                elif should_encrypt:
+                    # Local mirror with encryption: create .tar.wbenc archive
+                    _encrypt_local_mirror(
+                        files,
+                        backup_path,
+                        backend,
+                        backup_name,
+                        mirror_pw,
+                        phase_log,
+                        cancel_check,
+                        integrity_manifest=integrity_manifest,
+                    )
+                elif has_local_backup:
+                    # Local mirror from local backup: copy file-by-file with progress
+                    _copy_local_mirror(
+                        backup_path,
+                        backend,
+                        backup_name,
+                        phase_log,
+                        cancel_check,
+                    )
+                else:
+                    # Local mirror but primary is remote: copy source files
+                    _write_source_files_to_local(
+                        files,
+                        backend,
+                        backup_name,
+                        phase_log,
+                        cancel_check,
+                    )
 
-            if config.is_remote() and should_encrypt and primary_is_tar_wbenc:
-                # Upload the existing .tar.wbenc directly (no rebuild)
-                _upload_existing_archive(
-                    backend,
-                    backup_path,
-                    backup_name,
-                    phase_log,
-                )
-            elif config.is_remote():
-                # Stream files directly to remote mirror
-                write_remote(
-                    files,
-                    backend,
-                    backup_name,
-                    encrypt_password=mirror_pw,
-                    events=events,
-                    cancel_check=cancel_check,
-                    integrity_manifest=integrity_manifest if mirror_pw else None,
-                )
-            elif should_encrypt:
-                # Local mirror with encryption: create .tar.wbenc archive
-                _encrypt_local_mirror(
-                    files,
-                    backup_path,
-                    backend,
-                    backup_name,
-                    mirror_pw,
-                    phase_log,
-                    cancel_check,
-                    integrity_manifest=integrity_manifest,
-                )
-            elif has_local_backup:
-                # Local mirror from local backup: copy file-by-file with progress
-                _copy_local_mirror(
-                    backup_path,
-                    backend,
-                    backup_name,
-                    phase_log,
-                    cancel_check,
-                )
-            else:
-                # Local mirror but primary is remote: copy source files
-                _write_source_files_to_local(
-                    files,
-                    backend,
-                    backup_name,
-                    phase_log,
-                    cancel_check,
-                )
+                # Upload .wbverify to unencrypted mirrors only.
+                # Encrypted mirrors have the manifest embedded in .tar.wbenc.
+                if integrity_manifest and not should_encrypt:
+                    _upload_mirror_manifest(
+                        integrity_manifest,
+                        config,
+                        backend,
+                        backup_path,
+                        backup_name,
+                        has_local_backup,
+                        mirror_name,
+                        phase_log,
+                    )
 
-            # Upload .wbverify to unencrypted mirrors only.
-            # Encrypted mirrors have the manifest embedded in .tar.wbenc.
-            if integrity_manifest and not should_encrypt:
-                _upload_mirror_manifest(
-                    integrity_manifest,
-                    config,
-                    backend,
-                    backup_path,
-                    backup_name,
-                    has_local_backup,
-                    mirror_name,
-                    phase_log,
-                )
+                # Success: clear any prior attempt's error and exit the retry loop.
+                last_exc = None
+                break
 
+            except Exception as e:
+                last_exc = e
+                if attempt < _MIRROR_MAX_ATTEMPTS and _is_transient_network_error(e):
+                    phase_log.warning(
+                        f"{mirror_name}: attempt {attempt}/{_MIRROR_MAX_ATTEMPTS} "
+                        f"failed with transient network error ({type(e).__name__}: {e}); "
+                        f"reconnecting and retrying"
+                    )
+                    # Best-effort close on the dead backend so its
+                    # underlying socket is released before the next
+                    # ``get_backend`` opens a new one. Failure to close
+                    # is harmless — the backend will be garbage-collected
+                    # shortly anyway.
+                    if last_backend is not None and hasattr(last_backend, "disconnect"):
+                        with contextlib.suppress(Exception):
+                            last_backend.disconnect()
+                    continue
+                # Out of attempts or non-transient error: surface it.
+                break
+
+        if last_exc is None:
             results.append((mirror_name, True, "OK", mirror_desc))
             phase_log.info(f"{mirror_name} ({mirror_desc}): upload complete")
-
-        except Exception as e:
-            msg = f"{type(e).__name__}: {e}"
+        else:
+            msg = f"{type(last_exc).__name__}: {last_exc}"
             results.append((mirror_name, False, msg, mirror_desc))
             phase_log.error(f"{mirror_name}: upload failed — {msg}")
 

@@ -56,6 +56,15 @@ logger = logging.getLogger(__name__)
 # Interval between continuous health checks for destinations (ms)
 HEALTH_POLL_INTERVAL_MS = 60_000
 
+# Hard timeout on the scheduler's "destinations unavailable" modal.
+# Past this point the scheduler thread reclaims itself with
+# ``PrecheckUserTimeoutError`` (classified as ``skipped``, not
+# ``failed`` — see ``src/core/exceptions.py``).  30 minutes is long
+# enough for the user to come back from a coffee break, short enough
+# that an overnight unattended profile does not pile up several
+# pending modals.
+_PRECHECK_PROMPT_TIMEOUT_SECONDS = 30 * 60
+
 # Bug report destination
 BUG_REPORT_EMAIL = "loic@loicata.com"
 
@@ -669,6 +678,25 @@ class BackupManagerApp:
         # (``_finalize_profile_deletion``) can drop a profile's file
         # alongside the JSON config.
         self.run_history = RunHistoryStore(self.config_manager.config_dir / "run_history")
+        # One-shot fix-up of pre-v3.7.16 run-history files (engine-level
+        # messages persisted with ``phase=""``). Walks each known
+        # profile, applies the same inference as the live persist path,
+        # and rewrites the JSONL atomically. Idempotent: subsequent
+        # launches are no-ops once every file has been migrated.
+        # Failures are logged but never block startup. See
+        # ``src/ui/tabs/run_tab.py::migrate_legacy_phase_tags``.
+        try:
+            from src.ui.tabs.run_tab import migrate_legacy_phase_tags
+
+            all_profile_ids = [p.id for p in self.config_manager.get_all_profiles()]
+            migrated = migrate_legacy_phase_tags(self.run_history, all_profile_ids)
+            if migrated:
+                logger.info(
+                    "Legacy phase-tag migration: rewrote %d run-history file(s)",
+                    migrated,
+                )
+        except Exception:
+            logger.exception("Legacy phase-tag migration failed (non-fatal)")
         # Pending Fast-mode verify prompts — one entry per profile.
         # A backup that ends while the user is on another profile, or
         # while the app is closed (scheduled run), still leaves an
@@ -2787,8 +2815,24 @@ class BackupManagerApp:
         failures = [r for r in results if not r[2]]
 
         if failures:
-            # Show alert on main thread and wait for user decision
+            # Show alert on main thread and wait for user decision.
+            # The prompt distinguishes three outcomes:
+            #   "ok"       — precheck eventually passed, run the backup
+            #   "cancel"   — user explicitly clicked Cancel
+            #   "timeout"  — no response within the 30-min budget
+            # The two abort paths surface different exceptions so the
+            # scheduler can bypass crash-recovery accounting on a
+            # user-absence event (18/05/2026 incident — see
+            # ``PrecheckUserTimeoutError`` docstring).
             user_choice = self._scheduled_precheck_prompt(failures, profile, engine)
+            if user_choice == "timeout":
+                from src.core.exceptions import PrecheckUserTimeoutError
+
+                self.tray.set_state(TrayState.BACKUP_ERROR)
+                raise PrecheckUserTimeoutError(
+                    profile_name=profile.name,
+                    timeout_seconds=_PRECHECK_PROMPT_TIMEOUT_SECONDS,
+                )
             if user_choice == "cancel":
                 self.tray.set_state(TrayState.BACKUP_ERROR)
                 raise RuntimeError("Backup cancelled: destinations unavailable")
@@ -2927,12 +2971,12 @@ class BackupManagerApp:
         """
         # Hard timeout so the scheduler thread cannot block forever if
         # the user ignores or dismisses the alert. Past this point we
-        # give up, hide the alert and treat it as cancel — subsequent
-        # scheduler ticks get a fresh chance to prompt again.
-        _ALERT_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
-
+        # give up, hide the alert and return "timeout" — distinct
+        # from an explicit "cancel" so the caller can raise
+        # ``PrecheckUserTimeoutError`` and the scheduler can classify
+        # the journal entry as ``skipped`` rather than ``failed``.
         current_failures = failures
-        deadline = time.monotonic() + _ALERT_TIMEOUT_SECONDS
+        deadline = time.monotonic() + _PRECHECK_PROMPT_TIMEOUT_SECONDS
         while True:
             decision = {"value": None}  # "retry", "cancel", or None
             event = threading.Event()
@@ -2958,14 +3002,16 @@ class BackupManagerApp:
             clicked = event.wait(timeout=remaining)
 
             if not clicked:
-                # No response within budget — treat as cancel to release
-                # the scheduler thread. The next tick will re-prompt.
+                # No response within budget — return "timeout" so the
+                # caller can classify this user-absence as a skip
+                # (no crash-recovery bump, no retry storm) rather
+                # than a real backup failure.
                 logger.warning(
                     "Precheck prompt timed out after %ds — releasing scheduler thread",
-                    _ALERT_TIMEOUT_SECONDS,
+                    _PRECHECK_PROMPT_TIMEOUT_SECONDS,
                 )
                 self.root.after(0, self._hide_target_alert)
-                return "cancel"
+                return "timeout"
 
             if decision["value"] == "cancel":
                 self.root.after(0, self._hide_target_alert)
@@ -2980,12 +3026,15 @@ class BackupManagerApp:
                 return "ok"
 
             # Still failing — loop back to prompt again (bounded by
-            # user input OR the deadline).
+            # user input OR the deadline). A deadline overrun while
+            # the user IS actively interacting (clicking Retry) is
+            # still a user-absence-style outcome from the scheduler's
+            # perspective: we ran out of time before reaching success.
             current_failures = new_failures
             if time.monotonic() >= deadline:
                 logger.warning("Precheck retry budget exhausted — releasing scheduler thread")
                 self.root.after(0, self._hide_target_alert)
-                return "cancel"
+                return "timeout"
 
     # --- Target pre-check alert ---
 

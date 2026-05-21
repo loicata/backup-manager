@@ -243,6 +243,131 @@ class TestSafeRemoveTreeRetry:
         assert Path(target_file).exists()
 
 
+class TestSafeRemoveTreeOuterRetry:
+    """Outer-retry loop: when the first pass leaves residuals due to a
+    transient lock (typically Windows Defender holding handles a few
+    seconds after a backup interrupt), a second pass after backoff
+    should drain them.
+
+    Regression guard for the 18/05/2026 incident: a TestLoic orphan
+    scan left 10 residual subdirectories with ``WinError 145``
+    (directory not empty). The per-entry retries totalled ~0.7 s,
+    too short for real-time AV scanners that typically hold handles
+    1-2 s after the parent process closes them. An outer retry with
+    a longer backoff gives the AV time to release without inflating
+    every per-entry attempt.
+    """
+
+    def test_transient_directory_not_empty_recovers_on_outer_retry(
+        self, tmp_path: Path
+    ) -> None:
+        """First rmdir attempt fails with ENOTEMPTY, second succeeds."""
+        from src.storage import _fs_utils
+        from src.storage._fs_utils import safe_remove_tree
+
+        # Single-file tree so we only mock rmdir on the root.
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        (parent / "file.txt").write_text("x", encoding="utf-8")
+
+        original_rmdir = os.rmdir
+        rmdir_calls = {"n": 0}
+
+        def flaky_rmdir(path: str) -> None:
+            rmdir_calls["n"] += 1
+            if rmdir_calls["n"] == 1:
+                # Simulate WinError 145 (ENOTEMPTY) on the first pass.
+                # Code 41 is ENOTEMPTY on POSIX; on Windows the OS
+                # error code is 145. ``safe_remove_tree`` catches the
+                # base ``OSError`` so either flavour exercises the
+                # same code path.
+                raise OSError(41, "Directory not empty (simulated transient)")
+            return original_rmdir(path)
+
+        with patch.object(_fs_utils.os, "rmdir", side_effect=flaky_rmdir):
+            result = safe_remove_tree(
+                parent, base_delay=0.0, outer_retries=2, outer_delay=0.0
+            )
+
+        assert result.success is True, f"Residuals: {result.residuals}"
+        assert not parent.exists()
+        assert rmdir_calls["n"] >= 2, "rmdir must be retried after transient failure"
+
+    def test_outer_retries_disabled_keeps_single_pass(
+        self, tmp_path: Path
+    ) -> None:
+        """``outer_retries=0`` opts out of the outer loop.
+
+        Used by per-entry-error tests below that want to assert the
+        residual surface of a single pass without waiting for the
+        outer retry to amplify the work.
+        """
+        from src.storage import _fs_utils
+        from src.storage._fs_utils import safe_remove_tree
+
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        (parent / "file.txt").write_text("x", encoding="utf-8")
+
+        rmdir_calls = {"n": 0}
+
+        def always_fail(path: str) -> None:
+            rmdir_calls["n"] += 1
+            raise OSError(41, "Directory not empty (permanent)")
+
+        with patch.object(_fs_utils.os, "rmdir", side_effect=always_fail):
+            result = safe_remove_tree(
+                parent,
+                max_retries=1,
+                base_delay=0.0,
+                outer_retries=0,
+                outer_delay=0.0,
+            )
+
+        assert result.success is False
+        assert result.residuals
+        # 1 rmdir call (the root dir; the parent has one inner file
+        # whose unlink succeeds, so there is exactly one rmdir attempt).
+        assert rmdir_calls["n"] == 1, (
+            "outer_retries=0 must not trigger a second pass; "
+            f"got {rmdir_calls['n']} rmdir calls"
+        )
+
+    def test_outer_retries_count_is_respected(self, tmp_path: Path) -> None:
+        """``outer_retries=N`` runs at most N+1 passes when failures persist."""
+        from src.storage import _fs_utils
+        from src.storage._fs_utils import safe_remove_tree
+
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        (parent / "file.txt").write_text("x", encoding="utf-8")
+
+        rmdir_calls = {"n": 0}
+
+        def always_fail(path: str) -> None:
+            rmdir_calls["n"] += 1
+            raise OSError(41, "Directory not empty (permanent)")
+
+        with patch.object(_fs_utils.os, "rmdir", side_effect=always_fail):
+            result = safe_remove_tree(
+                parent,
+                max_retries=1,
+                base_delay=0.0,
+                outer_retries=2,
+                outer_delay=0.0,
+            )
+
+        # Each pass attempts exactly one rmdir (the inner file unlink
+        # has already cleared the tree of files on the first walk;
+        # second/third passes re-walk an empty dir and try rmdir again).
+        # 1 initial + 2 retries = 3 total passes.
+        assert rmdir_calls["n"] == 3, (
+            f"Expected exactly 3 rmdir attempts (1 + 2 outer retries), "
+            f"got {rmdir_calls['n']}"
+        )
+        assert result.success is False
+
+
 class TestRemoveResultDataclass:
     """Result object surface — callers rely on these attributes."""
 

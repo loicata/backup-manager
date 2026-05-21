@@ -184,6 +184,8 @@ def safe_remove_tree(
     *,
     max_retries: int = 3,
     base_delay: float = 0.1,
+    outer_retries: int = 2,
+    outer_delay: float = 1.0,
 ) -> RemoveResult:
     """Remove a file or directory tree robustly on Windows and POSIX.
 
@@ -191,6 +193,20 @@ def safe_remove_tree(
     directories, applying long-path prefixing, attribute clearing and
     retry on every operation.  Never raises on filesystem failures —
     the caller inspects ``RemoveResult`` to decide what to do.
+
+    Two retry layers:
+
+    1. **Per-entry retry** (``max_retries`` / ``base_delay``): handles
+       sub-second handle holds from Explorer preview, indexer, etc.
+       Worst-case ~0.7 s per file before declaring residual.
+    2. **Outer retry** (``outer_retries`` / ``outer_delay``): when the
+       first pass surfaces residuals, sleeps for ``outer_delay``
+       seconds (doubled each retry) and redoes the whole walk on
+       what is left. Catches real-time AV holds that span several
+       seconds, where the per-entry budget is too short — typical of
+       Windows Defender re-scanning a freshly-closed backup tree.
+       Regression guard for the 18/05/2026 ``WinError 145`` orphan-scan
+       incident.
 
     Args:
         path: File or directory to remove.  A nonexistent path is
@@ -201,16 +217,78 @@ def safe_remove_tree(
         base_delay: Initial backoff in seconds, doubled each retry.
             Default 0.1 s → 0.1, 0.2, 0.4 cumulative ~0.7 s worst-case
             per entry.
+        outer_retries: Number of additional whole-tree passes if the
+            first pass leaves residuals. Default 2 → up to 3 total
+            passes (initial + 2 retries). Set to 0 to disable the
+            outer loop entirely (useful in tests that simulate
+            permanent failures and don't want to triple their runtime).
+        outer_delay: Sleep in seconds before the first outer retry,
+            doubled each subsequent retry. Default 1.0 s → 1 s, 2 s
+            cumulative ~3 s worst-case — long enough for real-time
+            AV to release handles, short enough not to block the
+            rotation phase noticeably on success.
 
     Returns:
         ``RemoveResult`` with ``removed_files``, ``removed_dirs`` and
         ``residuals``.  ``result.success`` is ``True`` iff the target
-        is fully gone from the filesystem.
+        is fully gone from the filesystem. Counters are cumulative
+        across all outer-retry passes (so a file removed on the
+        second pass still increments ``removed_files``).
     """
     if not isinstance(path, Path):
         # Accept str for ergonomic call sites; never trust the input.
         path = Path(path)
 
+    result = _safe_remove_tree_pass(path, max_retries=max_retries, base_delay=base_delay)
+    if result.success or outer_retries <= 0:
+        return result
+
+    # Outer-retry loop: redo the whole walk on whatever survived.
+    # Counts are cumulative; residuals come from the LAST pass since
+    # earlier residuals may have been cleaned by the OS during the
+    # backoff sleep (the goal is to report the final state).
+    delay = outer_delay
+    for attempt in range(outer_retries):
+        if delay > 0:
+            time.sleep(delay)
+            delay *= 2
+        # ``path.lstat`` may now report "not found" if the OS finally
+        # released the locks and the parent caller managed to drop the
+        # tree mid-sleep — handled inside the pass helper.
+        retry_result = _safe_remove_tree_pass(
+            path, max_retries=max_retries, base_delay=base_delay
+        )
+        # Accumulate counts: the first pass may have removed most
+        # files; the retry adds whatever it finishes.
+        result.removed_files += retry_result.removed_files
+        result.removed_dirs += retry_result.removed_dirs
+        result.residuals = retry_result.residuals  # Replace, don't append
+        if retry_result.success:
+            break
+        logger.debug(
+            "safe_remove_tree: outer retry %d/%d still has %d residual(s) under %s",
+            attempt + 1,
+            outer_retries,
+            len(retry_result.residuals),
+            path,
+        )
+
+    return result
+
+
+def _safe_remove_tree_pass(
+    path: Path,
+    *,
+    max_retries: int,
+    base_delay: float,
+) -> RemoveResult:
+    """One pass of ``safe_remove_tree``: a single bottom-up walk.
+
+    Extracted so the outer retry loop can re-invoke a clean pass on
+    the same target without recursion side effects (counter resets,
+    residual replacement). The function never raises — same contract
+    as the public entry point.
+    """
     result = RemoveResult()
 
     # exists() returns False for broken symlinks; fall back to lstat

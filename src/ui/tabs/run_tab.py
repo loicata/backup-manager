@@ -78,6 +78,114 @@ def _is_terminal_log_message(message: str) -> bool:
     return bool(_TERMINAL_LOG_PATTERN.match(message))
 
 
+def migrate_legacy_phase_tags(
+    history_store: "RunHistoryStore",
+    profile_ids,
+) -> int:
+    """One-shot fix-up of pre-v3.7.16 run-history JSONL files.
+
+    Pre-v3.7.16, ``RunTab._persist_log`` wrote ``phase=""`` for every
+    LOG event whose payload arrived without an explicit phase tag.
+    That meant every engine-level emit (``Saving manifest…``,
+    ``Writing commit marker…``, ``Updating manifest…``, ``Rotating
+    old backups…``, ``Building integrity manifest…``, ``Copying to
+    Storage…``, ``Backup written: …``, ``Backup complete: …``) landed
+    in the JSONL with no Phase tag. ``_reload_log_history`` then
+    re-rendered the rows from those entries on every profile-switch,
+    and the Run-tab Phase column went blank.
+
+    v3.7.16 fixed new entries by running the inference BEFORE persist
+    (see ``RunTab._resolve_persist_phase``). This helper retroactively
+    applies the same inference to the entries that were already
+    written. Runs once at app startup, processes each profile's
+    JSONL via ``RunHistoryStore.rewrite`` (atomic via ``.tmp`` +
+    ``os.replace``).
+
+    Idempotent: a second invocation on a freshly-migrated file does
+    no I/O — the no-op is detected by the absence of empty phases
+    that would benefit from inference (terminal lines that legitimately
+    keep ``phase=""`` do not count). Failures on a single profile are
+    logged and swallowed; the remaining profiles are still processed.
+
+    Args:
+        history_store: The store backing ``run_history/<id>.jsonl``.
+        profile_ids: Iterable of profile ids to walk. Typically every
+            currently-configured profile id.
+
+    Returns:
+        Number of profile files that were rewritten.
+    """
+    rewritten_count = 0
+    for profile_id in profile_ids:
+        try:
+            if _migrate_one_profile(history_store, profile_id):
+                rewritten_count += 1
+        except Exception:  # noqa: BLE001 — startup must never crash here
+            # Any unexpected error on a single profile (corrupt JSONL,
+            # disk full, etc.) must not abort the startup-time migration
+            # of the remaining profiles. The store's own resilience
+            # already handles individual line corruption at load time.
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "migrate_legacy_phase_tags: skipping %s after unexpected error",
+                profile_id,
+            )
+    return rewritten_count
+
+
+def _migrate_one_profile(history_store, profile_id: str) -> bool:
+    """Process one profile's JSONL. Returns True iff the file was rewritten.
+
+    The inference walks the entries in order so an unmatched message
+    inherits the previous message's phase (matching the live
+    ``_resolve_persist_phase`` semantics). Terminal messages
+    (``Backup complete|failed|cancelled|rejected``) reset the local
+    tracker so a new run's opening events don't inherit the previous
+    run's last phase.
+    """
+    entries = history_store.load(profile_id)
+    if not entries:
+        return False
+
+    tracker = ""
+    changed = False
+    new_entries: list[dict] = []
+    for entry in entries:
+        msg = entry.get("msg", "")
+        existing_phase = entry.get("phase", "")
+        new_entry = dict(entry)
+
+        if existing_phase:
+            # Explicit tag — keep verbatim and update the tracker so a
+            # subsequent unmatched message inherits it.
+            tracker = existing_phase
+        elif _is_terminal_log_message(msg):
+            # Terminal lines legitimately stay empty; reset the tracker
+            # so the next run starts blank.
+            tracker = ""
+        else:
+            inferred = _infer_phase(msg)
+            if inferred:
+                tracker = inferred
+                new_entry["phase"] = inferred
+                changed = True
+            elif tracker:
+                new_entry["phase"] = tracker
+                changed = True
+            # else: tracker is still "" and message matches no pattern
+            # (run-boundary marker, "Backup type: full", etc.) — leave
+            # ``phase=""`` exactly as the live path would have.
+
+        new_entries.append(new_entry)
+
+    if not changed:
+        return False
+
+    history_store.rewrite(profile_id, new_entries)
+    return True
+
+
 class RunTab(ttk.Frame):
     """Backup execution: progress bar, log output, start/cancel."""
 
@@ -101,7 +209,24 @@ class RunTab(ttk.Frame):
         # announcements. Used to fill the Phase column for LOG events
         # that arrive without an explicit phase tag (typically engine-
         # level emits like "Saving manifest..." or "Backup complete").
+        # NOTE: this tracker reflects the *currently-viewed* profile and
+        # is reset on every profile-switch via ``_clear_log_widget``.
+        # The persistence path uses a separate per-profile dict
+        # (``_persist_phase_per_profile``) so a background run on
+        # profile B cannot leak its phase into profile A's history.
         self._current_phase: str = ""
+        # Per-profile phase tracker used by ``_persist_log`` so the
+        # JSONL carries the inferred Phase tag even for engine-level
+        # messages whose payload lacks an explicit phase (``Saving
+        # manifest…``, ``Copying to Storage…``, etc.). Pre-21/05/2026
+        # the inference ran only in ``_on_log`` AFTER ``_persist_log``,
+        # so the JSONL was written with ``phase=""`` and the Run-tab
+        # Phase column went blank on every profile-switch reload.
+        # A dict (not a single str) is required because LOG events
+        # from a background scheduler run on profile B arrive in the
+        # same ``_on_log`` handler as the viewed profile A; sharing a
+        # single tracker would cross-contaminate the persisted phase.
+        self._persist_phase_per_profile: dict[str, str] = {}
         # Profile info baseline — so the BACKUP_TYPE_DETERMINED override
         # can be replaced with the canonical configured view once the
         # backup ends (STATUS = success / error / idle).
@@ -822,18 +947,56 @@ class RunTab(ttk.Frame):
         non-selected profile are still preserved in their own
         history file. No-op when persistence is disabled or the
         event carries no profile id.
+
+        Phase resolution: when the event arrives without an explicit
+        phase tag, this method runs the same inference that ``_on_log``
+        uses for the live tree — match the message against
+        ``_PHASE_PATTERNS``, otherwise inherit the previous phase from
+        the per-profile tracker. Without this, engine-level messages
+        (``Saving manifest…``, ``Backup written: …``, ``Copying to
+        Storage…``) landed in the JSONL with ``phase=""`` because the
+        live inference ran AFTER persistence — the column then showed
+        blank on every profile-switch reload (21/05/2026 anomaly).
+        Terminal messages (``Backup complete: …``) reset the tracker
+        so the next run's first messages do not inherit the previous
+        run's last phase.
         """
         if self._history_store is None or not profile_id:
             return
+        persisted_phase = self._resolve_persist_phase(message, phase, profile_id)
         entry: dict = {
             "ts": datetime.now().isoformat(timespec="seconds"),
             "msg": message,
             "level": level,
-            "phase": phase,
+            "phase": persisted_phase,
         }
         if details is not None:
             entry["details"] = details
         self._history_store.append(profile_id, entry)
+
+    def _resolve_persist_phase(
+        self, message: str, phase: str, profile_id: str
+    ) -> str:
+        """Return the phase tag to persist for ``message`` under ``profile_id``.
+
+        Explicit ``phase`` from the event payload wins. Otherwise the
+        message is matched against ``_PHASE_PATTERNS``; on match, the
+        per-profile tracker is updated and the inferred tag returned.
+        On no match, the tracker's current value is returned (the
+        previous message's phase "sticks" until the next run-boundary
+        or a new pattern match). Terminal messages reset the tracker.
+        """
+        if phase:
+            self._persist_phase_per_profile[profile_id] = phase
+            return phase
+        if _is_terminal_log_message(message):
+            self._persist_phase_per_profile[profile_id] = ""
+            return ""
+        inferred = _infer_phase(message)
+        if inferred:
+            self._persist_phase_per_profile[profile_id] = inferred
+            return inferred
+        return self._persist_phase_per_profile.get(profile_id, "")
 
     def _on_phase_count(self, weights=None, profile_id="", **kw):
         """Receive phase weights for progress bar calculation.
@@ -1327,14 +1490,23 @@ class RunTab(ttk.Frame):
         Fast-mode verify alerts. Called when a new backup starts on
         the current profile so the previous run's UI is gone.
 
+        Order matters: ``clear_alerts`` walks ``self._verify_prompts``
+        to call ``_destroy_verify_prompt`` on each pending card, which
+        also drops the entry from the persistent ``VerifyPromptStore``.
+        ``_clear_log_widget`` then wipes the dict in-memory, so it MUST
+        run AFTER ``clear_alerts`` — otherwise the persistent store is
+        never cleaned and a previous run's prompt is replayed on the
+        next profile switch / app restart, stacking with the new run's
+        own prompt (21/05/2026 double-prompt regression).
+
         Profile-switch goes through ``set_current_profile_id`` (which
         also resets the volatile state via ``_clear_run_state`` but
         keeps alerts so a Fast-mode prompt for the new profile is
         not lost).
         """
+        self.clear_alerts()
         self._clear_log_widget()
         self._clear_run_state()
-        self.clear_alerts()
 
     def _clear_run_state(self) -> None:
         """Reset the progress bar, status label and phase counters.

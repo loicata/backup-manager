@@ -148,6 +148,60 @@ class RunHistoryStore:
                 entries.append(obj)
         return entries
 
+    def rewrite(self, profile_id: str, entries: list[dict]) -> None:
+        """Atomically replace a profile's JSONL with ``entries``.
+
+        Used by the one-shot legacy-phase migration that fixes
+        pre-v3.7.16 entries persisted with ``phase=""``. Append-only
+        ``append`` cannot update existing rows, hence this dedicated
+        writer.
+
+        Writes go through a ``.tmp`` sibling + ``os.replace`` so a
+        concurrent reader sees either the old or the new content,
+        never a torn intermediate state. ``profile_id == ""`` is a
+        no-op (no profile to attach to). JSON-serialisation failures
+        on individual entries abort the rewrite to avoid corrupting
+        the file with a half-written payload — the original file
+        stays intact.
+
+        Args:
+            profile_id: Profile whose history is being replaced.
+            entries: Full new content; each item must be JSON-serialisable.
+        """
+        if not profile_id:
+            return
+        # Serialise EVERYTHING first so a single bad payload aborts
+        # the rewrite before any disk side-effect. Without this, a
+        # partial write could truncate the original file.
+        try:
+            lines = [
+                json.dumps(e, ensure_ascii=False, separators=(",", ":"))
+                for e in entries
+            ]
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "RunHistory: rewrite skipped — unserialisable entry for %s: %s",
+                profile_id,
+                exc,
+            )
+            return
+        path = self._path_for(profile_id)
+        with self._lock:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".jsonl.tmp")
+                with tmp.open("w", encoding="utf-8") as f:
+                    for line in lines:
+                        f.write(line)
+                        f.write("\n")
+                tmp.replace(path)
+            except OSError as exc:
+                logger.warning(
+                    "RunHistory: rewrite failed for %s: %s",
+                    profile_id,
+                    exc,
+                )
+
     def delete(self, profile_id: str) -> None:
         """Remove the history file for a profile, if any.
 

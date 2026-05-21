@@ -556,32 +556,47 @@ class InAppScheduler:
                 )
             logger.info("Scheduled backup succeeded: %s", profile.name)
         except Exception as e:
-            # Do NOT retry a ProfileLockError: another run (UI "Run now",
-            # another scheduler instance) is already handling this
-            # profile, so our trigger has effectively been satisfied
-            # by the concurrent run. Retrying would produce a SECOND
-            # backup for the same schedule window once the other run
-            # releases the lock — wasteful and misleading in the
-            # journal.
+            # Classify the exception so user-driven aborts are not
+            # treated as backup failures (no crash-recovery bump, no
+            # retry storm):
+            #
+            # - ProfileLockError: another run (UI "Run now", another
+            #   scheduler instance) is already handling this profile —
+            #   our trigger is effectively satisfied by the concurrent
+            #   run. Retrying would produce a SECOND backup for the
+            #   same schedule window once the other run releases the
+            #   lock.
+            # - PrecheckUserTimeoutError: the destinations-unavailable
+            #   modal was left unanswered until the 30-min hard
+            #   timeout. The backup never started because the user
+            #   could not confirm the targets were back online —
+            #   re-prompting in 2 minutes when the user is asleep is
+            #   pure noise (18/05/2026 incident: three such timeouts
+            #   in a row tripped the circuit breaker for TestNP).
+            from src.core.exceptions import PrecheckUserTimeoutError
             from src.core.profile_lock import ProfileLockError
 
             is_concurrent = isinstance(e, ProfileLockError)
+            is_user_timeout = isinstance(e, PrecheckUserTimeoutError)
+            is_skip = is_concurrent or is_user_timeout
 
-            level = logger.info if is_concurrent else logger.exception
-            level(
-                "Scheduled backup %s: %s",
-                "skipped (concurrent)" if is_concurrent else "failed",
-                profile.name,
-            )
+            level = logger.info if is_skip else logger.exception
+            if is_concurrent:
+                outcome_label = "skipped (concurrent)"
+            elif is_user_timeout:
+                outcome_label = "skipped (precheck user timeout)"
+            else:
+                outcome_label = "failed"
+            level("Scheduled backup %s: %s", outcome_label, profile.name)
             with self._op_lock:
                 self._journal.update_last(
-                    status="skipped" if is_concurrent else "failed",
+                    status="skipped" if is_skip else "failed",
                     detail=f"{type(e).__name__}: {e}",
                     timestamp=datetime.now().isoformat(),
                 )
 
-            # Retry logic — skip for concurrent-run rejections
-            if profile.schedule.retry_enabled and not is_concurrent:
+            # Retry logic — bypassed for skip-class exceptions
+            if profile.schedule.retry_enabled and not is_skip:
                 self._retry_backup(profile, trigger)
         finally:
             with self._in_progress_lock:

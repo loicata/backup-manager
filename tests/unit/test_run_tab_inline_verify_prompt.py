@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.core.run_history import VerifyPromptStore
 from src.ui.tabs.run_tab import RunTab
 
 
@@ -33,6 +34,29 @@ from src.ui.tabs.run_tab import RunTab
 def run_tab(tk_root):
     tab = RunTab(tk_root)
     yield tab
+    tab.destroy()
+
+
+@pytest.fixture()
+def run_tab_with_store(tk_root, tmp_path):
+    """RunTab wired with a real VerifyPromptStore + factory.
+
+    Most tests above use a bare RunTab — they exercise the in-memory
+    dict path only. The persistence path needs both the store and the
+    factory: ``_restore_pending_verify_prompt`` is a no-op when either
+    is missing.
+    """
+    store = VerifyPromptStore(tmp_path / "verify_prompts.json")
+
+    def _factory(profile_id):
+        return (MagicMock(), MagicMock(), MagicMock())
+
+    tab = RunTab(
+        tk_root,
+        verify_prompt_store=store,
+        verify_prompt_factory=_factory,
+    )
+    yield tab, store
     tab.destroy()
 
 
@@ -189,3 +213,68 @@ class TestClearAlerts:
 
         assert run_tab._verify_prompts == {}
         assert run_tab.log_tree.get_children("") == ()
+
+
+class TestPersistentStoreInteraction:
+    """Regression guards for the 21/05/2026 double-prompt issue.
+
+    A Fast-mode prompt raised in run N was rendered twice in run N+1
+    because ``clear_log`` wiped only the in-memory dict, leaving the
+    JSON store untouched. On the next profile-switch / app-restart
+    the stale entry was replayed by ``_restore_pending_verify_prompt``
+    and stacked with the fresh prompt from the new run.
+
+    Two contracts to enforce:
+    * ``clear_log`` (called at the start of every new run) MUST purge
+      the persistent store along with the in-memory dict.
+    * ``set_current_profile_id`` → ``_reload_log_history`` (called on
+      profile-switch) MUST keep the store intact so the immediately
+      following ``_restore_pending_verify_prompt`` can replay it.
+    """
+
+    def test_clear_log_purges_verify_prompt_store(
+        self, run_tab_with_store
+    ) -> None:
+        tab, store = run_tab_with_store
+        # Bind the tab to the profile id before raising the prompt:
+        # ``show_verify_prompt`` only renders (and registers in the
+        # in-memory dict) when ``profile_id == current_profile_id``,
+        # and ``clear_alerts`` walks that dict to reach the store.
+        tab.set_current_profile_id("profile-abc")
+        tab.show_verify_prompt(
+            profile_name="TestNP",
+            periodic_armed=True,
+            interval_days=7,
+            on_verify_now=MagicMock(),
+            on_dismiss=MagicMock(),
+            on_dont_ask_again=MagicMock(),
+            profile_id="profile-abc",
+        )
+        assert store.get("profile-abc") is not None
+        assert tab._verify_prompts
+
+        tab.clear_log()
+
+        assert store.get("profile-abc") is None
+        assert tab._verify_prompts == {}
+
+    def test_reload_log_history_keeps_store_intact(
+        self, run_tab_with_store
+    ) -> None:
+        tab, store = run_tab_with_store
+        store.set(
+            "profile-abc",
+            {
+                "profile_name": "TestNP",
+                "periodic_armed": True,
+                "interval_days": 7,
+            },
+        )
+
+        # Triggers _clear_run_state + _reload_log_history +
+        # _restore_pending_verify_prompt (CHANGE from "" to "profile-abc").
+        tab.set_current_profile_id("profile-abc")
+
+        assert store.get("profile-abc") is not None
+        # And the restored prompt is visible in the tree.
+        assert tab._verify_prompts

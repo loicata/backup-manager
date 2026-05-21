@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.18] - 2026-05-21
+
+### Fixed
+- **"Destinations unavailable" took ~32 s to appear when a USB drive was unplugged** (21/05/2026 user report on the v3.7.17 install). ``LocalStorage._wait_for_drive_online`` could not tell a drive that was *unplugged* from a drive that was just *sleeping*: both cases entered the same backoff sequence ``(0.3, 0.5, 1.0, 2.0, 4.0, 8.0)`` = 15.8 s, then ``_precheck_and_run`` issued a silent retry that paid the cost again → ~32 s before the popup. Fix: introspect the drive letter root (e.g. ``E:\``) BEFORE the backoff. If ``Path("E:\\").exists()`` returns False immediately, the drive is physically unplugged — no amount of wake-up retry will resurrect it; return False in <100 ms. If the root is present but the dest subdirectory is not (the legitimate case the wake-up loop targets — drive freshly mounted, subdir not yet enumerated), the loop runs as before. Net effect: unplugged-drive precheck drops from ~32 s to ~250 ms (initial + silent retry).
+- **``time`` is now imported at the module level** instead of locally inside ``_wait_for_drive_online``. The local import was a leftover from an earlier refactor; lifting it lets the wake-up loop be mocked in unit tests via ``patch("src.storage.local.time.sleep", …)``.
+
+### Tests
+- +3 tests in ``tests/unit/test_local_storage_wake_up.py``: fast-fail when ``Path.exists`` is universally False (no sleeps, <1 s wall-clock), wake-up loop still runs when only the dest subdir is missing but the drive letter root is reachable (regression guard against the fast-fail check firing on subdir-only-missing), and a sanity check on the existing-dest happy path.
+
 ## [3.7.17] - 2026-05-21
 
 ### Fixed

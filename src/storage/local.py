@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 from pathlib import Path
 from typing import BinaryIO
 
@@ -291,9 +292,6 @@ class LocalStorage(StorageBackend):
 
         def _wait_for_drive_online() -> bool:
             """Return True as soon as ``self._dest`` can be stat'd."""
-            import os as _os
-            import time as _time
-
             # Cheap initial check — responsive drives return instantly.
             if self._dest.exists():
                 return True
@@ -303,16 +301,31 @@ class LocalStorage(StorageBackend):
             s = str(self._dest)
             if len(s) >= 2 and s[1] == ":":
                 root = f"{s[0]}:\\"
+
+            # Fast-fail: if the drive letter root itself is not
+            # stat-able, the drive is physically unplugged (not just
+            # sleeping). No amount of wake-up retry will resurrect it
+            # — burning 15.8 s of backoff per attempt + 16 s for the
+            # silent retry in ``_precheck_and_run`` produced a 32 s
+            # delay before "Destinations unavailable" appeared on
+            # the 21/05/2026 user report. A missing drive letter is
+            # the unambiguous "drive is gone" signal: report it
+            # immediately. A mounted drive whose subdir is still
+            # finishing enumeration (the case the wake-up loop is
+            # actually for) still falls through to the loop below.
+            if root and not Path(root).exists():
+                return False
+
             # Cumulative sleep budget ~15.8s. External USB drives in
             # deep power-save can need 10-12s to fully enumerate on the
             # first probe after reconnection; the 8.0 s tail covers that
             # long tail without penalising healthy drives (which return
             # on the first ``exists()`` check above).
             for attempt, delay in enumerate((0.3, 0.5, 1.0, 2.0, 4.0, 8.0)):
-                _time.sleep(delay)
+                time.sleep(delay)
                 if root and attempt == 1:
                     with contextlib.suppress(OSError):
-                        _os.listdir(root)  # Wake the volume
+                        os.listdir(root)  # Wake the volume
                 if self._dest.exists():
                     return True
             return False

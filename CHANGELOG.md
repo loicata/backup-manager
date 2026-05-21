@@ -5,6 +5,16 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.19] - 2026-05-22
+
+### Fixed
+- **3.7.18 fast-fail was rendered ineffective by an upstream slow path in ``drive_serial.resolve_local_path``.** User report (21/05/2026, v3.7.18 install): the "Destinations unavailable" popup STILL took ~60-90 s on a disconnected USB drive. ``backup_engine.create_backend(LOCAL)`` calls ``resolve_local_path`` BEFORE the ``LocalStorage`` instance reaches its own ``_wait_for_drive_online``. ``resolve_local_path`` ran (a) its own copy of the ``(0.3, 0.5, 1.0, 2.0, 4.0, 8.0)`` wake-up backoff (~15.8 s), then (b) spawned PowerShell via ``find_drive_by_serial`` to enumerate every mounted disk looking for the configured hardware serial (~2-5 s). With precheck + silent retry + health-check polling, the user saw five ``Drive not found for serial Y47800CN0JN7T5S (was E:)`` warnings spread over 60 s in ``backup_manager.log``. Fix: a new helper ``_drive_letter_root_present(path_str)`` short-circuits both paths — ``_probe_path_with_wake`` returns False in <100 ms when the drive letter root is missing (instead of burning the 15.8 s budget), and ``resolve_local_path`` skips the PowerShell enumeration entirely when the drive letter is gone (no mounted device can carry that serial). Subdir-only-missing case (drive mounted, configured folder deleted/moved) preserves the original behaviour so a legitimate letter reassignment is still detected.
+- **``import os`` and ``import time`` hoisted to module scope in ``src/storage/drive_serial.py``** (same rationale as the 3.7.18 lift in ``local.py``): the local imports inside ``_probe_path_with_wake`` prevented unit-test mocking via ``patch("src.storage.drive_serial.time.sleep", …)``.
+
+### Tests
+- +5 tests in ``tests/unit/test_drive_serial_fast_fail.py``: ``_probe_path_with_wake`` fast-fails on missing drive letter (zero sleeps, <1 s), wake-up loop still runs on subdir-only-missing scenario (regression guard), ``resolve_local_path`` skips ``find_drive_by_serial`` when the drive letter is gone, ``resolve_local_path`` still calls ``find_drive_by_serial`` when the drive letter is mounted (subdir reassignment case), and the no-serial + missing-letter combo also fast-fails through the early branch.
+- **1 existing test updated** (``test_drive_serial.py::test_resolves_to_new_letter``): the mock now distinguishes the drive letter root (present) from the subdir (missing) so the fast-fail check is correctly bypassed and the legitimate letter-reassignment scenario still exercises ``find_drive_by_serial``.
+
 ## [3.7.18] - 2026-05-21
 
 ### Fixed

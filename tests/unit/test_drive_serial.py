@@ -197,7 +197,17 @@ class TestResolveLocalPath:
     @patch("src.storage.drive_serial.find_drive_by_serial")
     @patch("src.storage.drive_serial.Path")
     def test_resolves_to_new_letter(self, mock_path, mock_find):
-        mock_path.return_value.exists.return_value = False
+        # Drive root ``G:\`` is present (the drive IS mounted at G:,
+        # but the configured subfolder was deleted or moved). The
+        # fast-fail in 3.7.19's ``_drive_letter_root_present`` must
+        # NOT kick in here — we want the PowerShell enumeration to
+        # detect the letter reassignment to H:.
+        def path_factory(p):
+            m = MagicMock()
+            m.exists.return_value = str(p).endswith(":\\")  # only root exists
+            return m
+
+        mock_path.side_effect = path_factory
         mock_find.return_value = "H"
         result = resolve_local_path("G:\\Backups\\Data", "SER1")
         assert result == "H:\\Backups\\Data"

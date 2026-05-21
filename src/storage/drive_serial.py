@@ -9,8 +9,10 @@ Non-Windows platforms: all functions return None / passthrough.
 
 import contextlib
 import logging
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Hide the console window when spawning PowerShell on Windows
@@ -160,6 +162,30 @@ def _enumerate_drive_serials() -> dict[str, str]:
     return mapping
 
 
+def _drive_letter_root_present(path_str: str) -> bool:
+    r"""Return False fast when the drive letter root of ``path_str`` is missing.
+
+    On Windows, a path like ``E:\Backup Manager`` has the drive
+    letter root ``E:\``. If ``Path("E:\\").exists()`` is False, the
+    drive is physically unplugged — no amount of wake-up retry will
+    resurrect it, and no PowerShell drive enumeration will find its
+    serial on a non-mounted device.
+
+    For non-Windows-drive-letter paths (POSIX absolute, UNC share,
+    relative), we cannot make this judgment from the path alone, so
+    we conservatively return True and let the caller proceed with
+    its full check.
+
+    Returns:
+        True when the path is not a drive-letter path, OR when the
+        drive letter root is stat-able. False only when the drive
+        letter root is provably missing.
+    """
+    if len(path_str) < 2 or path_str[1] != ":":
+        return True
+    return Path(f"{path_str[0]}:\\").exists()
+
+
 def _probe_path_with_wake(path_str: str) -> bool:
     """Return True if ``path_str`` becomes readable within ~16 seconds.
 
@@ -180,13 +206,21 @@ def _probe_path_with_wake(path_str: str) -> bool:
         3.8s  4th attempt
         7.8s  5th attempt
         15.8s last chance (covers deep-sleep USB SSD wake)
-    """
-    import os as _os
-    import time as _time
 
+    Fast-fail (3.7.19): when the drive letter root itself is missing,
+    skip the wake-up loop and return False immediately. Burned ~15.8 s
+    per call on a physically-unplugged USB drive — amplified by the
+    silent retry and health-check polling in ``_precheck_and_run`` to
+    a 60-90 s wall-clock delay before the "Destinations unavailable"
+    popup appeared (21/05/2026 user report on the v3.7.18 install).
+    """
     p = Path(path_str)
     if p.exists():
         return True
+
+    # Fast-fail before paying the wake-up budget.
+    if not _drive_letter_root_present(path_str):
+        return False
 
     # Try to force Windows to bring the volume online by reading
     # its drive root (e.g. ``G:\``). This is a cheap filesystem
@@ -195,10 +229,10 @@ def _probe_path_with_wake(path_str: str) -> bool:
         if len(path_str) >= 2 and path_str[1] == ":":
             root = f"{path_str[0]}:\\"
             with contextlib.suppress(OSError):
-                _os.listdir(root)  # Side effect only: wake the volume
+                os.listdir(root)  # Side effect only: wake the volume
 
     for attempt, delay in enumerate((0.3, 0.5, 1.0, 2.0, 4.0, 8.0)):
-        _time.sleep(delay)
+        time.sleep(delay)
         if attempt == 2:
             # After two naive retries, poke the drive root to wake
             # a stubborn device before the last attempts.
@@ -239,6 +273,20 @@ def resolve_local_path(destination_path: str, device_serial: str) -> str:
 
     old_letter = destination_path[0].upper()
     relative = destination_path[2:]  # Everything after "X:" (includes leading \)
+
+    # Fast-fail (3.7.19): if the drive letter root is gone, the drive
+    # is physically unplugged — no mounted device can carry this
+    # serial number, so the PowerShell enumeration would just confirm
+    # the obvious slowly (~2-5 s per call, ×N for precheck + silent
+    # retry + health-check polling = 60-90 s wall-clock). Skip it
+    # and return the original path; the caller's ``test_connection``
+    # will report the drive as unreachable in <100 ms.
+    if not _drive_letter_root_present(destination_path):
+        logger.info(
+            "Drive letter %s: missing — drive unplugged, skipping serial enumeration",
+            old_letter,
+        )
+        return destination_path
 
     new_letter = find_drive_by_serial(device_serial)
     if new_letter is None:

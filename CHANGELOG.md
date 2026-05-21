@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.20] - 2026-05-22
+
+### Fixed
+- **Daily GFS window now keeps at most ONE backup per calendar day**, fixing a visible divergence between the Retention-tab summary line ``Backups kept: 17`` and the rotator's actual output ``GFS rotation: kept 18`` (22/05/2026 user report on TestNP). Pre-3.7.20 the daily window retained EVERY backup with ``(now - dt).days < gfs_daily`` — so 18 FULL backups spread over 4 days (6 today + 1 yesterday + 4 two days ago + 7 three days ago) all fell within ``gfs_daily=8`` and the rotator kept all 18. The Retention-tab summary computes the count from a "1 per day" assumption, hence the 17/18 mismatch. New semantics: ``_apply_gfs_windows`` groups backups by UTC calendar day (``(year, month, day)`` key) and retains the most recent backup of each day, up to ``gfs_daily`` distinct days — mirroring the weekly window's "1 per ISO week" and the monthly window's "1 per month" for predictability. Two DST tests in ``tests/unit/test_rotator_calendar_edges.py`` were updated to pin the new "most recent wins within a UTC day" contract (their prior assertions covered the old "all-in-window" semantics).
+
+### Tests
+- +4 tests in ``tests/test_rotator_edge_cases.py::TestDailyWindowOnePerDay``: six backups on the same day collapse to one (regression guard for the 22/05 report), four distinct days each keep their most-recent backup (mirrors the user's actual distribution), one-backup-per-day setup is unchanged (regression guard against over-pruning a well-behaved schedule), and the window correctly caps at ``gfs_daily`` distinct days.
+- **2 existing tests updated** in ``tests/unit/test_rotator_calendar_edges.py::TestDstTransitions``: ``test_dst_spring_forward_does_not_split_daily_window`` is now ``…_keeps_most_recent_of_day`` and ``test_dst_fall_back_does_not_double_count`` is now ``…_orders_correctly_in_daily_slot``. Both retain the original goal (pinning UTC ordering against DST shifts) but their assertions reflect the new "1 per UTC day" outcome.
+
 ## [3.7.19] - 2026-05-22
 
 ### Fixed

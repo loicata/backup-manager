@@ -60,15 +60,19 @@ def _make_backend(backups: list[dict]) -> MagicMock:
 class TestDstTransitions:
     """The rotator is tz-aware (UTC) so DST shifts must not split days."""
 
-    def test_dst_spring_forward_does_not_split_daily_window(self):
+    def test_dst_spring_forward_keeps_most_recent_of_day(self):
         """Two backups straddling EU spring-forward (2026-03-29 01:00 UTC)
-        are both inside a 1-day window when ``now`` is the same evening UTC.
+        share the same UTC calendar day. Under the 3.7.20 "1 per day"
+        semantics only the more recent survives — and importantly it
+        IS the more recent ("after"), proving UTC ordering wins over
+        any naive-local confusion.
 
-        Without the UTC normalisation a naive ``(local_now - local_dt).days``
-        would gain or lose an hour and could cap the window at 0 days for
-        the older backup, evicting it before the user expects.
+        Without the UTC normalisation a naive comparison could put
+        ``after`` before ``before`` on the wall clock (Paris 03:30 might
+        compare as "earlier" than Paris 01:30 of the previous DST window
+        in some implementations) and evict the wrong backup.
         """
-        # 2026-03-29: in the UE Paris time, 02:00 jumps to 03:00.
+        # 2026-03-29: in EU Paris time, 02:00 jumps to 03:00.
         # In UTC the moment is 2026-03-29 01:00 — unaffected.
         before = datetime(2026, 3, 29, 0, 30, tzinfo=UTC)  # 01:30 Paris
         after = datetime(2026, 3, 29, 1, 30, tzinfo=UTC)  # 03:30 Paris (post-jump)
@@ -86,13 +90,23 @@ class TestDstTransitions:
             mock_dt.fromtimestamp = datetime.fromtimestamp
             rotate_backups(backend, retention, profile_name="Pf")
 
-        # Both within the 1-day window — neither must be evicted.
-        backend.delete_backup.assert_not_called()
+        # Same UTC calendar day → only the most recent (``after``)
+        # survives the daily slot; the older ``before`` is deleted.
+        # This pins UTC ordering: a naive comparison could mis-rank
+        # the two and evict ``after`` instead.
+        deleted = [c.args[0] for c in backend.delete_backup.call_args_list]
+        assert deleted == ["Pf_FULL_2026-03-29_013000"]
 
-    def test_dst_fall_back_does_not_double_count(self):
+    def test_dst_fall_back_orders_correctly_in_daily_slot(self):
         """At 2026-10-25 the EU "falls back" — wall-clock 02:30 happens
         twice. Backups before and inside the repeated hour must still be
         ordered correctly when stored as UTC timestamps.
+
+        With the 3.7.20 "1 per day" semantics, both backups share the
+        same UTC calendar day so only the most recent (``second``)
+        survives. This test pins that ``second`` is correctly identified
+        as more recent than ``first`` — a naive wall-clock comparison
+        would call them equal and pick either.
         """
         # Before the cutover: 00:30 UTC = 02:30 Paris (CEST, UTC+2)
         # After the cutover:  01:30 UTC = 02:30 Paris (CET,  UTC+1)
@@ -113,8 +127,10 @@ class TestDstTransitions:
             mock_dt.fromtimestamp = datetime.fromtimestamp
             rotate_backups(backend, retention, profile_name="Pf")
 
-        # Both within the daily window, neither pruned.
-        backend.delete_backup.assert_not_called()
+        # Same UTC calendar day → only ``second`` (more recent UTC
+        # instant) is retained.
+        deleted = [c.args[0] for c in backend.delete_backup.call_args_list]
+        assert deleted == ["Pf_FULL_2026-10-25_023001"]
 
 
 # ---------------------------------------------------------------------------

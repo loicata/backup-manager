@@ -162,17 +162,30 @@ def _apply_gfs_windows(
 ) -> None:
     """Apply daily/weekly/monthly GFS windows to the keep set.
 
-    - Daily window: inclusive lower-bound on age. A backup taken less
-      than ``gfs_daily`` whole days ago is retained. With a scheduled
-      daily run this yields exactly N backups in the window.
+    - Daily slots (3.7.20): grouped by calendar day in UTC. Each day in
+      the ``gfs_daily`` window retains the SINGLE most-recent backup of
+      that day. Pre-3.7.20 the daily window kept EVERY backup within
+      ``gfs_daily`` days, which diverged from the Retention-tab summary
+      (``Backups kept: 17`` assumed 1 per day) when the user ran several
+      backups on the same calendar day (22/05/2026 report: 18 TestNP
+      FULLs across 4 days kept by ``gfs_daily=8``). The new semantics
+      mirrors the weekly (1/ISO-week) and monthly (1/month) slots for
+      predictability.
     - Weekly slots: grouped by ISO-8601 calendar week. Previously used
       ``strftime("%Y-W%W")`` which is non-ISO and double-counted
       backups straddling a year boundary (Dec 31 = W52 in year Y;
       Jan 1 = W00 in year Y+1 — different keys for the same ISO week).
     """
-    # Keep daily backups (last N days) — all backups within the window
+    # Daily slots — FULL or DIFF, grouped by calendar day, most-recent
+    # per day. ``dated_backups`` is already sorted newest-first, so
+    # the first occurrence of each calendar-day key is the winner.
+    daily_dates: set[tuple[int, int, int]] = set()
     for backup, dt in dated_backups:
-        if (now - dt).days < retention.gfs_daily:
+        if (now - dt).days >= retention.gfs_daily:
+            continue
+        day_key = (dt.year, dt.month, dt.day)
+        if day_key not in daily_dates:
+            daily_dates.add(day_key)
             keep.add(backup["name"])
 
     # Keep weekly backups (last N weeks) — FULL only, grouped by ISO week

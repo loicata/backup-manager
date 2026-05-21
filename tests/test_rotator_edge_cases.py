@@ -461,6 +461,161 @@ class TestRotatorEdgeCases:
         backend.delete_backup.assert_called_once_with("Beta_FULL_2026-01-01_120000")
 
 
+class TestDailyWindowOnePerDay:
+    """Daily window keeps at most ONE backup per calendar day.
+
+    Regression guard for the 22/05/2026 user report (TestNP profile,
+    18 FULL backups spread over 4 days with 6 of them on the most
+    recent day): the rotator kept all 18 because every backup fell
+    within the ``gfs_daily=8`` window. The UI summary line on the
+    Retention tab said ``Backups kept: 17`` (its formula assumes
+    1 backup per day), creating a visible divergence between the
+    promised retention and the actual on-disk state.
+
+    New semantics: the daily window groups backups by calendar day
+    (in UTC, mirroring the rotator's existing UTC normalisation)
+    and retains only the most recent of each day, up to ``gfs_daily``
+    distinct days. Mirrors the weekly window (1 per ISO week) and
+    the monthly window (1 per calendar month) for predictability.
+    """
+
+    def test_six_backups_today_collapse_to_one(self):
+        """6 backups on the same day → only the most recent is retained.
+
+        Without this fix all 6 fell within ``gfs_daily=7`` and the
+        rotator kept them all, diverging from the UI summary.
+        """
+        now = datetime(2026, 5, 22, 23, 50)
+        # All 6 timestamps land on 2026-05-21 (UTC). With UTC-aware
+        # datetimes the calendar-day grouping is deterministic.
+        backups = [
+            _backup(f"profile_FULL_2026-05-21_{h:02d}0000", datetime(2026, 5, 21, h, 0))
+            for h in (8, 12, 14, 18, 20, 22)
+        ]
+        backend = _make_backend(backups)
+        # gfs_daily=7 means "keep up to 7 distinct days of history".
+        # All 6 backups are on a single day → only one retained.
+        retention = RetentionConfig(gfs_daily=7, gfs_weekly=0, gfs_monthly=0)
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            rotate_backups(backend, retention)
+
+        deleted_names = sorted(c.args[0] for c in backend.delete_backup.call_args_list)
+        # The most recent (h=22) survives; the five older same-day
+        # backups are deleted.
+        assert deleted_names == [
+            "profile_FULL_2026-05-21_080000",
+            "profile_FULL_2026-05-21_120000",
+            "profile_FULL_2026-05-21_140000",
+            "profile_FULL_2026-05-21_180000",
+            "profile_FULL_2026-05-21_200000",
+        ]
+
+    def test_multiple_days_each_keep_their_most_recent(self):
+        """Each calendar day in the daily window keeps exactly one backup.
+
+        Mirrors the user's actual 22/05 distribution (6 today + 1
+        yesterday + 4 two days ago + 7 three days ago = 4 distinct
+        calendar days, all within ``gfs_daily=8``).
+        """
+        now = datetime(2026, 5, 22, 23, 50)
+        # 6 backups on 05-21 (day "today" relative to now).
+        backups = [
+            _backup(f"p_FULL_2026-05-21_{h:02d}0000", datetime(2026, 5, 21, h, 0))
+            for h in (8, 12, 14, 18, 20, 22)
+        ]
+        # 1 backup on 05-20.
+        backups.append(_backup("p_FULL_2026-05-20_100000", datetime(2026, 5, 20, 10, 0)))
+        # 4 backups on 05-19.
+        backups.extend(
+            _backup(f"p_FULL_2026-05-19_{h:02d}0000", datetime(2026, 5, 19, h, 0))
+            for h in (1, 5, 12, 19)
+        )
+        # 7 backups on 05-18.
+        backups.extend(
+            _backup(f"p_FULL_2026-05-18_{h:02d}0000", datetime(2026, 5, 18, h, 0))
+            for h in (8, 10, 12, 14, 16, 18, 22)
+        )
+        backend = _make_backend(backups)
+        retention = RetentionConfig(gfs_daily=8, gfs_weekly=0, gfs_monthly=0)
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            rotate_backups(backend, retention)
+
+        deleted_names = {c.args[0] for c in backend.delete_backup.call_args_list}
+        # The most recent of each calendar day survives:
+        survivors = {
+            "p_FULL_2026-05-21_220000",
+            "p_FULL_2026-05-20_100000",
+            "p_FULL_2026-05-19_190000",
+            "p_FULL_2026-05-18_220000",
+        }
+        all_names = {b["name"] for b in backups}
+        assert deleted_names == all_names - survivors
+        assert len(survivors) == 4
+        # And the rotator's reported kept count matches the survivors.
+        # (verified indirectly: total backups - deleted = survivors)
+        assert len(all_names) - len(deleted_names) == len(survivors)
+
+    def test_single_backup_per_day_preserved_unchanged(self):
+        """One backup per day, all within gfs_daily → none deleted.
+
+        Regression guard: the 1-per-day rule must not over-prune a
+        well-behaved schedule (one daily backup).
+        """
+        now = datetime(2026, 5, 22, 23, 0)
+        backups = [
+            _backup(f"p_FULL_2026-05-{d:02d}_120000", datetime(2026, 5, d, 12, 0))
+            for d in (16, 17, 18, 19, 20, 21, 22)
+        ]
+        backend = _make_backend(backups)
+        retention = RetentionConfig(gfs_daily=7, gfs_weekly=0, gfs_monthly=0)
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            rotate_backups(backend, retention)
+
+        backend.delete_backup.assert_not_called()
+
+    def test_daily_window_caps_at_gfs_daily_distinct_days(self):
+        """Days older than ``gfs_daily`` fall outside the window."""
+        now = datetime(2026, 5, 22, 23, 0)
+        backups = [
+            _backup(
+                f"p_FULL_2026-05-{d:02d}_120000",
+                datetime(2026, 5, d, 12, 0),
+            )
+            for d in range(10, 23)  # 13 distinct days, 05-10 → 05-22
+        ]
+        backend = _make_backend(backups)
+        retention = RetentionConfig(
+            gfs_daily=3,  # keep last 3 days only
+            gfs_weekly=0,
+            gfs_monthly=0,
+        )
+
+        with patch("src.core.phases.rotator.datetime") as mock_dt:
+            mock_dt.now.return_value = now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            rotate_backups(backend, retention)
+
+        # Most-recent-of-each-day for the 3 most recent days survive
+        # PLUS the most-recent-overall (which is the same as 05-22).
+        deleted_names = {c.args[0] for c in backend.delete_backup.call_args_list}
+        survivors = {
+            "p_FULL_2026-05-22_120000",
+            "p_FULL_2026-05-21_120000",
+            "p_FULL_2026-05-20_120000",
+        }
+        all_names = {b["name"] for b in backups}
+        assert deleted_names == all_names - survivors
+
+
 class TestBackupTypeClassifier:
     """Profile names containing _FULL_/_DIFF_ must not fool the classifier."""
 

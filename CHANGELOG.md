@@ -5,6 +5,20 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.21] - 2026-05-22
+
+### Added
+- **Cross-profile email config auto-fill and propagation.** Two UX wins for users who share the same notification target across every profile (the common case):
+  - **New profile creation**: if any existing profile carries an email (``username`` non-empty), the new profile is auto-seeded with a deep-copy of that ``EmailConfig`` (SMTP host/port, TLS, username, password, from/to addresses, send_on_success/failure, enabled flag). The wizard's own email step still wins if the user fills it in there. Saves a full SMTP setup on every new profile.
+  - **Email saved on an existing profile**: when ``Save`` is clicked on a profile whose email becomes configured (``username`` non-empty), the same ``EmailConfig`` is propagated to every OTHER profile whose email is not yet configured. Profiles that already carry their own email are preserved verbatim — the user has explicitly customised them and we do not overwrite their intent. The propagation is automatic (no confirmation popup) and logged at INFO level with the list of receiving profile names.
+
+  "Configured" is defined by ``EmailConfig.username`` being non-empty (the SMTP authentication username is the strongest "user filled SMTP in" signal — an enabled email without a username would fail to send). Whitespace-only usernames are treated as empty so a stray space cannot lock a profile out of propagation.
+
+  Implementation in ``src/core/email_propagation.py`` (I/O-free, fully unit-testable): ``pick_email_source(profiles)``, ``propagate_email_to_unconfigured(source, others)``, ``is_email_unconfigured(email)``. Caller (``BackupManagerApp._new_profile`` / ``._save_profile``) handles persistence; persistence failures on a propagation target are logged and swallowed so they cannot abort the source profile's save.
+
+### Tests
+- +15 tests in ``tests/unit/test_email_propagation.py``: ``is_email_unconfigured`` covers default, whitespace-only, and half-filled (SMTP host set but no username) cases; ``pick_email_source`` covers empty/no-configured/single/multi-configured iterations and the iteration-order contract; ``propagate_email_to_unconfigured`` covers no-op when source is unconfigured, full-EmailConfig fan-out, skip-already-configured, source-by-id exclusion (defensive against unfiltered callers), deep-copy isolation (mutating source after propagation does not leak), iteration-order preservation in the returned list, and the empty-others edge case.
+
 ## [3.7.20] - 2026-05-22
 
 ### Fixed

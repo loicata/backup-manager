@@ -1545,6 +1545,37 @@ class BackupManagerApp:
         email = self.tab_email.collect_config()
         profile.email = email["email"]
 
+        # Propagate the freshly-saved email config to every OTHER
+        # profile whose email is not yet configured. Triggers only
+        # when the saved profile itself carries an email; profiles
+        # that already have their own email are preserved. Caller is
+        # responsible for persisting the mutated profiles (we do it
+        # here right after the propagation call). See
+        # ``src/core/email_propagation.py`` for the contract.
+        from src.core.email_propagation import propagate_email_to_unconfigured
+
+        propagated = propagate_email_to_unconfigured(profile, self._profiles)
+        for other in propagated:
+            try:
+                self.config_manager.save_profile(other)
+            except OSError as exc:
+                # Persistence failure on a single propagation target
+                # must not abort the save of the source profile. The
+                # in-memory copy stays consistent; the user can re-edit
+                # the affected profile manually.
+                logger.warning(
+                    "Could not persist propagated email on profile %r: %s",
+                    other.name,
+                    exc,
+                )
+        if propagated:
+            logger.info(
+                "Propagated email config from %r to %d unconfigured profile(s): %s",
+                profile.name,
+                len(propagated),
+                [p.name for p in propagated],
+            )
+
         self.config_manager.save_profile(profile)
 
         # Immediate user feedback BEFORE the secondary work (registry
@@ -1687,6 +1718,30 @@ class BackupManagerApp:
 
         if profile is None:
             return
+
+        # Auto-fill the email config from an existing profile when the
+        # wizard did not capture one. A backup user typically reuses
+        # the same SMTP / recipient across every profile; asking them
+        # to re-enter the credentials each time is friction. We pick
+        # the first sidebar-order profile that already has an email
+        # ``username`` set (the strongest "user filled SMTP" signal —
+        # see ``src/core/email_propagation.py``).
+        from src.core.email_propagation import (
+            is_email_unconfigured,
+            pick_email_source,
+        )
+
+        if is_email_unconfigured(profile.email):
+            seed = pick_email_source(self._profiles)
+            if seed is not None:
+                import copy as _copy
+
+                profile.email = _copy.deepcopy(seed.email)
+                logger.info(
+                    "Auto-filled email config on new profile %r from %r",
+                    profile.name,
+                    seed.name,
+                )
 
         self.config_manager.save_profile(profile)
         # Seed BEFORE the slow UI refresh — see helper docstring for the

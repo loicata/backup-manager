@@ -492,13 +492,21 @@ class InAppScheduler:
 
         target_today = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
 
+        # The "due" check compares ``last`` to TODAY's scheduled
+        # point (``target_today``), not to today's date. A manual run
+        # earlier today (before the scheduled hour) used to be enough
+        # to make ``last.date() == now.date()`` and suppress the
+        # scheduled trigger for the whole day. With ``last < target_today``
+        # the scheduled slot fires as long as no run has happened
+        # since the cron point today — manual runs from earlier in
+        # the same day no longer eat the slot.
         if sched.frequency == ScheduleFrequency.DAILY:
-            return now >= target_today and last.date() < now.date()
+            return now >= target_today and last < target_today
 
         elif sched.frequency == ScheduleFrequency.WEEKLY:
             if now.weekday() != sched.day_of_week:
                 return False
-            return now >= target_today and (now - last).days >= 1
+            return now >= target_today and last < target_today
 
         elif sched.frequency == ScheduleFrequency.MONTHLY:
             import calendar
@@ -507,7 +515,7 @@ class InAppScheduler:
             day = min(sched.day_of_month, max_day)
             if now.day != day:
                 return False
-            return now >= target_today and (now - last).days >= 1
+            return now >= target_today and last < target_today
 
         return False
 

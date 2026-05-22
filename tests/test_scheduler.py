@@ -160,6 +160,51 @@ class TestInAppScheduler:
         scheduler._state.set_last_trigger(profile.id, two_hours_ago)
         assert scheduler._is_due(profile, datetime.now()) is True
 
+    def test_is_due_daily_after_manual_run_same_day_before_scheduled(self, tmp_path):
+        """Manual run BEFORE the scheduled hour today must NOT eat the slot.
+
+        Regression guard for the 2026-05-22 user incident:
+        manual backup at 01:33, PC powered off, restarted at 11:30
+        with scheduled time at 10:00. The previous date-only check
+        (``last.date() < now.date()``) marked the slot as consumed
+        because the manual run fell on the same calendar day. The new
+        check compares ``last`` to ``target_today`` directly, so a
+        run that happened BEFORE 10:00 today no longer suppresses the
+        scheduled 10:00 trigger.
+        """
+        scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
+        profile = BackupProfile(
+            schedule=ScheduleConfig(
+                enabled=True, frequency=ScheduleFrequency.DAILY, time="10:00"
+            )
+        )
+        now = datetime.now().replace(hour=11, minute=30, second=0, microsecond=0)
+        manual_run_earlier = now.replace(hour=1, minute=33)
+        scheduler._state.set_last_trigger(profile.id, manual_run_earlier)
+
+        assert scheduler._is_due(profile, now) is True
+
+    def test_is_due_daily_no_re_fire_after_scheduled_trigger(self, tmp_path):
+        """Trigger at or after today's scheduled time must suppress re-fire.
+
+        Symmetric guard: once the slot is consumed for today (either
+        by a scheduled trigger or a manual run AFTER 10:00), the
+        scheduler must not fire again the same day. Protects the
+        ``mark_triggered_now`` contract for runs that happened after
+        the cron point today.
+        """
+        scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
+        profile = BackupProfile(
+            schedule=ScheduleConfig(
+                enabled=True, frequency=ScheduleFrequency.DAILY, time="10:00"
+            )
+        )
+        now = datetime.now().replace(hour=15, minute=0, second=0, microsecond=0)
+        scheduled_run = now.replace(hour=10, minute=0)
+        scheduler._state.set_last_trigger(profile.id, scheduled_run)
+
+        assert scheduler._is_due(profile, now) is False
+
     def test_get_next_run_info_manual(self, tmp_path):
         scheduler = InAppScheduler(tmp_path, lambda: [], lambda p: None)
         profile = BackupProfile(schedule=ScheduleConfig(frequency=ScheduleFrequency.MANUAL))

@@ -5,6 +5,14 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.22] - 2026-05-22
+
+### Fixed
+- **Email report's "Backups available" line disagreed with the rotator's "kept" log line on a destination shared with other profiles.** User report (22/05/2026, v3.7.21 install): the post-backup email for ``My Backup`` reported ``Backups available: 9`` while the same run's log said ``GFS rotation: kept 6, deleted 0``. ``backup_engine._phase_rotate`` set ``ctx.result.backups_available = len(ctx.backend.list_backups())`` — the count of EVERY entry on the destination, including the 3 unrelated items (sidecars and another profile's backups on the shared cipango56 SFTP target). The rotator above had already filtered by ``sanitize_profile_name(profile.name) + "_"`` before counting; the engine was not. Fix: new ``_count_profile_backups(backups, profile_name)`` helper at the top of ``src/core/backup_engine.py`` mirrors the rotator's prefix filter and now feeds ``backups_available``. The email retention section now reads the same number as the log's ``kept`` line.
+
+### Tests
+- +8 tests in ``tests/unit/test_backups_available_filter.py``: empty list returns zero, empty profile name disables filtering (defensive fall-back for transient init states), foreign-profile entries on the same destination are filtered out, all-belong-to-profile returns the total, profile names with spaces are sanitised (mirrors ``sanitize_profile_name`` from ``local_writer``), ``"Backup"`` does not match ``"My_Backup_FULL_…"`` (anchor at start, no substring false positives), DIFF backups also match the prefix (the next segment may be ``FULL`` or ``DIFF`` — both belong), and an entry missing the ``name`` key is silently skipped (defensive).
+
 ## [3.7.21] - 2026-05-22
 
 ### Added

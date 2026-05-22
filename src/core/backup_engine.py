@@ -133,6 +133,35 @@ def _effective_auto_verify(profile: BackupProfile) -> bool:
     return profile.verification.auto_verify
 
 
+def _count_profile_backups(backups: list[dict], profile_name: str) -> int:
+    """Count the entries in ``backups`` that belong to ``profile_name``.
+
+    Mirrors the prefix filter that ``rotate_backups`` already applies
+    so the rotator's ``kept`` log line and the engine's
+    ``BackupResult.backups_available`` (used in the post-backup email)
+    cannot disagree when several profiles share the same destination
+    (the 22/05/2026 user report: ``Backups available: 9`` in the email
+    vs ``GFS rotation: kept 6`` in the log for the ``My Backup``
+    profile on a shared SFTP target).
+
+    Args:
+        backups: List of ``{"name": str, "modified": float, ...}``
+            entries as returned by ``StorageBackend.list_backups()``.
+        profile_name: Human-readable profile name. An empty string
+            disables filtering and returns the total — defensive
+            for transient states where the engine has no profile yet.
+
+    Returns:
+        Number of entries whose ``name`` starts with the sanitised
+        profile prefix (``sanitize_profile_name(profile_name) + "_"``).
+        Entries missing a ``name`` key are silently ignored.
+    """
+    if not profile_name:
+        return len(backups)
+    prefix = sanitize_profile_name(profile_name) + "_"
+    return sum(1 for b in backups if b.get("name", "").startswith(prefix))
+
+
 def _resolve_local_destination(storage: StorageConfig) -> str:
     """Resolve the local destination path using drive serial if needed.
 
@@ -2020,9 +2049,18 @@ class BackupEngine:
             profile_name=ctx.profile.name,
         )
 
-        # Count remaining backups on primary after rotation
+        # Count remaining backups on primary after rotation, filtered
+        # to the current profile so a destination shared with other
+        # profiles (typical for SFTP / NAS) does not inflate the figure
+        # surfaced in the post-backup email. Mirrors the prefix filter
+        # the rotator above already applied — without this match, the
+        # email reported ``Backups available: 9`` while the same run's
+        # log said ``GFS rotation: kept 6`` for the "My Backup" profile
+        # on a shared cipango56 SFTP target (22/05/2026 user report).
         with contextlib.suppress(Exception):
-            ctx.result.backups_available = len(ctx.backend.list_backups())
+            ctx.result.backups_available = _count_profile_backups(
+                ctx.backend.list_backups(), ctx.profile.name
+            )
 
         # Rotate mirrors with the same retention policy. Each mirror
         # backend needs its own cancel-check wiring so a user Cancel

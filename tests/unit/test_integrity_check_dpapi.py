@@ -27,11 +27,14 @@ test, but our local alias is not affected.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 # Capture the REAL functions before the conftest autouse fixture
 # replaces them with Mock objects. This binding survives because
 # imports happen during collection, before any fixture runs.
+from src.core.exceptions import DPAPIUnavailableError
 from src.security import integrity_check
 from src.security.integrity_check import (
     _DPAPI_MARKER,
@@ -39,6 +42,19 @@ from src.security.integrity_check import (
 from src.security.integrity_check import (
     _get_hmac_key as _real_get_hmac_key,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_plaintext_flag():
+    """Force the plaintext-fallback flag OFF before every test.
+
+    The flag is process-wide module state. A previous test that
+    enabled it would otherwise leak into the next test and silently
+    mask the strict-DPAPI behaviour we want to verify.
+    """
+    integrity_check._ALLOW_PLAINTEXT_FALLBACK = False
+    yield
+    integrity_check._ALLOW_PLAINTEXT_FALLBACK = False
 
 
 @pytest.fixture
@@ -123,18 +139,50 @@ class TestDpapiWrappingOnWindows:
         assert first == second
 
 
-class TestDpapiWrapFailureFallback:
-    """If DPAPI wrap fails the key must be stored IN CLEAR (no marker).
+class TestDpapiWrapStrictFailure:
+    """When DPAPI wrap fails on Windows, refuse to start by default.
 
-    The bug this guards against: if the wrap raises but the writer
-    still prepends ``_DPAPI_MARKER`` then the next ``_get_hmac_key``
-    call sees the marker, calls unwrap (which fails again), regenerates
-    a fresh key, and the cycle repeats forever — tamper detection is
-    silently neutralised because every run thinks it is the first run.
+    Hardening introduced after the audit found that the previous
+    warning-only fallback wrote the HMAC key in clear to disk —
+    silently neutralising tamper detection on ``app_checksums.json``
+    and ``.wbcommit``. The strict path now raises
+    ``DPAPIUnavailableError`` so the bootstrap surfaces a recovery
+    dialog instead of degrading without the user's knowledge.
     """
 
-    def test_clear_key_when_wrap_raises(self, isolated_appdata, monkeypatch):
+    def test_raises_dpapi_unavailable_by_default(self, isolated_appdata, monkeypatch):
+        """Plaintext-fallback off → wrap failure raises DPAPIUnavailableError."""
         monkeypatch.setattr(integrity_check.sys, "platform", "win32")
+
+        def failing_wrap(_data):
+            raise OSError("CryptProtectData failed (error 0x80090020)")
+
+        monkeypatch.setattr(integrity_check, "_dpapi_wrap", failing_wrap)
+
+        with pytest.raises(DPAPIUnavailableError) as exc_info:
+            _real_get_hmac_key()
+        assert exc_info.value.phase == "wrap"
+        # No half-written file on disk when raising — the caller can
+        # safely retry after fixing the environment.
+        assert not _key_path(isolated_appdata).exists()
+
+
+class TestDpapiWrapPlaintextFallback:
+    """``--allow-plaintext-keys`` opt-in restores the legacy clear-key path.
+
+    The bug the legacy fallback guards against: if the wrap raises
+    but the writer still prepends ``_DPAPI_MARKER``, the next
+    ``_get_hmac_key`` call sees the marker, calls unwrap (which
+    fails again), regenerates a fresh key, and the cycle repeats
+    forever — tamper detection silently neutralised because every
+    run thinks it is the first run. The plaintext fallback must
+    therefore write WITHOUT the marker so the next read recognises
+    the file as legacy plain and returns the same bytes.
+    """
+
+    def test_clear_key_when_wrap_raises_and_flag_set(self, isolated_appdata, monkeypatch):
+        monkeypatch.setattr(integrity_check.sys, "platform", "win32")
+        integrity_check._ALLOW_PLAINTEXT_FALLBACK = True
 
         def failing_wrap(_data):
             raise OSError("CryptProtectData failed (error 0x80090020)")
@@ -154,6 +202,7 @@ class TestDpapiWrapFailureFallback:
     def test_clear_key_is_reused_on_next_read(self, isolated_appdata, monkeypatch):
         """A clear-stored key is recognised as legacy plain on the next read."""
         monkeypatch.setattr(integrity_check.sys, "platform", "win32")
+        integrity_check._ALLOW_PLAINTEXT_FALLBACK = True
 
         def failing_wrap(_data):
             raise OSError("DPAPI down")
@@ -178,6 +227,51 @@ class TestDpapiWrapFailureFallback:
         # File still in clear (no implicit re-wrap on read).
         raw = _key_path(isolated_appdata).read_bytes()
         assert not raw.startswith(_DPAPI_MARKER)
+
+
+class TestEnablePlaintextFallback:
+    """``enable_plaintext_fallback()`` flips the module-level switch."""
+
+    def test_enable_sets_flag(self, monkeypatch):
+        assert integrity_check._ALLOW_PLAINTEXT_FALLBACK is False
+        integrity_check.enable_plaintext_fallback()
+        assert integrity_check._ALLOW_PLAINTEXT_FALLBACK is True
+        assert integrity_check.is_plaintext_fallback_allowed() is True
+
+    def test_is_plaintext_fallback_allowed_reflects_flag(self, monkeypatch):
+        integrity_check._ALLOW_PLAINTEXT_FALLBACK = False
+        assert integrity_check.is_plaintext_fallback_allowed() is False
+        integrity_check._ALLOW_PLAINTEXT_FALLBACK = True
+        assert integrity_check.is_plaintext_fallback_allowed() is True
+
+
+class TestKeyFilePermissions:
+    """``.integrity_key`` is written with mode 0o600 on POSIX.
+
+    NTFS ignores the POSIX mode (file appears 0o666 to ``stat``), so
+    the test is skipped on Windows — the protection there comes from
+    DPAPI wrapping + %APPDATA% ACLs. On Linux/macOS the 0o600 mode is
+    the only thing standing between the (possibly plaintext-fallback)
+    key and other local users.
+    """
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions ignored by NTFS")
+    def test_integrity_key_file_is_0o600_on_posix(self, isolated_appdata, monkeypatch):
+        monkeypatch.setattr(integrity_check.sys, "platform", "linux")
+        _real_get_hmac_key()
+        mode = _key_path(isolated_appdata).stat().st_mode & 0o777
+        assert mode == 0o600, (
+            f"Expected 0o600 on .integrity_key, got {oct(mode)} — "
+            f"local user secrets are world-readable"
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions ignored by NTFS")
+    def test_atomic_write_does_not_leave_tmp_file(self, isolated_appdata, monkeypatch):
+        """``os.replace`` removes the .tmp after successful write."""
+        monkeypatch.setattr(integrity_check.sys, "platform", "linux")
+        _real_get_hmac_key()
+        tmp = _key_path(isolated_appdata).with_name(_key_path(isolated_appdata).name + ".tmp")
+        assert not tmp.exists(), "Atomic rename left a stale .tmp file"
 
 
 class TestDpapiUnwrapFailureRegen:

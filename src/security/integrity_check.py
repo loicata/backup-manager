@@ -14,12 +14,89 @@ import secrets
 import sys
 from pathlib import Path
 
+from src.core.exceptions import DPAPIUnavailableError
+
 logger = logging.getLogger(__name__)
 
 CHECKSUM_FILE = "app_checksums.json"
 HMAC_KEY_FILE = ".integrity_key"
 HASH_ALGORITHM = "sha256"
 CHUNK_SIZE = 128 * 1024  # 128 KB
+
+# Module-level switch toggled by the ``--allow-plaintext-keys`` CLI
+# flag at startup. Lets the user override the strict-DPAPI requirement
+# on Windows when their environment cannot grant DPAPI (corrupted
+# user profile, group policy lockdown, antivirus blocking crypt32).
+# Off by default — strict is the safe default that surfaces the
+# failure instead of silently writing the key in clear and letting any
+# userland process forge ``app_checksums.json`` / ``.wbcommit``
+# signatures.
+_ALLOW_PLAINTEXT_FALLBACK = False
+
+
+def enable_plaintext_fallback() -> None:
+    """Authorise the in-clear key fallback on Windows for this process.
+
+    Must be called BEFORE any code path that may trigger a key
+    generation (i.e. before ``verify_integrity`` or any pipeline run).
+    The override is per-process and does not persist — every relaunch
+    requires passing ``--allow-plaintext-keys`` again, on purpose, so
+    a user who has fixed their DPAPI environment returns to the strict
+    posture automatically.
+    """
+    global _ALLOW_PLAINTEXT_FALLBACK
+    _ALLOW_PLAINTEXT_FALLBACK = True
+    logger.error(
+        "Plaintext key fallback enabled by --allow-plaintext-keys. "
+        "HMAC key and machine key may be written in clear if DPAPI fails. "
+        "This neutralises tamper-detection — only use to recover from a "
+        "broken Windows profile."
+    )
+
+
+def is_plaintext_fallback_allowed() -> bool:
+    """Return whether the in-clear fallback has been authorised.
+
+    Read by ``src.security.encryption`` so the per-machine key writer
+    and the HMAC key writer share a single source of truth. Tests
+    flip the module-level flag directly when they need the legacy
+    behaviour for an isolated case.
+    """
+    return _ALLOW_PLAINTEXT_FALLBACK
+
+
+def _write_key_atomic(path: Path, payload: bytes) -> None:
+    """Write key material with 0o600 mode + fsync + atomic rename.
+
+    Mirrors the pattern already used by ``ConfigManager._atomic_write``
+    for profile files. The 0o600 mode is enforced AT CREATION via
+    ``os.open`` — a ``path.write_bytes`` followed by ``os.chmod`` would
+    leave a window where the file is world-readable.
+
+    On Windows the POSIX mode is silently ignored by NTFS (ACLs from
+    ``%APPDATA%`` govern access), so this is strictly a Linux/macOS
+    hardening — but the cost on Windows is zero.
+
+    ``O_BINARY`` is critical on Windows. ``os.open`` defaults to the
+    C runtime's text translation mode, which rewrites ``\\n`` -> ``\\r\\n``
+    and stops on ``\\x1a`` (Ctrl-Z) during read. DPAPI-wrapped blobs and
+    raw 32-byte secrets contain arbitrary bytes including newlines and
+    EOF sentinels; without the flag, ``CryptUnprotectData`` returns
+    error 13 (ERROR_INVALID_DATA) on the next launch and the HMAC key
+    is regenerated on every run — tamper detection becomes random.
+    The constant is not defined on POSIX, so we add it conditionally.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(str(tmp), flags, 0o600)
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
 
 # Source files to verify
 APP_FILES = [
@@ -216,17 +293,32 @@ def _get_hmac_key() -> bytes:
             wrapped_payload = _dpapi_wrap(key)
             wrapped = _DPAPI_MARKER + wrapped_payload
         except OSError as e:
-            # DPAPI broken (service unavailable, user profile issues).
-            # Without the marker the key is stored in clear — store it
-            # that way rather than silently writing a bogus "DPAPI"
-            # file that cannot be unwrapped next time (would trigger a
-            # regen loop and neutralise tamper-detection entirely).
-            logger.warning("DPAPI wrap failed, HMAC key stored in clear: %s", e)
+            if not _ALLOW_PLAINTEXT_FALLBACK:
+                # Refuse to write a plaintext HMAC key by default.
+                # Without DPAPI any userland process running as the user
+                # can read the key and forge ``app_checksums.json`` and
+                # ``.wbcommit`` signatures — tamper-detection becomes
+                # security theatre. ``--allow-plaintext-keys`` is the
+                # explicit opt-out for users with broken DPAPI who
+                # accept the degraded posture.
+                raise DPAPIUnavailableError("wrap", e) from e
+            # User explicitly authorised plaintext on this run. Log at
+            # ERROR so the degraded posture is unmistakable in the
+            # rotating log file. Do NOT prepend the DPAPI marker — the
+            # next read would loop on unwrap forever and regen on every
+            # launch, silently neutralising tamper-detection (which is
+            # the exact bug the marker-absent fallback was designed to
+            # avoid in the warning-only era).
+            logger.error(
+                "DPAPI wrap failed, HMAC key stored in clear "
+                "(--allow-plaintext-keys is set): %s",
+                e,
+            )
             wrapped = key
     else:
         wrapped = key
 
-    key_path.write_bytes(wrapped)
+    _write_key_atomic(key_path, wrapped)
     return key
 
 

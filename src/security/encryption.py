@@ -847,9 +847,20 @@ def _get_or_create_machine_key() -> bytes:
     reads the file, it gets a DPAPI blob that only the current
     Windows user session can decrypt.
 
+    The file is written with 0o600 permissions on Linux/macOS so
+    other local users cannot read the (possibly raw) key. On Windows
+    the POSIX mode is ignored by NTFS; %APPDATA% ACLs already restrict
+    access to the owning user.
+
     Returns:
         32-byte machine key.
+
+    Raises:
+        DPAPIUnavailableError: On Windows when DPAPI cannot wrap the
+            new key and the user has not passed ``--allow-plaintext-keys``.
     """
+    from src.security.integrity_check import _write_key_atomic
+
     key_path = _get_machine_key_path()
     if key_path.exists():
         raw = key_path.read_bytes()
@@ -858,26 +869,56 @@ def _get_or_create_machine_key() -> bytes:
             return key_data
         logger.warning("Invalid machine key, regenerating")
 
-    # Generate new random key and protect it
+    # Generate new random key and protect it. ``_protect_machine_key``
+    # may raise ``DPAPIUnavailableError`` on Windows if DPAPI is broken
+    # and the plaintext-fallback flag is off — let it propagate so the
+    # ``__main__`` bootstrap can surface a clear error message instead
+    # of silently writing an unprotected key.
     key_data = secrets.token_bytes(KEY_SIZE)
     protected = _protect_machine_key(key_data)
     key_path.parent.mkdir(parents=True, exist_ok=True)
-    key_path.write_bytes(protected)
+    _write_key_atomic(key_path, protected)
     logger.info("Generated new machine key: %s", key_path)
     return key_data
 
 
 def _protect_machine_key(key_data: bytes) -> bytes:
-    """Protect the machine key with DPAPI if available.
+    """Protect the machine key with DPAPI on Windows.
 
     Args:
         key_data: Raw 32-byte key.
 
     Returns:
-        DPAPI-protected blob prefixed with b'DPAPI:', or raw key
-        if DPAPI is unavailable.
+        DPAPI-protected blob prefixed with ``b"DPAPI:"`` on Windows when
+        DPAPI succeeds. Raw ``key_data`` on non-Windows platforms (no
+        equivalent system-managed key store without an interactive
+        keyring), or on Windows when the user has opted into the
+        plaintext fallback.
+
+    Raises:
+        DPAPIUnavailableError: On Windows when DPAPI is required but
+            cannot wrap the key and the plaintext fallback has not
+            been enabled. Without DPAPI the file is readable by any
+            userland process running as the user, which would let a
+            malware decrypt every stored ``sftp_password`` /
+            ``s3_secret_key`` in the profile collection.
     """
+    # Non-Windows: no DPAPI equivalent without an interactive prompt.
+    # The 0o600 mode applied by ``_write_key_atomic`` is the only
+    # at-rest protection on Linux/macOS.
+    if sys.platform != "win32":
+        return key_data
+
+    from src.core.exceptions import DPAPIUnavailableError
+    from src.security.integrity_check import is_plaintext_fallback_allowed
+
     if not _has_dpapi():
+        if not is_plaintext_fallback_allowed():
+            raise DPAPIUnavailableError("absent")
+        logger.error(
+            "DPAPI unavailable on Windows, machine key stored in clear "
+            "(--allow-plaintext-keys is set)"
+        )
         return key_data
 
     import ctypes
@@ -905,7 +946,17 @@ def _protect_machine_key(key_data: bytes) -> bytes:
         ctypes.windll.kernel32.LocalFree(output_blob.pbData)
         return b"DPAPI:" + encrypted
 
-    logger.warning("DPAPI protection failed for machine key, storing raw")
+    last_error = ctypes.GetLastError()
+    if not is_plaintext_fallback_allowed():
+        raise DPAPIUnavailableError(
+            "wrap",
+            OSError(f"CryptProtectData failed (error {last_error})"),
+        )
+    logger.error(
+        "DPAPI protection failed for machine key, storing raw "
+        "(--allow-plaintext-keys is set): error %s",
+        last_error,
+    )
     return key_data
 
 

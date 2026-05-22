@@ -274,6 +274,13 @@ def _crash_log(error_msg: str):
 def main():
     """Application main entry point."""
     start_minimized = "--minimized" in sys.argv
+    # Opt-in flag that lets the user run with a clear-text HMAC key /
+    # machine key when DPAPI is broken on their Windows profile
+    # (corrupted user profile, group policy lockdown, antivirus
+    # blocking crypt32). Off by default — the strict path refuses to
+    # start and surfaces a dialog instead of silently degrading the
+    # tamper-detection guarantees.
+    allow_plaintext = "--allow-plaintext-keys" in sys.argv
 
     # Windows-specific setup
     if sys.platform == "win32":
@@ -289,6 +296,15 @@ def main():
         "Backup Manager v3 starting%s...",
         " (minimized)" if start_minimized else "",
     )
+
+    # Apply CLI overrides that affect crypto behaviour BEFORE any
+    # code path that may trigger key generation (verify_integrity,
+    # save_profile, etc.). Done after logging setup so the ERROR line
+    # emitted by ``enable_plaintext_fallback`` lands in the log file.
+    if allow_plaintext:
+        from src.security.integrity_check import enable_plaintext_fallback
+
+        enable_plaintext_fallback()
 
     try:
         import tkinter as tk
@@ -402,19 +418,50 @@ def main():
         root.mainloop()
 
     except Exception as e:
-        error_msg = traceback.format_exc()
-        logger.critical("Fatal error: %s", error_msg)
-        _crash_log(error_msg)
-
+        # Dedicated branch for DPAPI-unavailable so the user sees a
+        # recovery-oriented message instead of the generic "Fatal Error"
+        # panel that gives no actionable guidance. Imported inside the
+        # handler so a corrupt ``src.core.exceptions`` cannot itself
+        # break the safety-net dialog.
         try:
-            import tkinter.messagebox as mb
-
-            mb.showerror(
-                "Backup Manager — Fatal Error",
-                f"An unexpected error occurred:\n\n{e}\n\n" f"Details saved to crash.log",
-            )
+            from src.core.exceptions import DPAPIUnavailableError
         except Exception:
-            logger.debug("Could not show error dialog", exc_info=True)
+            DPAPIUnavailableError = ()  # type: ignore[assignment, misc]
+
+        if isinstance(e, DPAPIUnavailableError):
+            logger.critical("DPAPI failure at startup: %s", e)
+            _crash_log(str(e))
+            try:
+                import tkinter.messagebox as mb
+
+                mb.showerror(
+                    "Backup Manager — DPAPI Unavailable",
+                    "Backup Manager cannot start because Windows DPAPI is "
+                    "unavailable on this user profile.\n\n"
+                    f"{e}\n\n"
+                    "Try one of the following:\n"
+                    "  - Repair your Windows user profile and relaunch.\n"
+                    "  - Wipe %APPDATA%\\BackupManager\\ to start fresh.\n"
+                    "  - Relaunch with --allow-plaintext-keys to accept "
+                    "the degraded security posture.",
+                )
+            except Exception:
+                logger.debug("Could not show DPAPI error dialog", exc_info=True)
+        else:
+            error_msg = traceback.format_exc()
+            logger.critical("Fatal error: %s", error_msg)
+            _crash_log(error_msg)
+
+            try:
+                import tkinter.messagebox as mb
+
+                mb.showerror(
+                    "Backup Manager — Fatal Error",
+                    f"An unexpected error occurred:\n\n{e}\n\n"
+                    f"Details saved to crash.log",
+                )
+            except Exception:
+                logger.debug("Could not show error dialog", exc_info=True)
 
     finally:
         # Release mutex and force-kill any lingering daemon threads

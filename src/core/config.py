@@ -269,9 +269,6 @@ class BackupProfile:
     full_schedule_mode: Literal["daily", "weekly", "monthly"] = "monthly"
     full_day_of_week: int = 0  # 0=Monday..6=Sunday, used when mode=weekly
     full_day_of_month: int = 1  # 1-31 (capped to month length), used when mode=monthly
-    destinations_hash: str = ""  # Deprecated — kept for JSON compat
-    sources_hash: str = ""  # Deprecated — kept for JSON compat
-    encryption_hash: str = ""  # Deprecated — kept for JSON compat
     profile_hash: str = ""  # SHA-256 of profile config (auto-managed)
     bandwidth_percent: int = 75  # 25, 50, 75, or 100
     sort_order: int = 0
@@ -555,17 +552,6 @@ class ConfigManager:
             logger.error("verify_hashes.json could not be parsed; ignoring stored hashes")
             return {}
 
-        # Legacy v1 path: a bare dict of archive name → metadata, no
-        # envelope, no signature. Accept it for one more launch (so
-        # the user does not lose history) but log loudly so the
-        # operator knows the file is unsigned.
-        if isinstance(doc, dict) and "hashes" not in doc and "hmac" not in doc:
-            logger.warning(
-                "verify_hashes.json is in the legacy unsigned format. "
-                "It will be re-saved with an HMAC signature on the next write."
-            )
-            return doc
-
         # v2 envelope: verify the HMAC before trusting the payload.
         if not isinstance(doc, dict) or "hashes" not in doc or "hmac" not in doc:
             logger.error("verify_hashes.json has an unrecognised structure; ignoring")
@@ -707,17 +693,6 @@ class ConfigManager:
 
     def _dict_to_profile(self, data: dict) -> BackupProfile:
         """Deserialize a dict into a BackupProfile."""
-        # Migrate legacy bandwidth_limit_kbps → bandwidth_percent
-        if "bandwidth_limit_kbps" in data and "bandwidth_percent" not in data:
-            data["bandwidth_percent"] = 100
-            logger.info("Migrated bandwidth_limit_kbps → bandwidth_percent=100")
-        data.pop("bandwidth_limit_kbps", None)
-
-        # Migrate legacy last_full_completed → last_backup_completed
-        if "last_full_completed" in data and "last_backup_completed" not in data:
-            data["last_backup_completed"] = data["last_full_completed"]
-        data.pop("last_full_completed", None)
-
         # Convert enum values
         if "backup_type" in data:
             data["backup_type"] = BackupType(data["backup_type"])

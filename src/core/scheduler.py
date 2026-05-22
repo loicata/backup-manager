@@ -882,17 +882,6 @@ class AutoStart:
     _REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
     _REG_VALUE = "BackupManager"
 
-    # Legacy VBS path — used only for migration cleanup.
-    _LEGACY_VBS = Path(
-        os.environ.get("APPDATA", ""),
-        "Microsoft",
-        "Windows",
-        "Start Menu",
-        "Programs",
-        "Startup",
-        "BackupManager.vbs",
-    )
-
     @classmethod
     def ensure_startup(cls, show_window: bool = True) -> None:
         """Create or update auto-start registry entry.
@@ -934,7 +923,6 @@ class AutoStart:
                 pass
 
             if current == command:
-                cls._cleanup_legacy_vbs()
                 return
 
             with winreg.OpenKey(
@@ -947,8 +935,6 @@ class AutoStart:
             logger.info("Auto-start configured via registry: %s", command)
         except OSError as e:
             logger.warning("Could not set auto-start registry key: %s", e)
-
-        cls._cleanup_legacy_vbs()
 
     @classmethod
     def disable(cls) -> tuple[bool, str]:
@@ -965,12 +951,10 @@ class AutoStart:
                 try:
                     winreg.DeleteValue(key, cls._REG_VALUE)
                 except FileNotFoundError:
-                    cls._cleanup_legacy_vbs()
                     return True, "Auto-start was not enabled"
         except OSError as e:
             return False, f"Could not disable: {e}"
 
-        cls._cleanup_legacy_vbs()
         return True, "Auto-start disabled"
 
     @classmethod
@@ -997,12 +981,3 @@ class AutoStart:
         except (FileNotFoundError, OSError):
             return True
 
-    @classmethod
-    def _cleanup_legacy_vbs(cls) -> None:
-        """Remove legacy VBS startup script if it exists."""
-        try:
-            if cls._LEGACY_VBS.exists():
-                cls._LEGACY_VBS.unlink()
-                logger.info("Removed legacy VBS auto-start: %s", cls._LEGACY_VBS)
-        except OSError as e:
-            logger.debug("Could not remove legacy VBS: %s", e)

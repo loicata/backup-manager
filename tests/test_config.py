@@ -477,24 +477,7 @@ class TestComputeProfileHash:
         assert compute_profile_hash(p1) != compute_profile_hash(p2)
 
 
-class TestBandwidthPercentMigration:
-    def test_legacy_bandwidth_limit_migrated(self, tmp_config_dir):
-        """Old bandwidth_limit_kbps field is migrated to bandwidth_percent=100."""
-        mgr = ConfigManager(config_dir=tmp_config_dir)
-        profile = BackupProfile(name="Legacy")
-        mgr.save_profile(profile)
-
-        # Manually inject old field into saved JSON
-        filepath = mgr.profiles_dir / f"{profile.id}.json"
-        data = json.loads(filepath.read_text(encoding="utf-8"))
-        data["bandwidth_limit_kbps"] = 5000
-        data.pop("bandwidth_percent", None)
-        filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-        loaded = mgr.get_all_profiles()[0]
-        assert loaded.bandwidth_percent == 100
-        assert not hasattr(loaded, "bandwidth_limit_kbps") or True
-
+class TestBandwidthPercent:
     def test_bandwidth_percent_roundtrip(self, tmp_config_dir):
         """bandwidth_percent is saved and loaded correctly."""
         mgr = ConfigManager(config_dir=tmp_config_dir)

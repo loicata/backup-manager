@@ -359,22 +359,15 @@ def write_encrypted_tar(
     backup_name: str,
     password: str,
     events: EventBus | None = None,
-    integrity_manifest: dict | None = None,
     cancel_check=None,
 ) -> Path:
     """Write an encrypted ``.tar.wbenc`` archive.
 
     Thin wrapper over :func:`write_encrypted_tar_with_hashes` for
-    callers that only need the archive path.
-
-    The legacy ``integrity_manifest`` parameter is **ignored**. The
-    writer now builds its own manifest from hashes computed during
-    streaming, so any pre-built manifest passed by the caller would
-    describe the source as it was *before* the write started — exactly
-    the TOCTOU situation the single-pass writer is here to fix. The
-    parameter is kept on the signature for backwards-compatibility
-    with existing test callers; production callers should use
-    ``write_encrypted_tar_with_hashes`` directly.
+    callers that only need the archive path. The integrity manifest
+    is always built from hashes computed during streaming and embedded
+    in the archive — no caller-supplied manifest is supported, which
+    avoids the manifest-then-write TOCTOU window.
 
     Args:
         files: Files to back up.
@@ -382,17 +375,11 @@ def write_encrypted_tar(
         backup_name: Name for this backup (becomes ``backup_name.tar.wbenc``).
         password: Encryption password.
         events: Optional event bus.
-        integrity_manifest: Ignored. See note above.
         cancel_check: Optional callable that raises CancelledError.
 
     Returns:
         Path to the created ``.tar.wbenc`` file.
     """
-    if integrity_manifest is not None:
-        logger.debug(
-            "write_encrypted_tar: ignoring caller-supplied integrity_manifest "
-            "— writer builds its own from hash-during-write"
-        )
     archive_path, _ = write_encrypted_tar_with_hashes(
         files,
         destination,

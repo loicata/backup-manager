@@ -96,22 +96,6 @@ class TestLastBackupCompletedFlag:
         loaded = mgr.get_all_profiles()[0]
         assert loaded.last_backup_completed is True
 
-    def test_migrate_last_full_completed(self, tmp_config_dir):
-        """Old last_full_completed field migrates to last_backup_completed."""
-        mgr = ConfigManager(config_dir=tmp_config_dir)
-        profile = BackupProfile(name="Legacy")
-        mgr.save_profile(profile)
-
-        filepath = mgr.profiles_dir / f"{profile.id}.json"
-        data = json.loads(filepath.read_text(encoding="utf-8"))
-        data["last_full_completed"] = False
-        data.pop("last_backup_completed", None)
-        filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-        loaded = mgr.get_all_profiles()[0]
-        assert loaded.last_backup_completed is False
-
-
 class TestCleanupIncompleteBackup:
     def _make_ctx(self, profile, mgr):
         from src.core.phases.base import PipelineContext

@@ -520,48 +520,6 @@ class TestWriteEncryptedTar:
         assert loaded["files"]["a.txt"]["hash"] == expected
         assert loaded["files"]["a.txt"]["size"] == 5
 
-    def test_caller_supplied_manifest_is_ignored(self, tmp_path: Path) -> None:
-        """Writer ignores any caller-supplied manifest and builds its own.
-
-        Defeats the manifest→write TOCTOU: a caller-supplied manifest
-        would describe a *snapshot* of source hashes from before the
-        write, which can diverge from what actually lands in the tar
-        if the source mutates in between. The writer's own manifest
-        is bound to the bytes it actually streamed.
-        """
-        from src.security.encryption import DecryptingReader
-
-        src = tmp_path / "source"
-        _make_file(src / "a.txt", "alpha")
-        files = [_make_file_info(src / "a.txt", "a.txt")]
-
-        # Caller supplies a bogus manifest claiming the file's hash is
-        # all zeroes — the writer must NOT honour this.
-        bogus_manifest = {
-            "version": 1,
-            "algorithm": "sha256",
-            "files": {"a.txt": {"hash": "0" * 64, "size": 5}},
-            "total_checksum": "0" * 64,
-        }
-
-        dest = tmp_path / "dest"
-        dest.mkdir()
-        password = "ignore-test"
-        archive = write_encrypted_tar(
-            files, dest, "Backup", password, integrity_manifest=bogus_manifest
-        )
-
-        extract_dir = tmp_path / "extracted"
-        extract_dir.mkdir()
-        with open(archive, "rb") as f:
-            reader = DecryptingReader(f, password)
-            with tarfile.open(fileobj=reader, mode="r|") as tar:
-                tar.extractall(path=extract_dir)
-
-        loaded = json.loads((extract_dir / ".wbverify").read_text(encoding="utf-8"))
-        # The embedded hash is the REAL one, not the caller's bogus one.
-        assert loaded["files"]["a.txt"]["hash"] != "0" * 64
-
     def test_manifest_is_always_embedded(self, tmp_path: Path) -> None:
         """The writer always embeds an integrity manifest now.
 

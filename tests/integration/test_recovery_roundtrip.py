@@ -119,27 +119,9 @@ class TestRecoveryRoundTrip:
 
         file_infos = [_make_file_info(src / rel, rel) for rel in expected_files]
 
-        # Build a manifest
-        manifest = {
-            "version": 1,
-            "algorithm": "sha256",
-            "files": {},
-        }
-        for rel, content in expected_files.items():
-            manifest["files"][rel] = {
-                "hash": _sha256(content),
-                "size": len(content),
-            }
-
         dest = tmp_path / "backup_dest"
         dest.mkdir()
-        archive = write_encrypted_tar(
-            file_infos,
-            dest,
-            "ManifestTest",
-            password,
-            integrity_manifest=manifest,
-        )
+        archive = write_encrypted_tar(file_infos, dest, "ManifestTest", password)
 
         restore_dir = tmp_path / "restored"
         names = _restore_archive(archive, password, restore_dir)
@@ -160,20 +142,9 @@ class TestRecoveryRoundTrip:
 
         file_infos = [_make_file_info(src / rel, rel) for rel in expected_files]
 
-        manifest = {
-            "version": 1,
-            "algorithm": "sha256",
-            "files": {
-                rel: {"hash": _sha256(content), "size": len(content)}
-                for rel, content in expected_files.items()
-            },
-        }
-
         dest = tmp_path / "backup_dest"
         dest.mkdir()
-        archive = write_encrypted_tar(
-            file_infos, dest, "HashVerify", password, integrity_manifest=manifest
-        )
+        archive = write_encrypted_tar(file_infos, dest, "HashVerify", password)
 
         restore_dir = tmp_path / "restored"
         _restore_archive(archive, password, restore_dir)

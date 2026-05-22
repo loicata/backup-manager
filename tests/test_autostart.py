@@ -2,7 +2,6 @@
 
 Validates creation, removal, and state queries of the HKCU\\...\\Run
 registry entry used to launch Backup Manager at Windows login.
-Also covers legacy VBS cleanup during migration.
 """
 
 import sys
@@ -77,15 +76,6 @@ def fake_winreg():
         yield mod
 
 
-@pytest.fixture
-def fake_legacy_vbs(tmp_path):
-    """Create a fake legacy VBS file and point AutoStart to it."""
-    vbs = tmp_path / "BackupManager.vbs"
-    vbs.write_text("legacy vbs content", encoding="utf-8")
-    with patch.object(AutoStart, "_LEGACY_VBS", vbs):
-        yield vbs
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -105,7 +95,6 @@ class TestAutoStart:
         with (
             patch.object(sys, "frozen", True, create=True),
             patch.object(sys, "executable", str(FAKE_EXE)),
-            patch.object(AutoStart, "_cleanup_legacy_vbs"),
         ):
             AutoStart.ensure_startup(show_window=True)
 
@@ -118,7 +107,6 @@ class TestAutoStart:
         with (
             patch.object(sys, "frozen", True, create=True),
             patch.object(sys, "executable", str(FAKE_EXE)),
-            patch.object(AutoStart, "_cleanup_legacy_vbs"),
         ):
             AutoStart.ensure_startup(show_window=False)
 
@@ -136,7 +124,6 @@ class TestAutoStart:
         with (
             patch.object(sys, "frozen", True, create=True),
             patch.object(sys, "executable", str(FAKE_EXE)),
-            patch.object(AutoStart, "_cleanup_legacy_vbs"),
         ):
             AutoStart.ensure_startup(show_window=True)
 
@@ -146,8 +133,7 @@ class TestAutoStart:
         """disable() removes the registry value."""
         _FAKE_STORE[AutoStart._REG_VALUE] = f'"{FAKE_EXE}"'
 
-        with patch.object(AutoStart, "_cleanup_legacy_vbs"):
-            ok, msg = AutoStart.disable()
+        ok, msg = AutoStart.disable()
 
         assert ok is True
         assert "disabled" in msg
@@ -155,8 +141,7 @@ class TestAutoStart:
 
     def test_disable_when_not_enabled(self, fake_winreg):
         """disable() returns success when registry value doesn't exist."""
-        with patch.object(AutoStart, "_cleanup_legacy_vbs"):
-            ok, msg = AutoStart.disable()
+        ok, msg = AutoStart.disable()
 
         assert ok is True
         assert "not enabled" in msg
@@ -180,40 +165,12 @@ class TestAutoStart:
         with (
             patch.object(sys, "frozen", True, create=True),
             patch.object(sys, "executable", str(FAKE_EXE)),
-            patch.object(AutoStart, "_cleanup_legacy_vbs"),
         ):
             AutoStart.ensure_startup(show_window=True)
             assert AutoStart.is_show_window() is True
 
             AutoStart.ensure_startup(show_window=False)
             assert AutoStart.is_show_window() is False
-
-    def test_ensure_startup_cleans_old_vbs(self, fake_winreg, fake_legacy_vbs):
-        """ensure_startup() removes legacy VBS if present."""
-        assert fake_legacy_vbs.exists()
-        with (
-            patch.object(sys, "frozen", True, create=True),
-            patch.object(sys, "executable", str(FAKE_EXE)),
-        ):
-            AutoStart.ensure_startup(show_window=True)
-
-        assert not fake_legacy_vbs.exists()
-
-    def test_disable_cleans_old_vbs(self, fake_winreg, fake_legacy_vbs):
-        """disable() removes legacy VBS if present."""
-        _FAKE_STORE[AutoStart._REG_VALUE] = f'"{FAKE_EXE}"'
-        assert fake_legacy_vbs.exists()
-
-        ok, _ = AutoStart.disable()
-
-        assert ok is True
-        assert not fake_legacy_vbs.exists()
-
-    def test_cleanup_legacy_vbs_noop_when_absent(self, tmp_path):
-        """_cleanup_legacy_vbs() does nothing when VBS doesn't exist."""
-        absent = tmp_path / "nonexistent.vbs"
-        with patch.object(AutoStart, "_LEGACY_VBS", absent):
-            AutoStart._cleanup_legacy_vbs()  # Should not raise
 
     def test_ensure_startup_idempotent_skips_unchanged_value(self, fake_winreg):
         """Repeated calls with the same args perform exactly one write.
@@ -235,7 +192,6 @@ class TestAutoStart:
         with (
             patch.object(sys, "frozen", True, create=True),
             patch.object(sys, "executable", str(FAKE_EXE)),
-            patch.object(AutoStart, "_cleanup_legacy_vbs"),
         ):
             AutoStart.ensure_startup(show_window=True)
             AutoStart.ensure_startup(show_window=True)
@@ -256,7 +212,6 @@ class TestAutoStart:
         with (
             patch.object(sys, "frozen", True, create=True),
             patch.object(sys, "executable", str(FAKE_EXE)),
-            patch.object(AutoStart, "_cleanup_legacy_vbs"),
         ):
             AutoStart.ensure_startup(show_window=True)
             AutoStart.ensure_startup(show_window=False)

@@ -679,34 +679,6 @@ class TestVerifyHashesHmacEnvelope:
 
         assert mgr.load_verify_hashes() == {}
 
-    def test_legacy_v1_unsigned_format_accepted_with_warning(self, tmp_path: Path, caplog) -> None:
-        """Installs upgrading from a previous release have an unsigned
-        v1 file on disk. ``load`` must accept it (so history is not
-        lost) and log a warning so the operator knows it was unsigned.
-        The next ``save`` rewrites it as v2."""
-        import json
-        import logging
-
-        path = tmp_path / "verify_hashes.json"
-        legacy = {
-            "old.tar.wbenc": {"sha256": "legacy", "size": 50},
-        }
-        path.write_text(json.dumps(legacy), encoding="utf-8")
-
-        mgr = ConfigManager(config_dir=tmp_path)
-        with caplog.at_level(logging.WARNING):
-            loaded = mgr.load_verify_hashes()
-        assert "old.tar.wbenc" in loaded
-        assert any(
-            "legacy unsigned" in rec.message.lower() for rec in caplog.records
-        ), "Expected a warning about the unsigned legacy format"
-
-        # Saving anew migrates the file to v2 transparently.
-        mgr.save_verify_hash("new.tar.wbenc", "new", 100)
-        on_disk = json.loads(path.read_text(encoding="utf-8"))
-        assert "hashes" in on_disk
-        assert "hmac" in on_disk
-
     def test_corrupt_file_returns_empty(self, tmp_path: Path) -> None:
         """A truncated / non-JSON file must yield ``{}`` and not crash
         the periodic integrity verifier."""

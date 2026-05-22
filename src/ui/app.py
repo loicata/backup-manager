@@ -678,25 +678,6 @@ class BackupManagerApp:
         # (``_finalize_profile_deletion``) can drop a profile's file
         # alongside the JSON config.
         self.run_history = RunHistoryStore(self.config_manager.config_dir / "run_history")
-        # One-shot fix-up of pre-v3.7.16 run-history files (engine-level
-        # messages persisted with ``phase=""``). Walks each known
-        # profile, applies the same inference as the live persist path,
-        # and rewrites the JSONL atomically. Idempotent: subsequent
-        # launches are no-ops once every file has been migrated.
-        # Failures are logged but never block startup. See
-        # ``src/ui/tabs/run_tab.py::migrate_legacy_phase_tags``.
-        try:
-            from src.ui.tabs.run_tab import migrate_legacy_phase_tags
-
-            all_profile_ids = [p.id for p in self.config_manager.get_all_profiles()]
-            migrated = migrate_legacy_phase_tags(self.run_history, all_profile_ids)
-            if migrated:
-                logger.info(
-                    "Legacy phase-tag migration: rewrote %d run-history file(s)",
-                    migrated,
-                )
-        except Exception:
-            logger.exception("Legacy phase-tag migration failed (non-fatal)")
         # Pending Fast-mode verify prompts — one entry per profile.
         # A backup that ends while the user is on another profile, or
         # while the app is closed (scheduled run), still leaves an

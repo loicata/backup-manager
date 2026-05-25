@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from src.storage._fs_utils import Residual
 
 
@@ -130,6 +132,73 @@ class DPAPIUnavailableError(RuntimeError):
             f"fresh, or relaunch with --allow-plaintext-keys to accept the "
             f"degraded security posture."
         )
+
+
+class HMACKeyRegeneratedError(RuntimeError):
+    """Raised when the per-install HMAC key had to be regenerated under
+    suspicious circumstances.
+
+    Three trigger conditions, all symptoms of "the install identity
+    changed unexpectedly" rather than "this is the first run":
+
+    1. An existing key file is present on disk but cannot be decrypted
+       by DPAPI (Windows reinstall, profile change, AppData copied
+       from another machine).
+    2. An existing key file is present but cannot be read at all
+       (permission denied, AV quarantine).
+    3. The key file is absent but an install sentinel
+       (``.integrity_key.installed``) marks the install as having
+       previously carried a key (accidental delete, cleanup tool,
+       AV quarantine of the key file only).
+
+    Letting ``_get_hmac_key`` silently regenerate in any of those
+    cases invalidates every ``.wbcommit`` previously signed with the
+    old key. On local destinations those backups are then classified
+    as orphans by ``LocalStorage.list_orphan_backups`` and DELETED
+    at the next ``_phase_orphan_scan`` — silently from the UI's
+    point of view, with only ``Orphan removed`` INFO lines in
+    ``backup_manager.log``. Surfacing this exception at the bootstrap
+    so the user can abort BEFORE any pipeline runs is the only way
+    to avoid that data-loss path.
+
+    Genuine first runs (no key, no sentinel) do NOT raise — they are
+    indistinguishable from a fresh install and the regeneration is
+    expected. The sentinel is the only way to tell the two scenarios
+    apart on a system that previously ran Backup Manager at least once.
+
+    Suppressed entirely when ``_ALLOW_PLAINTEXT_FALLBACK`` is True
+    (the user explicitly accepted degraded crypto posture via
+    ``--allow-plaintext-keys``): regeneration proceeds without raising
+    so the existing CLI escape hatch keeps working.
+
+    Args:
+        reason: Human-readable explanation suitable for a modal
+            dialog message body.
+        prior_key_existed: True when there is evidence (file or
+            sentinel) that a key was previously installed. Always
+            True at raise time — kept as a structured field for
+            handlers that may want to differentiate further.
+        prior_key_path: Path where the existing/expected key file
+            lives. The handler uses ``prior_key_path.parent`` to
+            point the user at any ``.legacy_*`` archive created by
+            ``_archive_old_key``.
+        cause: Underlying exception when the failure stems from a
+            specific OSError (DPAPI unwrap, read denied). ``None``
+            for the "sentinel says key existed but file is gone" case.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        prior_key_existed: bool,
+        prior_key_path: Path,
+        cause: Exception | None = None,
+    ) -> None:
+        self.reason = reason
+        self.prior_key_existed = prior_key_existed
+        self.prior_key_path = prior_key_path
+        self.cause = cause
+        super().__init__(reason)
 
 
 class StorageDeleteError(Exception):

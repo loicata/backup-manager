@@ -14,12 +14,21 @@ import secrets
 import sys
 from pathlib import Path
 
-from src.core.exceptions import DPAPIUnavailableError
+from src.core.exceptions import DPAPIUnavailableError, HMACKeyRegeneratedError
 
 logger = logging.getLogger(__name__)
 
 CHECKSUM_FILE = "app_checksums.json"
 HMAC_KEY_FILE = ".integrity_key"
+# Empty sentinel created next to the key the first time we successfully
+# generate or read one. Its purpose is forensic: if a later run finds
+# the sentinel present but the key file gone, we know the install
+# previously had a key — the absence is suspicious (manual delete, AV
+# quarantine, cleanup tool) and warrants the regen-alert dialog instead
+# of being treated as a fresh install. Storing this as a separate file
+# rather than a metadata field on the key itself means a wipe of the
+# key file alone cannot also wipe the evidence that a key once existed.
+HMAC_KEY_INSTALLED_SENTINEL = ".integrity_key.installed"
 HASH_ALGORITHM = "sha256"
 CHUNK_SIZE = 128 * 1024  # 128 KB
 
@@ -255,60 +264,191 @@ def _dpapi_unwrap(data: bytes) -> bytes:
 _DPAPI_MARKER = b"DPAPI\x01"
 
 
-def _get_hmac_key() -> bytes:
-    """Get or create the HMAC key for checksum signing.
+def _archive_old_key(key_path: Path, reason: str) -> Path | None:
+    """Best-effort copy of the soon-to-be-replaced key for recovery.
 
-    On Windows, the key is wrapped with DPAPI (user scope) before
-    writing so that a malware process running as the user still
-    needs to issue CryptUnprotectData — it cannot simply read the
-    file to recover the key. Without the wrap, a read-the-file
-    attacker could forge the checksum HMAC and defeat the
-    tamper-detection mechanism entirely.
+    Called immediately before the regeneration path overwrites
+    ``key_path``. The archive name embeds a UTC timestamp and a short
+    machine-readable reason tag so a future forensic tool can list
+    all archives (``.legacy_*``), try each one to validate orphan
+    ``.wbcommit`` markers, and report which historical backups would
+    be recoverable.
+
+    Never raises. The regen path must proceed even when the archive
+    cannot be written (read-only profile, disk full, permission
+    denied). Loss of the archive is an additional risk but not a
+    blocker — the dialog presented to the user already conveys that
+    historical backups are at risk.
+
+    Args:
+        key_path: Path to the existing ``.integrity_key`` file. If
+            it does not exist this is a no-op (we have nothing to
+            archive).
+        reason: Short snake_case tag describing why the key is being
+            replaced (``unwrap_failed``, ``read_failed``,
+            ``wrong_size``). Embedded in the archive filename so
+            multiple regens leave self-describing artefacts.
+
+    Returns:
+        Path of the archive on success, ``None`` when there was
+        nothing to archive or the copy failed.
     """
-    appdata = os.environ.get("APPDATA", "")
-    key_path = Path(appdata) / "BackupManager" / HMAC_KEY_FILE
-    if key_path.exists():
-        try:
-            stored = key_path.read_bytes()
-            if stored.startswith(_DPAPI_MARKER):
-                try:
-                    return _dpapi_unwrap(stored[len(_DPAPI_MARKER) :])
-                except OSError as e:
-                    logger.warning("Could not unwrap HMAC key, regenerating: %s", e)
-            else:
-                # Plain 32-byte key (from a previous version or from a
-                # platform without DPAPI). Keep using it, but on the
-                # next save it will be re-wrapped.
-                if len(stored) == 32:
-                    return stored
-                logger.warning("HMAC key file has unexpected size, regenerating")
-        except OSError:
-            logger.warning("Could not read HMAC key, generating new one")
+    if not isinstance(key_path, Path):
+        raise TypeError(f"key_path must be a Path, got {type(key_path).__name__}")
+    if not key_path.exists():
+        return None
+    try:
+        import shutil
+        from datetime import UTC, datetime
 
-    key = secrets.token_bytes(32)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        archive = key_path.with_name(f"{key_path.name}.legacy_{timestamp}_{reason}")
+        shutil.copy2(key_path, archive)
+        logger.info("Archived old HMAC key for recovery: %s", archive)
+        return archive
+    except OSError as e:
+        logger.warning("Could not archive old HMAC key (continuing regen): %s", e)
+        return None
+
+
+def _ensure_install_sentinel(sentinel_path: Path) -> None:
+    """Create the install sentinel if missing. Never raises.
+
+    Touched whenever a key is successfully generated OR successfully
+    read. The two paths matter equally: the sentinel must exist as
+    soon as the install can prove it ever held a usable key, so a
+    later "key disappeared" event can be distinguished from a genuine
+    first run.
+
+    A migration concern: installs created before this patch have a
+    real key but no sentinel. The first successful read on the patched
+    binary creates the sentinel — from then on the "disappeared key"
+    detection works for that install too.
+
+    Args:
+        sentinel_path: Full path of the sentinel file. Its parent
+            directory must already exist (the caller has just written
+            or read the key file living in the same directory).
+    """
+    if not isinstance(sentinel_path, Path):
+        raise TypeError(f"sentinel_path must be a Path, got {type(sentinel_path).__name__}")
+    if sentinel_path.exists():
+        return
+    try:
+        sentinel_path.touch(exist_ok=True)
+        logger.debug("Install sentinel created at %s", sentinel_path)
+    except OSError as e:
+        # Best-effort: a missing sentinel only weakens the next regen
+        # detection, it does not break the current run.
+        logger.debug("Could not create install sentinel %s: %s", sentinel_path, e)
+
+
+def _try_read_existing_key(key_path: Path, sentinel_path: Path) -> bytes | None:
+    """Attempt to load and return the existing HMAC key from ``key_path``.
+
+    Returns the key bytes on success. Returns ``None`` when the file is
+    absent (caller decides whether that is a legitimate first run or a
+    suspicious disappearance based on the sentinel).
+
+    Raises:
+        HMACKeyRegeneratedError: when the file exists but cannot be
+            read/decrypted/validated — UNLESS
+            ``_ALLOW_PLAINTEXT_FALLBACK`` is set, in which case we log
+            the warning, archive the old key, and return ``None`` so
+            the caller proceeds with regeneration silently (legacy
+            ``--allow-plaintext-keys`` workflow preserved).
+    """
+    if not key_path.exists():
+        return None
+    try:
+        stored = key_path.read_bytes()
+    except OSError as e:
+        _archive_old_key(key_path, "read_failed")
+        logger.warning("Could not read HMAC key, generating new one: %s", e)
+        if not _ALLOW_PLAINTEXT_FALLBACK:
+            raise HMACKeyRegeneratedError(
+                f"Existing HMAC key cannot be read: {e}. "
+                f"Possible cause: file lock, antivirus quarantine, or "
+                f"permission denied. Proceeding will invalidate all "
+                f"backup commit markers signed with the original key.",
+                prior_key_existed=True,
+                prior_key_path=key_path,
+                cause=e,
+            ) from e
+        return None
+
+    if stored.startswith(_DPAPI_MARKER):
+        return _unwrap_dpapi_key_or_raise(stored, key_path, sentinel_path)
+    # Plain payload — either a legacy pre-DPAPI key (exactly 32 bytes) or
+    # corruption.  The legacy branch must remain silent: it is the normal
+    # path after a successful ``--allow-plaintext-keys`` run.
+    if len(stored) == 32:
+        _ensure_install_sentinel(sentinel_path)
+        return stored
+    _archive_old_key(key_path, "wrong_size")
+    logger.warning("HMAC key file has unexpected size (%d bytes), regenerating", len(stored))
+    if not _ALLOW_PLAINTEXT_FALLBACK:
+        raise HMACKeyRegeneratedError(
+            f"Existing HMAC key has unexpected size ({len(stored)} bytes; "
+            f"expected 32 or a DPAPI-wrapped blob). File may be corrupted, "
+            f"truncated, or overwritten by an unrelated tool.",
+            prior_key_existed=True,
+            prior_key_path=key_path,
+        )
+    return None
+
+
+def _unwrap_dpapi_key_or_raise(
+    stored: bytes,
+    key_path: Path,
+    sentinel_path: Path,
+) -> bytes | None:
+    """Inverse of the DPAPI wrap done at write time.
+
+    Split out of :func:`_try_read_existing_key` so the latter stays
+    under the 30-line guideline. Same return / raise contract: bytes
+    on success, ``None`` when plaintext fallback authorises silent
+    regeneration, raises ``HMACKeyRegeneratedError`` in strict mode.
+    """
+    try:
+        key = _dpapi_unwrap(stored[len(_DPAPI_MARKER) :])
+    except OSError as e:
+        _archive_old_key(key_path, "unwrap_failed")
+        logger.warning("Could not unwrap HMAC key, regenerating: %s", e)
+        if not _ALLOW_PLAINTEXT_FALLBACK:
+            raise HMACKeyRegeneratedError(
+                f"Existing HMAC key cannot be decrypted by DPAPI: {e}. "
+                f"Likely cause: Windows reinstall, user-profile change, or "
+                f"%APPDATA%\\BackupManager copied from another machine. "
+                f"Proceeding will invalidate all backup commit markers "
+                f"signed with the original key.",
+                prior_key_existed=True,
+                prior_key_path=key_path,
+                cause=e,
+            ) from e
+        return None
+    _ensure_install_sentinel(sentinel_path)
+    return key
+
+
+def _persist_new_key(key: bytes, key_path: Path) -> None:
+    """Wrap (Windows) or store as-is (POSIX) and atomically write.
+
+    Centralises the DPAPI-wrap-or-fallback decision so the orchestrator
+    in :func:`_get_hmac_key` does not have to. Honours
+    ``_ALLOW_PLAINTEXT_FALLBACK`` exactly as before — strict-mode wrap
+    failure raises ``DPAPIUnavailableError`` (no half-written file),
+    plaintext-mode wrap failure writes the raw key WITHOUT marker so
+    the next read takes the legacy-plain branch instead of unwrapping
+    forever.
+    """
     key_path.parent.mkdir(parents=True, exist_ok=True)
-
     if sys.platform == "win32":
         try:
-            wrapped_payload = _dpapi_wrap(key)
-            wrapped = _DPAPI_MARKER + wrapped_payload
+            wrapped = _DPAPI_MARKER + _dpapi_wrap(key)
         except OSError as e:
             if not _ALLOW_PLAINTEXT_FALLBACK:
-                # Refuse to write a plaintext HMAC key by default.
-                # Without DPAPI any userland process running as the user
-                # can read the key and forge ``app_checksums.json`` and
-                # ``.wbcommit`` signatures — tamper-detection becomes
-                # security theatre. ``--allow-plaintext-keys`` is the
-                # explicit opt-out for users with broken DPAPI who
-                # accept the degraded posture.
                 raise DPAPIUnavailableError("wrap", e) from e
-            # User explicitly authorised plaintext on this run. Log at
-            # ERROR so the degraded posture is unmistakable in the
-            # rotating log file. Do NOT prepend the DPAPI marker — the
-            # next read would loop on unwrap forever and regen on every
-            # launch, silently neutralising tamper-detection (which is
-            # the exact bug the marker-absent fallback was designed to
-            # avoid in the warning-only era).
             logger.error(
                 "DPAPI wrap failed, HMAC key stored in clear "
                 "(--allow-plaintext-keys is set): %s",
@@ -317,9 +457,174 @@ def _get_hmac_key() -> bytes:
             wrapped = key
     else:
         wrapped = key
-
     _write_key_atomic(key_path, wrapped)
+
+
+def _get_hmac_key() -> bytes:
+    """Get or create the per-install HMAC key for checksum signing.
+
+    On Windows, the key is wrapped with DPAPI (user scope) before
+    writing so that a malware process running as the user still
+    needs to issue CryptUnprotectData — it cannot simply read the
+    file to recover the key. Without the wrap, a read-the-file
+    attacker could forge the checksum HMAC and defeat the
+    tamper-detection mechanism entirely.
+
+    Regeneration is silent only when the install can prove this is a
+    genuine first run (neither the key file nor the install sentinel
+    exists). Any other regeneration path (DPAPI unwrap failure, read
+    error, malformed file, sentinel-present-but-key-missing) raises
+    ``HMACKeyRegeneratedError`` so the bootstrap can warn the user
+    BEFORE the next backup run classifies every historical
+    ``.wbcommit`` as an orphan and deletes the corresponding backups.
+
+    The strict behaviour is suppressed when
+    ``_ALLOW_PLAINTEXT_FALLBACK`` is set (``--allow-plaintext-keys``):
+    in that mode the regen happens silently, preserving the existing
+    CLI escape hatch for users with permanently broken DPAPI.
+
+    Raises:
+        HMACKeyRegeneratedError: see above.
+        DPAPIUnavailableError: from :func:`_persist_new_key` when the
+            fresh-key wrap fails in strict mode.
+    """
+    appdata = os.environ.get("APPDATA", "")
+    key_dir = Path(appdata) / "BackupManager"
+    key_path = key_dir / HMAC_KEY_FILE
+    sentinel_path = key_dir / HMAC_KEY_INSTALLED_SENTINEL
+
+    existing = _try_read_existing_key(key_path, sentinel_path)
+    if existing is not None:
+        return existing
+
+    # Distinguish genuine first run from "key disappeared since last run".
+    # The sentinel is the ground truth: it is written on the first
+    # successful generation OR read, and never removed by Backup
+    # Manager itself.
+    if sentinel_path.exists() and not _ALLOW_PLAINTEXT_FALLBACK:
+        raise HMACKeyRegeneratedError(
+            "HMAC key file is missing but an install marker indicates it "
+            "previously existed on this profile. Possible cause: accidental "
+            "delete, antivirus quarantine, or a cleanup tool. Proceeding "
+            "will invalidate all backup commit markers signed with the "
+            "original key.",
+            prior_key_existed=True,
+            prior_key_path=key_path,
+        )
+
+    key = secrets.token_bytes(32)
+    _persist_new_key(key, key_path)
+    _ensure_install_sentinel(sentinel_path)
     return key
+
+
+def list_legacy_key_archives() -> list[Path]:
+    """Return the available ``.integrity_key.legacy_*`` archive paths.
+
+    The list is sorted newest-first (lexicographic on the embedded UTC
+    timestamp) so that recovery code tries the most recent archive
+    first — the one most likely to have signed the markers under
+    examination.
+
+    Empty list if ``%APPDATA%/BackupManager`` does not exist or no
+    archive was ever written (no regen ever happened on this install).
+
+    Used by :func:`get_legacy_hmac_keys` and by the recovery branch of
+    :func:`src.core.phases.commit_marker.read_commit_marker`. Kept as
+    a separate accessor so a future CLI / UI feature can list the
+    available archives for the user without having to import the
+    commit-marker module.
+    """
+    appdata = os.environ.get("APPDATA", "")
+    key_dir = Path(appdata) / "BackupManager"
+    if not key_dir.exists():
+        return []
+    pattern = f"{HMAC_KEY_FILE}.legacy_*"
+    return sorted(key_dir.glob(pattern), reverse=True)
+
+
+def _load_key_from_archive(archive_path: Path) -> bytes | None:
+    """Try to decode one legacy key archive. Never raises.
+
+    Mirrors the read-side branches of :func:`_try_read_existing_key`
+    (DPAPI-wrapped vs. legacy plain 32 bytes) but returns ``None``
+    instead of raising on any failure — the recovery path needs to
+    SKIP unreadable archives and keep trying the next one rather than
+    aborting the whole orphan scan.
+
+    Logged at DEBUG only: a "failed to load" archive on a re-installed
+    Windows is the expected case (DPAPI scope changed), spamming
+    WARNING per archive would drown the log.
+
+    Args:
+        archive_path: Full path of a ``.integrity_key.legacy_*`` file.
+
+    Returns:
+        The raw 32-byte key on success, ``None`` on read error /
+        unwrap failure / unexpected file size.
+    """
+    if not isinstance(archive_path, Path):
+        raise TypeError(f"archive_path must be a Path, got {type(archive_path).__name__}")
+    try:
+        stored = archive_path.read_bytes()
+    except OSError as e:
+        logger.debug("Could not read legacy key archive %s: %s", archive_path, e)
+        return None
+    if stored.startswith(_DPAPI_MARKER):
+        try:
+            return _dpapi_unwrap(stored[len(_DPAPI_MARKER) :])
+        except OSError as e:
+            logger.debug("Could not unwrap legacy key archive %s: %s", archive_path, e)
+            return None
+    if len(stored) == 32:
+        return stored
+    logger.debug(
+        "Legacy key archive %s has unexpected size (%d bytes) — skipping",
+        archive_path,
+        len(stored),
+    )
+    return None
+
+
+def get_legacy_hmac_keys() -> list[bytes]:
+    """Return every legacy HMAC key that can be loaded, newest first.
+
+    Recovery use-case: after the per-install key was regenerated
+    (Windows reinstall, AV quarantine, accidental delete confirmed
+    by the user at the bootstrap alert), every previously-signed
+    ``.wbcommit`` now fails HMAC verification against the current
+    key and would be classified as an orphan by
+    ``LocalStorage.list_orphan_backups`` — backups deleted at the
+    next ``_phase_orphan_scan``.
+
+    By giving the commit-marker reader the list of historical keys,
+    we can:
+
+    1. Validate the marker against any one of them (proving it was
+       authentic at the time it was written).
+    2. Re-sign the marker with the CURRENT key so the next read
+       takes the fast path and the backup is preserved.
+
+    Honest scope: this only helps when the OS still grants DPAPI
+    access to the legacy keys (corrupted live file, AV touched the
+    live only). For a Windows reinstall the legacy archives are
+    wrapped with the OLD DPAPI scope which the new user can no
+    longer unwrap — :func:`_load_key_from_archive` will return
+    ``None`` for every archive and recovery silently fails over to
+    the orphan classification. The user can still recover manually
+    by mounting the old profile and re-wrapping the archive with
+    the new DPAPI scope (out of scope for this patch).
+
+    Returns:
+        List of 32-byte keys, newest first. Empty when no archive
+        exists or none can be loaded.
+    """
+    keys: list[bytes] = []
+    for archive in list_legacy_key_archives():
+        key = _load_key_from_archive(archive)
+        if key is not None:
+            keys.append(key)
+    return keys
 
 
 def _compute_hmac(data: str) -> str:

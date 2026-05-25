@@ -275,11 +275,31 @@ class TestKeyFilePermissions:
 
 
 class TestDpapiUnwrapFailureRegen:
-    """An existing wrapped key that cannot be unwrapped triggers regen."""
+    """An existing wrapped key that cannot be unwrapped triggers regen.
 
-    def test_unwrap_failure_regenerates_key(self, isolated_appdata, monkeypatch):
+    Behaviour change (this patch): the silent regeneration on unwrap
+    failure is now gated on ``--allow-plaintext-keys``. Strict mode
+    instead raises ``HMACKeyRegeneratedError`` so the bootstrap can
+    warn the user BEFORE the next ``_phase_orphan_scan`` would
+    classify every historical ``.wbcommit`` as an orphan and delete
+    the corresponding backups. The dedicated coverage for the strict
+    path lives in ``test_hmac_key_regen_alert.py``; this test pins
+    down that the legacy silent-regen path still works under the
+    opt-in plaintext flag (CLI contract preserved).
+    """
+
+    def test_unwrap_failure_regenerates_key_under_plaintext_fallback(
+        self,
+        isolated_appdata,
+        monkeypatch,
+    ):
         monkeypatch.setattr(integrity_check.sys, "platform", "win32")
         monkeypatch.setattr(integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data)
+
+        # ``--allow-plaintext-keys`` users get the legacy silent regen.
+        # Without this flag, the call raises HMACKeyRegeneratedError —
+        # covered in the dedicated regen-alert test module.
+        integrity_check._ALLOW_PLAINTEXT_FALLBACK = True
 
         # Write a file as if a previous Windows user wrapped it; this
         # user can no longer unwrap (different DPAPI scope).
@@ -304,11 +324,22 @@ class TestDpapiUnwrapFailureRegen:
 
 
 class TestMalformedFileRegen:
-    """A file that is neither marker-prefixed nor 32 bytes is regenerated."""
+    """A file that is neither marker-prefixed nor 32 bytes is regenerated.
 
-    def test_malformed_size_regenerates(self, isolated_appdata, monkeypatch):
+    Same behaviour-change rationale as ``TestDpapiUnwrapFailureRegen``:
+    the silent regen path is now opt-in via plaintext fallback. The
+    default-strict path raises ``HMACKeyRegeneratedError`` and is
+    covered in ``test_hmac_key_regen_alert.py``.
+    """
+
+    def test_malformed_size_regenerates_under_plaintext_fallback(
+        self,
+        isolated_appdata,
+        monkeypatch,
+    ):
         monkeypatch.setattr(integrity_check.sys, "platform", "win32")
         monkeypatch.setattr(integrity_check, "_dpapi_wrap", lambda data: b"WRAPPED:" + data)
+        integrity_check._ALLOW_PLAINTEXT_FALLBACK = True
 
         # 17 bytes: no marker, wrong size — clearly garbage.
         _key_path(isolated_appdata).parent.mkdir(parents=True, exist_ok=True)

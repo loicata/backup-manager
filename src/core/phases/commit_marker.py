@@ -128,6 +128,119 @@ def _compute_marker_hmac(payload: dict) -> str:
     return hmac.new(key, msg, hashlib.sha256).hexdigest()
 
 
+def _compute_marker_hmac_with_key(payload: dict, key: bytes) -> str:
+    """Same as :func:`_compute_marker_hmac` but with a caller-supplied key.
+
+    Used by the legacy-key recovery branch of :func:`read_commit_marker`
+    so we can try each archived ``.integrity_key.legacy_*`` against a
+    marker that fails verification with the CURRENT key — without
+    having to monkey-patch ``get_app_hmac_key``.
+
+    Args:
+        payload: Marker dict with all fields except (or including)
+            ``hmac_sha256``; the field is stripped before signing
+            anyway by :func:`_payload_to_sign`.
+        key: 32-byte HMAC key to use for the computation.
+
+    Returns:
+        Lowercase hex digest (64 chars).
+    """
+    msg = _payload_to_sign(payload)
+    return hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+
+def _try_validate_with_legacy_keys(payload: dict, expected_hmac: str) -> bytes | None:
+    """Try every available archived HMAC key against the marker.
+
+    The current key has already failed validation by the time this is
+    called. We iterate the ``.integrity_key.legacy_*`` archives newest-
+    first and return the first one whose HMAC matches the marker's
+    stored ``hmac_sha256``. Caller is expected to immediately re-sign
+    the marker with the current key (so the next read takes the fast
+    path).
+
+    Honest scope: on a Windows reinstall the archives were wrapped
+    with the OLD DPAPI scope and will fail to load — in that case
+    ``get_legacy_hmac_keys`` returns an empty list and we return
+    ``None``. The recovery only succeeds for failures local to the
+    LIVE key file (AV touched the live only, corruption, etc.).
+
+    Args:
+        payload: Decoded marker dict.
+        expected_hmac: The ``hmac_sha256`` value carried by the marker
+            (lowercase hex).
+
+    Returns:
+        The legacy key that validates the marker, or ``None`` when
+        no archived key matches. Returning the key itself (rather
+        than just True/False) lets a future caller log which archive
+        was used; today the caller only needs the truthiness.
+    """
+    from src.security.integrity_check import get_legacy_hmac_keys
+
+    try:
+        legacy_keys = get_legacy_hmac_keys()
+    except OSError as e:
+        # ``get_legacy_hmac_keys`` itself does not raise but the lazy
+        # import above might (broken install, ImportError surfaced
+        # as OSError on Windows long-path edge cases). Treat as
+        # "no legacy keys available" rather than crashing the read.
+        logger.debug("Could not enumerate legacy HMAC keys: %s", e)
+        return None
+    for legacy_key in legacy_keys:
+        actual = _compute_marker_hmac_with_key(payload, legacy_key)
+        if hmac.compare_digest(expected_hmac, actual):
+            return legacy_key
+    return None
+
+
+def _resign_marker_with_current_key(marker_path: Path, payload: dict) -> None:
+    """Recompute the marker's HMAC with the current key and rewrite.
+
+    Best-effort: any failure (current key unavailable, disk full,
+    permission denied) is logged at WARNING but does NOT undo the
+    recovery — the in-memory ``payload`` is still returned to the
+    caller, and the next read will simply fall back to the legacy-
+    key validation path again. Re-signing is an optimisation that
+    keeps subsequent reads on the fast path; failing to re-sign
+    leaves the slow path active but does not break anything.
+
+    Uses the same atomic-rename pattern as :func:`write_commit_marker`
+    so a crash mid-rewrite cannot leave a half-written marker that
+    fails every future read.
+
+    Args:
+        marker_path: Path of the existing ``.wbcommit`` on disk.
+        payload: The validated payload (HMAC field will be replaced
+            with a fresh value computed from the current key).
+    """
+    try:
+        new_hmac = _compute_marker_hmac(payload)
+    except OSError as e:
+        logger.warning(
+            "Could not re-sign marker %s with current key (recovery "
+            "succeeded but next read will hit legacy fallback again): %s",
+            marker_path,
+            e,
+        )
+        return
+    new_payload = dict(payload)
+    new_payload["hmac_sha256"] = new_hmac
+    tmp_path = marker_path.with_name(marker_path.name + ".tmp")
+    try:
+        data = serialise_commit_marker(new_payload)
+        tmp_path.write_bytes(data)
+        os.replace(tmp_path, marker_path)
+        logger.info(
+            "Marker %s re-signed with current key after legacy-key recovery",
+            marker_path,
+        )
+    except OSError as e:
+        logger.warning("Could not write re-signed marker %s: %s", marker_path, e)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+
+
 def build_commit_marker(
     manifest_sha256: str,
     files_count: int,
@@ -297,6 +410,125 @@ def write_commit_marker(
     return marker_path
 
 
+def _decode_marker_file(marker_path: Path) -> dict | None:
+    """Read + JSON-parse a marker file and validate the HMAC field shape.
+
+    Returns the parsed dict on success, ``None`` (with WARNING log)
+    on any non-recoverable problem (read error, malformed JSON,
+    missing/short HMAC field). The HMAC value is NOT verified here —
+    only its presence/shape, so the caller can attempt verification
+    with the current key and then optionally the legacy keys.
+    """
+    if not isinstance(marker_path, Path):
+        raise TypeError(f"marker_path must be a Path, got {type(marker_path).__name__}")
+    if not marker_path.exists():
+        return None
+    try:
+        raw = marker_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("Could not read commit marker %s: %s", marker_path, e)
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.warning("Commit marker %s is not valid JSON: %s", marker_path, e)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("Commit marker %s is not a JSON object", marker_path)
+        return None
+    expected_hmac = payload.get("hmac_sha256")
+    if not isinstance(expected_hmac, str) or len(expected_hmac) != _HEX_DIGEST_LEN:
+        logger.warning("Commit marker %s has missing or malformed HMAC", marker_path)
+        return None
+    return payload
+
+
+def _verify_marker_hmac_or_recover(payload: dict, marker_path: Path) -> bool:
+    """Verify the marker's HMAC, falling back to legacy keys on mismatch.
+
+    Three outcomes:
+
+    1. Current key matches → returns True. Fast path, no recovery
+       needed, no disk write.
+    2. Current key fails BUT a legacy key matches → returns True
+       AND triggers a best-effort re-sign with the current key so
+       subsequent reads take the fast path.
+    3. Neither current nor any legacy key matches → returns False
+       with a WARNING line. Caller treats the marker as untrusted.
+
+    Args:
+        payload: Decoded marker dict from :func:`_decode_marker_file`.
+            ``payload["hmac_sha256"]`` is already known to be a
+            64-char hex string.
+        marker_path: Path of the marker on disk (used for re-signing
+            and for the diagnostic log line).
+
+    Returns:
+        True when the marker is authentic (current or legacy key
+        validates it), False otherwise.
+    """
+    expected_hmac: str = payload["hmac_sha256"]
+    try:
+        actual_hmac = _compute_marker_hmac(payload)
+    except OSError as e:
+        logger.error(
+            "Cannot verify commit marker %s: HMAC key unavailable (%s)",
+            marker_path,
+            e,
+        )
+        return False
+    if hmac.compare_digest(expected_hmac, actual_hmac):
+        return True
+    # Current key failed — try legacy keys before declaring orphan.
+    if _try_validate_with_legacy_keys(payload, expected_hmac) is None:
+        logger.warning(
+            "Commit marker %s HMAC mismatch (no legacy key matched either) "
+            "— refusing to trust it",
+            marker_path,
+        )
+        return False
+    logger.info(
+        "Commit marker %s validated via legacy key — re-signing with current key",
+        marker_path,
+    )
+    _resign_marker_with_current_key(marker_path, payload)
+    return True
+
+
+def _validate_marker_structure(payload: dict, marker_path: Path) -> bool:
+    """Check the post-HMAC structural fields are well-formed.
+
+    The HMAC has already validated by the time we reach here, so any
+    failure here means the marker was signed with our key (or a
+    legacy one) but produced by a faulty writer or by a tampered
+    payload that nevertheless re-signed correctly. Refusing is
+    safer than crashing downstream consumers on wrong types.
+    """
+    if payload.get("version") != COMMIT_MARKER_VERSION:
+        logger.warning(
+            "Commit marker %s has version %r (expected %d) — refusing",
+            marker_path,
+            payload.get("version"),
+            COMMIT_MARKER_VERSION,
+        )
+        return False
+    manifest = payload.get("manifest_sha256")
+    if not isinstance(manifest, str) or len(manifest) != _HEX_DIGEST_LEN:
+        logger.warning("Commit marker %s has malformed manifest_sha256", marker_path)
+        return False
+    files_count = payload.get("files_count")
+    if not isinstance(files_count, int) or isinstance(files_count, bool):
+        logger.warning("Commit marker %s has malformed files_count", marker_path)
+        return False
+    if files_count < 0:
+        logger.warning("Commit marker %s has negative files_count", marker_path)
+        return False
+    if not isinstance(payload.get("destination_label"), str):
+        logger.warning("Commit marker %s has malformed destination_label", marker_path)
+        return False
+    return True
+
+
 def read_commit_marker(marker_path: Path) -> dict | None:
     """Load and HMAC-verify a ``.wbcommit`` file.
 
@@ -306,84 +538,26 @@ def read_commit_marker(marker_path: Path) -> dict | None:
     Logs at WARNING level for malformed cases so an attacker cannot
     silently feed bogus markers without leaving a trace.
 
+    Recovery path (since the legacy-key archive feature): when the
+    current key fails verification, every available
+    ``.integrity_key.legacy_*`` archive is tried in turn; the first
+    one that validates the marker is accepted, AND the marker is
+    re-signed in place with the current key so subsequent reads stay
+    on the fast path. See :func:`_verify_marker_hmac_or_recover`.
+
     Args:
         marker_path: Path to the ``.wbcommit`` file.
 
     Returns:
         Validated payload dict on success, ``None`` otherwise.
     """
-    if not isinstance(marker_path, Path):
-        raise TypeError(f"marker_path must be a Path, got {type(marker_path).__name__}")
-    if not marker_path.exists():
+    payload = _decode_marker_file(marker_path)
+    if payload is None:
         return None
-
-    try:
-        raw = marker_path.read_text(encoding="utf-8")
-    except OSError as e:
-        logger.warning("Could not read commit marker %s: %s", marker_path, e)
+    if not _verify_marker_hmac_or_recover(payload, marker_path):
         return None
-
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.warning("Commit marker %s is not valid JSON: %s", marker_path, e)
+    if not _validate_marker_structure(payload, marker_path):
         return None
-
-    if not isinstance(payload, dict):
-        logger.warning("Commit marker %s is not a JSON object", marker_path)
-        return None
-
-    expected_hmac = payload.get("hmac_sha256")
-    if not isinstance(expected_hmac, str) or len(expected_hmac) != _HEX_DIGEST_LEN:
-        logger.warning("Commit marker %s has missing or malformed HMAC", marker_path)
-        return None
-
-    try:
-        actual_hmac = _compute_marker_hmac(payload)
-    except OSError as e:
-        # HMAC key unavailable — treat as untrusted rather than crash.
-        logger.error(
-            "Cannot verify commit marker %s: HMAC key unavailable (%s)",
-            marker_path,
-            e,
-        )
-        return None
-
-    if not hmac.compare_digest(expected_hmac, actual_hmac):
-        logger.warning(
-            "Commit marker %s HMAC mismatch — refusing to trust it",
-            marker_path,
-        )
-        return None
-
-    if payload.get("version") != COMMIT_MARKER_VERSION:
-        logger.warning(
-            "Commit marker %s has version %r (expected %d) — refusing",
-            marker_path,
-            payload.get("version"),
-            COMMIT_MARKER_VERSION,
-        )
-        return None
-
-    # Sanity-check the structural fields now that we know the marker
-    # is authentic. Any malformed field means the marker was signed
-    # with our key but produced by a faulty writer; refuse it rather
-    # than risk a downstream crash on wrong types.
-    manifest = payload.get("manifest_sha256")
-    if not isinstance(manifest, str) or len(manifest) != _HEX_DIGEST_LEN:
-        logger.warning("Commit marker %s has malformed manifest_sha256", marker_path)
-        return None
-    files_count = payload.get("files_count")
-    if not isinstance(files_count, int) or isinstance(files_count, bool):
-        logger.warning("Commit marker %s has malformed files_count", marker_path)
-        return None
-    if files_count < 0:
-        logger.warning("Commit marker %s has negative files_count", marker_path)
-        return None
-    if not isinstance(payload.get("destination_label"), str):
-        logger.warning("Commit marker %s has malformed destination_label", marker_path)
-        return None
-
     return payload
 
 

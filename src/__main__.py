@@ -271,6 +271,92 @@ def _crash_log(error_msg: str):
     crash_file.write_text(error_msg, encoding="utf-8")
 
 
+def _format_hmac_regen_message(error) -> str:
+    """Build the modal body shown when the HMAC key needs regeneration.
+
+    Surfaces (a) the technical reason returned by ``_get_hmac_key``,
+    (b) a plain-English explanation of the data-loss risk, and
+    (c) the path to the most recent ``.legacy_*`` archive when
+    ``_archive_old_key`` was able to back the old key up.
+
+    Kept in its own helper so the handler can stay short and so the
+    text can be exercised by a unit test that imports the function
+    without spinning up a Tk display.
+
+    Args:
+        error: The :class:`HMACKeyRegeneratedError` instance raised
+            by ``_get_hmac_key`` (or, equivalently, by
+            ``verify_integrity`` which calls it).
+
+    Returns:
+        Multi-line message ready for ``tkinter.messagebox.askyesno``.
+    """
+    archive_hint = ""
+    parent_dir = error.prior_key_path.parent
+    if parent_dir.exists():
+        pattern = f"{error.prior_key_path.name}.legacy_*"
+        legacy_files = sorted(parent_dir.glob(pattern))
+        if legacy_files:
+            archive_hint = (
+                f"\n\nThe original key file has been archived to:\n"
+                f"  {legacy_files[-1]}\n"
+                f"Keep this file: a future recovery tool may use it to "
+                f"re-validate historical backup commit markers."
+            )
+    return (
+        "Backup Manager has detected a change in its installation identity.\n\n"
+        f"{error.reason}\n\n"
+        "If you have NOT deliberately reinstalled Windows, changed user, "
+        "or moved %APPDATA%\\BackupManager between machines:\n"
+        "  -> Click 'No' (recommended). Your existing backups stay safe as "
+        "long as no new run starts. Investigate the cause before relaunching.\n\n"
+        "If this change is expected:\n"
+        "  -> Click 'Yes'. Backup Manager will create a fresh key. "
+        "ALL EXISTING BACKUPS ON LOCAL DESTINATIONS will be classified as "
+        "orphans and removed at the next backup run."
+        f"{archive_hint}\n\n"
+        "Continue and accept loss of historical backups?"
+    )
+
+
+def _handle_hmac_regen_at_startup(error) -> str:
+    """Show modal alert when ``_get_hmac_key`` reports a suspicious regen.
+
+    Two outcomes:
+        - ``"abort"``: user clicked No (or the dialog could not be
+          displayed). The bootstrap MUST stop without regenerating —
+          the offending state stays on disk so the next launch raises
+          the same alert (idempotent).
+        - ``"continue_destructive"``: user explicitly accepted that
+          historical backups on LOCAL destinations will be wiped at
+          the next backup. The caller is expected to enable plaintext
+          fallback for this session and re-run integrity check so the
+          regen actually happens.
+
+    Args:
+        error: The :class:`HMACKeyRegeneratedError` instance.
+
+    Returns:
+        ``"abort"`` or ``"continue_destructive"``.
+    """
+    try:
+        import tkinter.messagebox as mb
+
+        user_says_yes = mb.askyesno(
+            "Backup Manager - Identity change detected",
+            _format_hmac_regen_message(error),
+            icon="warning",
+            default="no",
+        )
+    except Exception:
+        # If we cannot display the dialog (no display, Tk broken),
+        # default to ABORT. Better to refuse to start than to delete
+        # the user's backups without their consent.
+        logger.exception("Could not show HMAC regen dialog — defaulting to abort")
+        return "abort"
+    return "continue_destructive" if user_says_yes else "abort"
+
+
 def main():
     """Application main entry point."""
     start_minimized = "--minimized" in sys.argv
@@ -374,11 +460,45 @@ def main():
                 AutoStart.ensure_startup(show_window=False)
                 logger.info("Auto-start registry entry created (was missing)")
 
-        # Integrity check (non-blocking)
+        # Integrity check (non-blocking) — but the call also resolves
+        # the per-install HMAC key via ``_get_hmac_key``. A suspicious
+        # regen (DPAPI unwrap fail, key file disappeared while sentinel
+        # present, etc.) raises ``HMACKeyRegeneratedError`` so we can
+        # warn the user BEFORE the next backup classifies every
+        # historical ``.wbcommit`` as an orphan and deletes the
+        # corresponding LOCAL-destination backups.
+        from src.core.exceptions import HMACKeyRegeneratedError
+
         logger.info("Running integrity check...")
-        ok, msg = verify_integrity()
-        if not ok:
-            logger.warning("Integrity check: %s", msg)
+        try:
+            ok, msg = verify_integrity()
+            if not ok:
+                logger.warning("Integrity check: %s", msg)
+        except HMACKeyRegeneratedError as regen_error:
+            decision = _handle_hmac_regen_at_startup(regen_error)
+            if decision == "abort":
+                logger.warning(
+                    "User aborted launch after HMAC regeneration alert. "
+                    "State on disk left unchanged so the next launch re-prompts."
+                )
+                _release_single_instance()
+                logger.info("Backup Manager exiting")
+                os._exit(0)
+            # User accepted: enable the plaintext fallback so the
+            # regen actually proceeds on the retry below. The flag is
+            # process-local, so a subsequent relaunch returns to the
+            # strict posture automatically.
+            from src.security.integrity_check import enable_plaintext_fallback
+
+            enable_plaintext_fallback()
+            logger.critical(
+                "User confirmed HMAC regeneration despite warning. "
+                "Historical .wbcommit markers will be classified as orphans "
+                "and deleted at the next backup run on LOCAL destinations."
+            )
+            ok, msg = verify_integrity()
+            if not ok:
+                logger.warning("Integrity check (post-regen): %s", msg)
 
         # Launch main app — reset geometry and prepare window
         logger.info("Launching main app...")

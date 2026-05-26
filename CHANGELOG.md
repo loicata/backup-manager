@@ -5,6 +5,20 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.29] - 2026-05-26
+
+### Added
+- **In-app bottom-centre toast notifications** replace ``messagebox.showinfo`` for transient acknowledgements. Saving a profile, removing an Object Lock profile, and listing modules used to fire a modal pop-up the user had to dismiss with a click — now they show a non-blocking toast that auto-dismisses after 2.5 s (success) or 3 s (info). Toasts stack vertically up to 3 visible simultaneously (newest on top, oldest force-dismissed past the cap), can be manually closed via the ``×`` button, and follow the Material Design / Windows 11 convention of bottom-centre placement. Multi-line support via ``wraplength`` (capped at ~520 px) lets the diagnostic toasts (``Modules`` feature status) carry per-line detail without overflowing — the toast collapses to a single line ("All N features available") on the happy path and only expands when something is missing.
+- **New module** ``src/ui/notifications.py`` exposes ``ToastManager`` with three shortcuts ``success`` / ``info`` / ``error`` (green / blue / red, with an icon prefix ✓ / ℹ / ⚠). Errors get the longest dwell time (5 s) on the assumption that they are less anticipated than success toasts and need more reading time. A ``clear()`` method dismisses every visible toast at once (intended for future use on profile-switch).
+
+### Changed
+- ``BackupManagerApp._save_profile`` (line 1648): the ``"Profile 'X' saved"`` confirmation is now a green toast instead of a modal pop-up. Every save no longer interrupts the user with a click-to-dismiss dialog.
+- ``BackupManagerApp._delete_profile`` (line 1844): the Object Lock notice ("Backups on AWS S3 are protected by Object Lock") is now a blue info toast.
+- ``BackupManagerApp._show_modules`` (line 3370): the feature-status report is now a toast — single-line success when everything is available, multi-line info toast (capped at 5 entries + "… and N more") when features are missing.
+
+### Tests
+- +22 tests in ``tests/unit/test_toast_notifications.py``: construction validation (host required, empty/whitespace/non-string messages rejected, unknown levels rejected), stack-and-evict semantics (up to ``_MAX_STACK=3``, newest at top, fourth evicts the oldest, repack after middle dismissal), dismissal idempotence (auto-timer + close-button both safe to call), variant styling (success=green / info=blue / error=red with correct dismiss durations), placement anchor (bottom-centre via ``place(relx=0.5, rely=1.0, anchor='s')``), and multi-line body rendering. All exercised against the real Tk widget tree via the existing session-scoped ``tk_root`` fixture.
+
 ## [3.7.28] - 2026-05-26
 
 ### Fixed

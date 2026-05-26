@@ -780,6 +780,16 @@ class BackupManagerApp:
         # Alert frame placeholder (shown when targets are unavailable)
         self._alert_frame: tk.Frame | None = None
 
+        # In-app toast notifications.  Replaces ``messagebox.showinfo``
+        # for transient acknowledgements (profile saved, modules
+        # status, etc.) so the UI never opens a modal pop-up for a
+        # message the user does not need to click.  The manager is
+        # hosted on ``main`` so toasts overlay both the sidebar and
+        # the notebook from the bottom-centre of the window.
+        from src.ui.notifications import ToastManager
+
+        self.toasts = ToastManager(main)
+
     def _build_sidebar(self, parent):
         """Build the left sidebar with profile list."""
         sidebar = tk.Frame(parent, bg=Colors.SIDEBAR_BG, width=200)
@@ -1631,11 +1641,16 @@ class BackupManagerApp:
 
         # Immediate user feedback BEFORE the secondary work (registry
         # write + profile-list rebuild) — those take 100-300 ms on a
-        # laptop and the user reads the popup as "the click did nothing"
-        # when they happen first. The data is safely on disk at this
-        # point, so the popup is truthful.
+        # laptop and the user reads the toast as "the click did
+        # nothing" when they happen first. The data is safely on disk
+        # at this point, so the confirmation is truthful.
+        #
+        # Switched from ``messagebox.showinfo`` (modal pop-up) to a
+        # bottom-centre toast in 3.7.29 — saving a profile is a
+        # routine acknowledgement, the user should not have to click
+        # OK on a pop-up every single time.
         if not silent:
-            messagebox.showinfo("Saved", f"Profile '{profile.name}' saved.")
+            self.toasts.success(f"Profile '{profile.name}' saved")
 
         # Apply auto-start setting
         if general["autostart"]:
@@ -1825,13 +1840,15 @@ class BackupManagerApp:
             return
 
         if profile.object_lock_enabled:
-            # Object Lock profiles: backups cannot be deleted
-            messagebox.showinfo(
-                "Object Lock",
-                f"Profile '{name}' will be removed.\n\n"
-                "Backups on Amazon AWS S3 are protected by Object Lock "
-                "and cannot be deleted. They will expire automatically "
-                "at the end of the retention period.",
+            # Object Lock profiles: backups cannot be deleted.
+            # Toasted (3.7.29) instead of popup — informational only:
+            # the user already chose to delete the profile, this
+            # notice just clarifies that the S3 backups will outlive
+            # the deletion until their Object Lock retention expires.
+            self.toasts.info(
+                f"Profile '{name}' removed. Backups on Amazon AWS S3 "
+                "are protected by Object Lock and will expire "
+                "automatically at the end of the retention period."
             )
             self._finalize_profile_deletion(profile)
         else:
@@ -3351,16 +3368,37 @@ class BackupManagerApp:
                 logger.warning("Auto-save failed: %s", exc)
 
     def _show_modules(self):
+        """Show feature/module availability via a bottom-centre toast.
+
+        Replaces the legacy ``messagebox.showinfo("Modules", ...)`` so
+        the diagnostic is non-blocking. The success path collapses to
+        a single short line ("All features available") because the
+        common case is "everything works" and the user does not need
+        a multi-line breakdown to know that. Only when something is
+        missing does the toast carry the per-feature detail — and
+        even then it is capped to 5 lines + a "+N more" footer so the
+        toast envelope stays within ``_TOAST_MAX_WIDTH``.
+        """
         from src.installer import check_all
 
         results = check_all()
-        msg = "Feature status:\n\n"
-        for feat, info in results.items():
-            status = (
-                "✅ Available" if info["available"] else f"❌ Missing: {', '.join(info['missing'])}"
-            )
-            msg += f"  {feat}: {status}\n"
-        messagebox.showinfo("Modules", msg)
+        missing = [
+            (feat, ", ".join(info["missing"]))
+            for feat, info in results.items()
+            if not info["available"]
+        ]
+        if not missing:
+            self.toasts.success(f"All {len(results)} features available")
+            return
+
+        lines = [
+            f"{len(missing)} of {len(results)} features missing:",
+        ]
+        for feat, deps in missing[:5]:
+            lines.append(f"  • {feat}: {deps}")
+        if len(missing) > 5:
+            lines.append(f"  … and {len(missing) - 5} more")
+        self.toasts.info("\n".join(lines))
 
     def _show_about(self):
         """Show About as a full-screen inline panel replacing the notebook."""

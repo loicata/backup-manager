@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.28] - 2026-05-26
+
+### Fixed
+- **The 3.7.27 swallow guard was incomplete — the red ``"Destination is read-only or locked"`` card still showed during a backup.** User report (26/05/2026 on the v3.7.27 install, TestNP at 60%): the swallow guard introduced in 3.7.27 correctly blocked NEW spurious results from reaching the card while ``_backup_running == True``, but the card had ALREADY been painted red by an earlier poll (typical case: the user clicked the profile in the sidebar a few seconds before the backup started, ``_load_profile`` fired a health check, that check raced the writer of the previous chained backup and finished red BEFORE ``_backup_running`` flipped — the swallow guard had no reason to fire then). The stale red then persisted until the next 60 s poll tick.
+- **Fix**: new helper ``_repoll_destinations_after_backup_start`` re-fires every destination probe IMMEDIATELY after ``_backup_running`` is set to True, both in the manual path (``_start_backup_thread``) and in the scheduler path (``_scheduled_backup``). The spawned threads read the flag at start, take the lightweight path (``shutil.disk_usage``), and produce a clean green ``"X GB free"`` result that repaints the card on top of any stale red. The 60 s scheduled ``_poll_health`` keeps running as before. The swallow guard from 3.7.27 stays in place as defence-in-depth for any further NEW spurious result that might come in during the run.
+
+### Tests
+- +14 tests in ``tests/unit/test_health_repoll_at_backup_start.py``: one thread spawned per destination (parametrised over 0/1/2/3/5 destinations), threads are daemon + named with a distinguishable ``HealthRepoll-`` prefix, empty / missing ``_health_configs`` is a no-op, repolled threads use the same ``_check_single_destination`` entry point so the swallow guard still applies, and a source-inspection assertion pins down that the repoll call sits AFTER the ``self._backup_running = True`` line in both ``_start_backup_thread`` and ``_scheduled_backup`` (a future refactor that moves the flag-set will not silently bypass the guard).
+
 ## [3.7.27] - 2026-05-26
 
 ### Fixed

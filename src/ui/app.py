@@ -1412,6 +1412,43 @@ class BackupManagerApp:
             generation,
         )
 
+    def _repoll_destinations_after_backup_start(self) -> None:
+        """Spawn fresh health checks now that ``_backup_running == True``.
+
+        Race-correction companion to the swallow guard in
+        :meth:`_on_health_result`. The swallow guard hides any NEW
+        spurious ``"read-only or locked"`` result that arrives during
+        the backup, but it cannot CLEAR a card that was already painted
+        red by an earlier poll (e.g. a check fired by ``_load_profile``
+        seconds before the backup actually started, that finished and
+        painted red before the swallow guard had any reason to fire).
+
+        This helper re-fires every destination probe immediately AFTER
+        ``_backup_running`` flips to True. Because the workers read
+        ``self._backup_running`` at thread start, the new probes are
+        guaranteed to take the lightweight path
+        (``shutil.disk_usage`` + ``Path.exists``) and produce a clean
+        green result that repaints the card. The 60 s scheduled
+        ``_poll_health`` tick still runs as before.
+
+        Safe to call when no destinations are configured yet
+        (``_health_configs`` empty or missing): no-op then.
+
+        Caller MUST have set ``self._backup_running = True`` BEFORE
+        calling this method, otherwise the spawned threads will race
+        for the same lightweight snapshot they were trying to avoid.
+        """
+        configs = getattr(self, "_health_configs", None)
+        if not configs:
+            return
+        for index, (config, label) in configs.items():
+            threading.Thread(
+                target=self._check_single_destination,
+                args=(index, config, label),
+                daemon=True,
+                name=f"HealthRepoll-{label}",
+            ).start()
+
     def _check_single_destination(self, index: int, config: "StorageConfig", label: str) -> None:
         """Check one destination and report result via callback.
 
@@ -2309,6 +2346,16 @@ class BackupManagerApp:
         # the flag and skips. Reset in the thread's finally block.
         self._backup_running = True
 
+        # Repoll destination health NOW so the Destinations card cannot
+        # be left showing a stale "read-only or locked" red painted by
+        # an earlier poll that fired BEFORE the backup started (typical
+        # case: the user clicked the profile in the sidebar, the health
+        # check raced the writer of the previous chained backup, and
+        # painted red). The fresh probes spawned here read
+        # ``_backup_running == True`` and take the lightweight path,
+        # producing a green "X GB free" result that replaces the red.
+        self._repoll_destinations_after_backup_start()
+
         # Tell the scheduler this profile is now in flight so its
         # periodic checks (_check_schedules, _check_missed_backups,
         # wake-from-sleep recovery) skip it instead of firing a
@@ -2911,6 +2958,15 @@ class BackupManagerApp:
         # UI save cannot overwrite the JSON on disk while the scheduler is
         # mid-pipeline.
         self._backup_running = True
+        # Repoll destination health so any stale "read-only or locked"
+        # card painted by the inter-backup poll window is cleared
+        # immediately (see ``_repoll_destinations_after_backup_start``
+        # docstring for the full race description). Particularly
+        # relevant on the scheduler chain (L2 -> My Backup -> TestNP)
+        # where the card for the currently-selected profile may have
+        # been painted red while a sibling backup was holding the
+        # local drive's I/O queue.
+        self._repoll_destinations_after_backup_start()
         # Register the scheduler's engine so a cancel click on its
         # profile (sidebar selection) reaches it. The manual path
         # registers the same way in ``_start_backup_thread``.

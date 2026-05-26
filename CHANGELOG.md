@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.27] - 2026-05-26
+
+### Fixed
+- **Destinations card flashed "read-only or locked" for ~60 s every time a backup started.** User report (26/05/2026 on the v3.7.26 install): every TestNP / L2 / My Backup run opened with a red ``Destination is read-only or locked`` line in the Destinations card even though the backup itself was succeeding. Visible on every version up to and including 3.7.26 — not introduced by 3.7.26, only surfaced more visibly because the backup chain runs immediately after a sidebar click. Root cause is a known race documented in ``src/core/health_checker.py:130-138``: ``_check_single_destination`` reads ``lightweight = self._backup_running`` ONCE at the start of the health-check thread; ``test_connection`` then runs up to ~15.8 s of USB wake-up backoff; if the backup pipeline flips ``_backup_running`` to True during that window, the eventual ``write_text(".backup_manager_test")`` probe trips ``PermissionError`` against the writer thread which is now actively copying to the same drive. The result lands at ``_on_health_result`` with ``online=False`` and the spurious ``"Destination is read-only or locked"`` error, the card paints red, and stays red until the next 60 s poll tick finally reads ``_backup_running == True`` and switches to the lightweight ``shutil.disk_usage`` path.
+- **Fix**: ``_on_health_result`` now applies a narrow race guard before forwarding the result to ``RunTab.update_destination_status``. When ALL three clauses hold — ``_backup_running == True`` AND ``health.online is False`` AND ``READ_ONLY_OR_LOCKED_MARKER`` substring is present in the error message — the result is swallowed (DEBUG-logged) and the previous successful card state stays on screen. The marker is exposed as a module-level constant in ``src/storage/local.py`` so the UI can match the exact pattern produced by ``LocalStorage.test_connection``'s ``PermissionError`` branch without grepping a free-form string. Any non-race failure (drive unplugged, real ACL change, network down) and any failure observed while no backup runs are passed through unchanged.
+
+### Tests
+- +16 tests in ``tests/unit/test_health_poll_race_swallow.py``: the swallow truth table (6 parametrised cases over the ``backup_running × online × error`` cube), the substring-match semantics (marker embedded inside a longer message still triggers the swallow; empty error does NOT), the bare-object case (``_backup_running`` attribute genuinely absent — guard treats as False, passes through), and the marker-stability sanity check (end-to-end test that ``LocalStorage.test_connection`` actually surfaces ``READ_ONLY_OR_LOCKED_MARKER`` in its ``PermissionError`` branch — catches drift between the const value and the message format).
+
 ## [3.7.26] - 2026-05-26
 
 ### Added

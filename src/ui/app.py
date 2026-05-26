@@ -1333,10 +1333,43 @@ class BackupManagerApp:
     def _on_health_result(self, index: int, health) -> None:
         """Callback from health check thread — schedule UI update.
 
+        Race guard (since 3.7.27): when the backup started AFTER the
+        health-check thread captured its ``lightweight`` snapshot but
+        BEFORE the write probe ran, the probe trips ``PermissionError``
+        because the writer concurrently owns the I/O queue. The
+        resulting ``"Destination is read-only or locked"`` card stays
+        red until the next poll tick (~60 s) finally reads
+        ``_backup_running == True`` and switches to the lightweight
+        path. Swallow that specific result here: the failure is a
+        race symptom, not a destination problem, and the on-screen
+        state from the previous successful poll is more truthful
+        than the spurious red.
+
+        The guard is narrow on purpose: only the exact
+        ``READ_ONLY_OR_LOCKED_MARKER`` substring is swallowed, and
+        only when ``_backup_running`` is True. Other failure modes
+        (drive unplugged, real ACL change, network down) and any
+        failure observed while no backup runs are passed through
+        unchanged.
+
         Args:
             index: Destination index (0=storage, 1+=mirrors).
             health: DestinationHealth result.
         """
+        from src.storage.local import READ_ONLY_OR_LOCKED_MARKER
+
+        backup_in_flight = bool(getattr(self, "_backup_running", False))
+        if (
+            backup_in_flight
+            and health.online is False
+            and READ_ONLY_OR_LOCKED_MARKER in (health.error or "")
+        ):
+            logger.debug(
+                "Health-poll race detected on %s (backup in flight); "
+                "swallowing spurious read-only card",
+                health.label,
+            )
+            return
 
         with contextlib.suppress(Exception):
             self.tab_run.after(

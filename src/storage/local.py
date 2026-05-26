@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 # deep power-save that need 10-12s to enumerate.
 CONNECTION_TIMEOUT = 30  # seconds
 
+# Stable substring embedded in the error message returned by
+# ``test_connection`` when the write probe fails with PermissionError.
+# Exposed as a module-level constant (rather than left as a magic string
+# inside the message) so the UI's health-poll race guard
+# (``BackupManagerApp._on_health_result``) can recognise the precise
+# error pattern produced by "writer occupies the drive while the health
+# thread races for the I/O queue" without grepping a free-form string.
+# Changing this value is a UI-contract change: keep it stable.
+READ_ONLY_OR_LOCKED_MARKER = "Destination is read-only or locked"
+
 # Windows system folders that must never be treated as backups
 SYSTEM_FOLDERS = frozenset(
     {
@@ -347,7 +357,7 @@ class LocalStorage(StorageBackend):
                 except PermissionError as pe:
                     result[0] = False
                     result[1] = (
-                        f"Destination is read-only or locked "
+                        f"{READ_ONLY_OR_LOCKED_MARKER} "
                         f"(permission denied on {self._dest}): {pe}"
                     )
                     return

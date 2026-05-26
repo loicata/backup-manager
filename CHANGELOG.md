@@ -5,6 +5,24 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.30] - 2026-05-26
+
+### Added
+- **In-app inline confirmation panel** replaces ``messagebox.askyesno`` for the high-stakes Yes/No decisions. The legacy two-step ``Delete profile`` flow (one popup for the profile, a second popup for the backups) collapses to a SINGLE inline panel that shows the whole picture: title, body, an ``[ ] Also delete every backup created by 'X' on E:\Backup Manager, G:\Backup Manager`` checkbox with a "cannot be undone" hint, and Cancel + Delete buttons (red destructive style). The user makes one informed decision instead of clicking through two consecutive modals. Same panel pattern is used for the ``Backup chain failure → run next?`` confirmation, with "Stop chain" / "Run 'NextProfile'" labels.
+- **New module** ``src/ui/confirm_panel.py`` exposes ``confirm_inline(parent_frame, *, title, body, confirm_label, ...)`` returning a ``ConfirmResult`` with ``confirmed`` and ``extras`` fields. The function is synchronous (uses ``wait_variable`` under the hood) so existing call sites swap a ``messagebox.askyesno`` line for the new call without restructuring around callbacks. Checkboxes via the ``extras=[ConfirmExtra(...)]`` parameter let one panel collect several boolean decisions in a single screen. ``Escape`` always cancels, ``Enter`` confirms, focus opens on Cancel so a user hammering Enter to dismiss a toast cannot accidentally trigger the destructive action.
+
+### Changed
+- ``BackupManagerApp._delete_profile`` (line 1833+): the two consecutive ``askyesno`` popups are now a single ``confirm_inline`` panel with an ``Also delete backups`` checkbox. Object Lock profiles still skip the checkbox (their backups cannot be deleted by the app, only by S3 lifecycle expiry) and the destinations summary is rendered into the checkbox label so the user sees exactly which paths are affected.
+- ``BackupManagerApp._dequeue_next_backup`` (line 2641+): the ``Backup failed — run next?`` popup is now a ``confirm_inline`` panel with "Stop chain" + "Run 'X'" buttons. The chain-abort decision deserves more visual presence than a single-line modal.
+- Two new helpers ``_hide_main_layout`` / ``_restore_main_layout`` factor the notebook + save-frame hide/restore recipe that ``_show_about`` and the new confirm panel both need. Future inline-panel features only have to call these two helpers — single edit point for layout changes.
+
+### Not migrated (deliberately)
+- ``HistoryTab._delete_selected`` keeps ``messagebox.askyesno`` for the ``Delete log file?`` confirmation: the tab does not hold a reference to the main frame the inline panel would attach to. Migrating would require a service-injection pattern (constructor callback or service locator) — out of scope for this release. Lower stakes too (a log file, not a profile).
+- ``__main__._handle_hmac_regen_at_startup`` keeps ``messagebox.askyesno`` for the HMAC identity-change alert: it fires BEFORE ``BackupManagerApp`` is constructed, so there is no main frame to host an inline panel. Pre-UI bootstrap modals stay as system popups, by design.
+
+### Tests
+- +20 tests in ``tests/unit/test_confirm_panel.py``: input validation (``_validate_args`` rejects ``None`` parent, empty/non-string title / body / labels), dataclass contracts (``ConfirmExtra`` defaults, ``ConfirmResult`` shape), end-to-end click round-trip (confirm → ``confirmed=True``, cancel → ``confirmed=False``, ``extras`` reflect the live checkbox state including toggled-after-mount and default-True preserved-on-cancel cases), ``hide_callback`` / ``restore_callback`` ordering and exception isolation (a raising callback does NOT break the return), and panel teardown (no widget leaked under the host after dismissal). All driven through the real Tk event loop via ``root.after`` scheduled clicks against the shared session-scoped ``tk_root`` fixture.
+
 ## [3.7.29] - 2026-05-26
 
 ### Added

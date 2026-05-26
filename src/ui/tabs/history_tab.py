@@ -212,6 +212,12 @@ class HistoryTab(ttk.Frame):
         path = self._selected_log_path()
         if path is None:
             return
+        # Kept as askyesno (not migrated to confirm_inline in 3.7.30)
+        # because the HistoryTab does not have a reference to the
+        # main frame the inline panel would attach to. Migrating
+        # would require an injection pattern (constructor callback
+        # or service locator) — out of scope for the inline-confirm
+        # release. Re-evaluate when more tabs need inline confirms.
         if not messagebox.askyesno(
             "Delete log",
             f"Delete this log file?\n\n{path.name}\n\n"

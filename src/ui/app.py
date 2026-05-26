@@ -40,6 +40,7 @@ from src.ui.tabs.run_tab import RunTab
 from src.ui.tabs.schedule_tab import ScheduleTab
 from src.ui.tabs.storage_tab import StorageTab
 from src.ui.tabs.verify_tab import VerifyTab
+from src.ui.confirm_panel import ConfirmExtra, confirm_inline
 from src.ui.theme import (
     APP_TITLE,
     MIN_SIZE,
@@ -1831,39 +1832,126 @@ class BackupManagerApp:
                 break
 
     def _delete_profile(self):
+        """Confirm + delete the currently-selected profile.
+
+        Migrated from two consecutive ``askyesno`` pop-ups to a
+        single inline ``confirm_inline`` panel in 3.7.30. The
+        ``delete-backups`` decision sits as a checkbox INSIDE the
+        same confirmation, which both reduces clicks (one decision
+        instead of two) and makes the destructive cascade explicit
+        in a single place (the user sees in one screen that
+        "Delete" + "include backups" are about to fire together).
+
+        Object Lock profiles skip the checkbox: their backups
+        cannot be deleted by the client (the bucket lifecycle rule
+        handles expiry once retention lapses), so offering the
+        choice would be misleading.
+        """
         if not self._current_profile:
             return
         profile = self._current_profile
         name = profile.name
 
-        if not messagebox.askyesno("Delete", f"Delete profile '{name}'?"):
+        destinations = self._format_profile_destination_list(profile)
+
+        if profile.object_lock_enabled:
+            body = (
+                f"This will remove the profile configuration, "
+                f"schedule, and email settings for '{name}'.\n\n"
+                f"Backups on Amazon AWS S3 are protected by Object "
+                f"Lock and cannot be deleted by the app. They will "
+                f"expire automatically at the end of the retention "
+                f"period."
+            )
+            extras: list[ConfirmExtra] = []
+        else:
+            body = (
+                f"This will permanently remove the profile "
+                f"configuration, schedule, and email settings "
+                f"for '{name}'."
+            )
+            extras = [
+                ConfirmExtra(
+                    key="delete_backups",
+                    label=f"Also delete every backup created by '{name}'{destinations}",
+                    default=False,
+                    hint="Removes backups from primary storage and every mirror. Cannot be undone.",
+                ),
+            ]
+
+        result = confirm_inline(
+            self._main_frame,
+            title=f"Delete profile '{name}'?",
+            body=body,
+            confirm_label="Delete",
+            cancel_label="Cancel",
+            destructive=True,
+            extras=extras,
+            icon="⚠",
+            hide_callback=self._hide_main_layout,
+            restore_callback=self._restore_main_layout,
+        )
+
+        if not result.confirmed:
             return
 
         if profile.object_lock_enabled:
-            # Object Lock profiles: backups cannot be deleted.
-            # Toasted (3.7.29) instead of popup — informational only:
-            # the user already chose to delete the profile, this
-            # notice just clarifies that the S3 backups will outlive
-            # the deletion until their Object Lock retention expires.
             self.toasts.info(
                 f"Profile '{name}' removed. Backups on Amazon AWS S3 "
                 "are protected by Object Lock and will expire "
                 "automatically at the end of the retention period."
             )
             self._finalize_profile_deletion(profile)
-        else:
-            delete_backups = messagebox.askyesno(
-                "Delete backups",
-                f"Also delete all backups created by '{name}'?\n\n"
-                "This will remove backups from all destinations "
-                "(primary storage, mirrors).\n\n"
-                "This cannot be undone.",
-            )
+            return
 
-            if delete_backups:
-                self._delete_profile_backups_async(profile)
-            else:
-                self._finalize_profile_deletion(profile)
+        if result.extras.get("delete_backups", False):
+            self._delete_profile_backups_async(profile)
+        else:
+            self._finalize_profile_deletion(profile)
+
+    def _format_profile_destination_list(self, profile: "BackupProfile") -> str:
+        """Render the destinations as a parenthetical for the delete checkbox.
+
+        Returns ``" on E:\\Backup Manager, G:\\Backup Manager"`` when
+        local paths are available, ``" on the configured remote"``
+        for SFTP/S3, or an empty string if the destinations cannot
+        be summarised cleanly. The leading space is included so the
+        caller can concatenate without thinking.
+        """
+        try:
+            paths: list[str] = []
+            primary = getattr(profile.storage, "destination_path", None)
+            if primary:
+                paths.append(primary)
+            for mirror in profile.mirror_destinations:
+                mp = getattr(mirror, "destination_path", None)
+                if mp:
+                    paths.append(mp)
+        except Exception:
+            return ""
+        if not paths:
+            return ""
+        return f" on {', '.join(paths)}"
+
+    def _hide_main_layout(self) -> None:
+        """Hide notebook + save frame for a full-screen inline panel.
+
+        Mirror of the hide sequence used by ``_show_about``. Stays
+        a thin helper so every inline panel uses the same hide
+        recipe — if a new widget is added to the main layout later,
+        a single edit here covers every confirm/about/alert call site.
+        """
+        with contextlib.suppress(Exception):
+            self.notebook.pack_forget()
+        with contextlib.suppress(Exception):
+            self._save_frame.pack_forget()
+
+    def _restore_main_layout(self) -> None:
+        """Re-show notebook + save frame after an inline panel closes."""
+        with contextlib.suppress(Exception):
+            self.notebook.pack(fill="both", expand=True)
+        with contextlib.suppress(Exception):
+            self._save_frame.pack(side="bottom", fill="x")
 
     def _finalize_profile_deletion(self, profile: BackupProfile) -> None:
         """Remove profile config and refresh the UI.
@@ -2552,12 +2640,27 @@ class BackupManagerApp:
             return
         next_profile = self._backup_queue[0]
         if previous_failed:
-            proceed = messagebox.askyesno(
-                "Backup failed",
-                f"'{previous_name}' did not finish successfully.\n\n"
-                f"Run the next active profile ('{next_profile.name}') anyway?",
+            # Inline confirmation panel (3.7.30 — was askyesno popup).
+            # A chain abort is sticky: if the user cancels here the
+            # rest of the queue is cleared, so the panel deserves more
+            # visual presence than a one-line modal.
+            result = confirm_inline(
+                self._main_frame,
+                title=f"Backup '{previous_name}' did not finish",
+                body=(
+                    f"'{previous_name}' failed or was cancelled.\n\n"
+                    f"The next active profile in the chain is "
+                    f"'{next_profile.name}'. You can run it now, or "
+                    f"stop the chain to investigate."
+                ),
+                confirm_label=f"Run '{next_profile.name}'",
+                cancel_label="Stop chain",
+                destructive=False,
+                icon="⚠",
+                hide_callback=self._hide_main_layout,
+                restore_callback=self._restore_main_layout,
             )
-            if not proceed:
+            if not result.confirmed:
                 self._backup_queue.clear()
                 return
         self._backup_queue.pop(0)

@@ -1974,23 +1974,29 @@ class BackupManagerApp:
     def _restore_main_layout(self) -> None:
         """Re-show notebook + save frame after an inline panel closes.
 
-        Order is critical here: the ``_save_frame`` MUST be packed
-        BEFORE the notebook (or with ``before=self.notebook``) so its
-        bottom slot is reserved first. Otherwise the notebook's
-        ``expand=True`` swallows the entire pane and the Save bar
-        disappears off the bottom edge — v3.7.37 user report after
-        clicking Save on the General tab.
+        Uses the EXACT pack-order recipe already proven in
+        ``_on_tab_changed`` (line 1017): pack the notebook FIRST
+        with ``expand=True``, then pack ``_save_frame`` with
+        ``before=self.notebook``. The ``before=`` insertion is the
+        critical piece — without it the save bar gets appended at
+        the end of the pack list, the notebook (packed first and
+        ``expand=True``) has already claimed the entire vertical
+        cavity, and the save bar is squeezed to zero height and
+        invisible.
 
-        The original ``_save_frame`` packing in ``_build_ui`` (line
-        981) uses ``before=self.notebook`` — we mirror that same
-        recipe here so a future ``_save_frame`` slot change in
-        ``_build_ui`` only needs one symmetric edit (here AND in
-        the other restore call sites: ``_show_about`` close, etc.).
+        Why the inverted-looking order (notebook first then
+        save_frame before=notebook) works: ``before=`` mutates the
+        pack list order so save_frame ends up FIRST in Tk's slave
+        list. Tk evaluates ``side="bottom"`` widgets in pack-order,
+        reserves their slot at the bottom, and only THEN gives the
+        remaining cavity to ``expand=True`` widgets. The user
+        report on v3.7.37 (and the earlier comment at line 1008)
+        documents the same trap.
         """
         with contextlib.suppress(Exception):
-            self._save_frame.pack(fill="x", side="bottom")
+            self.notebook.pack(fill="both", expand=True)
         with contextlib.suppress(Exception):
-            self.notebook.pack(fill="both", expand=True, before=self._save_frame)
+            self._save_frame.pack(fill="x", side="bottom", before=self.notebook)
 
     def _notify(
         self,

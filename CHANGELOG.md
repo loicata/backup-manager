@@ -5,6 +5,12 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.39] - 2026-05-27
+
+### Fixed
+- **v3.7.38 Save-bar fix was incomplete — the bar still disappeared after clicking Save.** User report on the v3.7.38 install (confirmed via process inspection: PID started 20:27:34, "Saved profile AWS Backup" logged at 20:27:42, Save bar still invisible). The v3.7.38 ``_restore_main_layout`` packed ``_save_frame`` first then the notebook with ``before=self._save_frame`` — equivalent in theory but in practice Tk's pack manager did not honour the inverted insertion the same way when the parent had been ``pack_forget``-ed earlier (the slave list mutation interacted with the previous ``forget`` state).
+- **Fix**: switch to the EXACT recipe already proven in ``_on_tab_changed`` (line 1017) — pack the notebook FIRST with ``expand=True``, then pack ``_save_frame`` with ``before=self.notebook``. The ``before=`` placement on the save_frame (not on the notebook) makes Tk insert save_frame FIRST in the slave list; ``side="bottom"`` widgets are evaluated in pack-order and reserve their slot, and only then the remaining cavity goes to the ``expand=True`` notebook. The on-disk comment at line 1008-1016 documents the same trap with the right recipe; ``_restore_main_layout`` now mirrors it verbatim.
+
 ## [3.7.38] - 2026-05-27
 
 ### Fixed

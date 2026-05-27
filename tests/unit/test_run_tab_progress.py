@@ -10,7 +10,8 @@ update_idletasks() to flush the queue before asserting on _last_pct.
 import pytest
 
 from src.core.events import EventBus
-from src.ui.tabs.run_tab import RunTab, _truncate_status_text
+from src.ui._status_text import truncate_status_text
+from src.ui.tabs.run_tab import RunTab
 
 
 @pytest.fixture()
@@ -181,7 +182,7 @@ class TestTruncateStatusText:
 
     def test_short_text_unchanged(self):
         """No truncation when phase + filename fit in budget."""
-        assert _truncate_status_text("hashing", "small.txt", max_chars=80) == ("hashing: small.txt")
+        assert truncate_status_text("hashing", "small.txt", max_chars=80) == ("hashing: small.txt")
 
     def test_long_path_truncated_with_leading_ellipsis(self):
         """Long paths must keep the basename visible — start gets clipped."""
@@ -190,7 +191,7 @@ class TestTruncateStatusText:
             "Liz McKeever Hodgins Mckeever Solicitors/Claude/"
             "Protonmail/cipango56@pm.me/mail_20260502_08.eml"
         )
-        result = _truncate_status_text("hashing", long_path, max_chars=80)
+        result = truncate_status_text("hashing", long_path, max_chars=80)
         assert len(result) <= 80
         assert result.startswith("hashing: ...")
         # The most informative tail (the actual filename) survives.
@@ -199,23 +200,23 @@ class TestTruncateStatusText:
     def test_truncation_never_exceeds_max_chars(self):
         """Hard upper bound — the layout reserves a fixed pixel width."""
         for max_chars in (20, 40, 80, 120):
-            result = _truncate_status_text("phase", "x" * 500, max_chars=max_chars)
+            result = truncate_status_text("phase", "x" * 500, max_chars=max_chars)
             assert (
                 len(result) <= max_chars
             ), f"Returned {len(result)} chars for max_chars={max_chars}"
 
     def test_empty_filename_returns_phase_only(self):
         """No file → just the phase name (e.g. 'Filtering changed files...')."""
-        assert _truncate_status_text("filtering", "", max_chars=80) == "filtering"
+        assert truncate_status_text("filtering", "", max_chars=80) == "filtering"
 
     def test_empty_phase_uses_filename_only(self):
         """Defensive: if phase is missing, still produce a useful label."""
-        assert _truncate_status_text("", "small.txt", max_chars=80) == "small.txt"
+        assert truncate_status_text("", "small.txt", max_chars=80) == "small.txt"
 
     def test_empty_phase_with_long_filename(self):
         """No phase + long path → leading ellipsis only, no 'phase: ' prefix."""
         long_name = "a/" * 80 + "leaf.txt"
-        result = _truncate_status_text("", long_name, max_chars=30)
+        result = truncate_status_text("", long_name, max_chars=30)
         assert len(result) <= 30
         assert result.startswith("...")
         assert result.endswith("leaf.txt")
@@ -224,14 +225,14 @@ class TestTruncateStatusText:
         """Length-equal-to-max must not be truncated (off-by-one guard)."""
         text = "phase: " + "x" * 73  # 80 chars total
         assert len(text) == 80
-        result = _truncate_status_text("phase", "x" * 73, max_chars=80)
+        result = truncate_status_text("phase", "x" * 73, max_chars=80)
         assert result == text
 
     def test_phase_name_longer_than_max_falls_back_to_clip(self):
         """Degenerate input — phase alone exceeds budget. Don't crash."""
         long_phase = "a" * 50
         long_name = "b" * 50
-        result = _truncate_status_text(long_phase, long_name, max_chars=20)
+        result = truncate_status_text(long_phase, long_name, max_chars=20)
         # Returned string respects the cap even though the prefix alone
         # was bigger than max_chars.
         assert len(result) <= 20

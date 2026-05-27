@@ -279,20 +279,27 @@ class TestHideAndRestoreCallbacks:
         assert result.confirmed is True
 
 
-class TestDestructiveButtonVisibility:
-    """Regression: the destructive confirm button MUST paint red.
+class TestButtonVisualParity:
+    """Regression: Cancel and Confirm must have IDENTICAL visual weight.
 
-    Bug fixed in 3.7.31: under sv_ttk (Sun Valley theme), a
-    ``ttk.Button`` with ``style="Danger.TButton"`` ignores the
-    configured red ``background`` because sv_ttk's button layout
-    uses image sprites. The button rendered with NO visible
-    background — only on hover did the active state kick in and
-    show colour. Users could not see the destructive action.
+    History of the bug this protects against:
 
-    The fix uses ``tk.Button`` (legacy widget) instead of
-    ``ttk.Button`` for the destructive case so the red background
-    actually paints. These tests pin that contract so a future
-    refactor cannot silently re-introduce the bug.
+    - **v3.7.30**: destructive confirm built as
+      ``ttk.Button(style="Danger.TButton")`` rendered INVISIBLE at
+      rest. sv_ttk's image-sprite layout for ``ttk.Button`` ignores
+      ``style.configure(..., background=...)`` on custom styles.
+
+    - **v3.7.31**: fixed the visibility by switching the destructive
+      confirm to ``tk.Button``. BUT now Cancel was still ``ttk.Button``
+      (height ~28px) and Delete was ``tk.Button`` (height ~46px). The
+      asymmetry looked unprofessional.
+
+    - **v3.7.32** (this): both Cancel and Confirm are ``tk.Button``
+      with IDENTICAL ``padx`` / ``pady`` / ``font`` / ``relief``.
+      Only the colours differ.
+
+    These tests pin the contract so a future refactor cannot silently
+    re-introduce either regression.
     """
 
     def _find_button_with_text(self, root: tk.Misc, text: str):
@@ -307,23 +314,13 @@ class TestDestructiveButtonVisibility:
                 pass
         return None
 
-    def test_destructive_confirm_is_tk_button_not_ttk(self, panel_host):
-        """Destructive confirm must be tk.Button (paints under sv_ttk)."""
-        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "Delete"))
-        confirm_inline(
-            panel_host,
-            title="Delete profile 'X'?",
-            body="Body",
-            confirm_label="Delete",
-            destructive=True,
-        )
-        # Re-build a fresh panel and inspect its tree before clicking.
-        # (The previous panel was destroyed after confirm.)
-        decision_received = {"value": None}
+    def test_both_buttons_are_tk_buttons_not_ttk(self, panel_host):
+        """Cancel + Confirm must both be tk.Button for size parity."""
+        captured: dict = {"cancel": None, "confirm": None}
 
         def inspect_then_cancel():
-            btn = self._find_button_with_text(panel_host, "Delete")
-            decision_received["value"] = btn
+            captured["cancel"] = self._find_button_with_text(panel_host, "Cancel")
+            captured["confirm"] = self._find_button_with_text(panel_host, "Delete")
             _click_first_button_with_text(panel_host, "Cancel")
 
         panel_host.after(50, inspect_then_cancel)
@@ -335,13 +332,53 @@ class TestDestructiveButtonVisibility:
             destructive=True,
         )
 
-        delete_btn = decision_received["value"]
-        assert delete_btn is not None, "Delete button not found in the panel"
-        assert isinstance(delete_btn, tk.Button) and not isinstance(delete_btn, ttk.Button), (
-            f"Destructive confirm must be tk.Button (paints under sv_ttk), "
-            f"got {type(delete_btn).__name__}. ttk.Button with Danger.TButton "
-            f"style renders invisible under the Sun Valley theme."
+        for role in ("cancel", "confirm"):
+            btn = captured[role]
+            assert btn is not None, f"{role} button not found in panel"
+            assert isinstance(btn, tk.Button) and not isinstance(btn, ttk.Button), (
+                f"{role} must be tk.Button (not ttk.Button) so both buttons "
+                f"share the same default padding — got {type(btn).__name__}. "
+                f"Mixing ttk and tk gives them visibly different heights."
+            )
+
+    def test_cancel_and_confirm_share_identical_geometry(self, panel_host):
+        """The two buttons must share every size-affecting option.
+
+        Values are captured INSIDE the after-callback (before the panel
+        is destroyed). Holding a widget reference after destruction
+        then calling ``cget`` raises ``TclError: invalid command name``.
+        """
+        geometry_keys = ("padx", "pady", "relief", "borderwidth", "font")
+        captured: dict = {"cancel": {}, "confirm": {}}
+
+        def inspect_then_cancel():
+            cancel_btn = self._find_button_with_text(panel_host, "Cancel")
+            confirm_btn = self._find_button_with_text(panel_host, "Delete")
+            if cancel_btn is not None:
+                captured["cancel"] = {k: str(cancel_btn.cget(k)) for k in geometry_keys}
+            if confirm_btn is not None:
+                captured["confirm"] = {k: str(confirm_btn.cget(k)) for k in geometry_keys}
+            _click_first_button_with_text(panel_host, "Cancel")
+
+        panel_host.after(50, inspect_then_cancel)
+        confirm_inline(
+            panel_host,
+            title="Delete profile 'X'?",
+            body="Body",
+            confirm_label="Delete",
+            destructive=True,
         )
+
+        assert captured["cancel"], "Cancel button geometry not captured"
+        assert captured["confirm"], "Confirm button geometry not captured"
+        for opt in geometry_keys:
+            assert captured["cancel"][opt] == captured["confirm"][opt], (
+                f"Cancel and Confirm differ on {opt!r}: "
+                f"cancel={captured['cancel'][opt]!r} vs "
+                f"confirm={captured['confirm'][opt]!r}. They must share "
+                f"size-affecting options or one button will look smaller "
+                f"than the other."
+            )
 
     def test_destructive_confirm_has_red_background(self, panel_host):
         """The red bg must be literally configured on the widget."""
@@ -370,13 +407,16 @@ class TestDestructiveButtonVisibility:
             f"button will render invisible on a white panel background."
         )
 
-    def test_non_destructive_confirm_is_ttk_button(self, panel_host):
-        """Non-destructive confirm stays ttk.Button (native sv_ttk Accent)."""
-        captured = {"widget": None}
+    def test_non_destructive_confirm_has_accent_background(self, panel_host):
+        """Non-destructive confirm uses the blue accent (was Accent.TButton)."""
+        from src.ui.theme import Colors
+
+        captured = {"bg": None}
 
         def inspect_then_cancel():
             btn = self._find_button_with_text(panel_host, "Run next")
-            captured["widget"] = btn
+            if btn is not None:
+                captured["bg"] = btn.cget("bg")
             _click_first_button_with_text(panel_host, "Cancel")
 
         panel_host.after(50, inspect_then_cancel)
@@ -388,11 +428,39 @@ class TestDestructiveButtonVisibility:
             destructive=False,
         )
 
-        btn = captured["widget"]
-        assert btn is not None
-        assert isinstance(btn, ttk.Button), (
-            f"Non-destructive confirm should keep the native sv_ttk "
-            f"ttk.Button (Accent.TButton style) — got {type(btn).__name__}"
+        assert captured["bg"] == Colors.ACCENT, (
+            f"Non-destructive confirm bg must be Colors.ACCENT ({Colors.ACCENT}), "
+            f"got {captured['bg']!r}."
+        )
+
+    def test_cancel_has_neutral_background(self, panel_host):
+        """Cancel uses a white-ish bg with a border, never red or blue."""
+        from src.ui.theme import Colors
+
+        captured = {"bg": None}
+
+        def inspect_then_cancel():
+            btn = self._find_button_with_text(panel_host, "Cancel")
+            if btn is not None:
+                captured["bg"] = btn.cget("bg")
+            _click_first_button_with_text(panel_host, "Cancel")
+
+        panel_host.after(50, inspect_then_cancel)
+        confirm_inline(
+            panel_host,
+            title="T",
+            body="Body",
+            confirm_label="OK",
+            destructive=True,
+        )
+
+        assert captured["bg"] not in (Colors.DANGER, Colors.ACCENT), (
+            f"Cancel must not share the destructive/accent colour. The user "
+            f"should be able to tell at a glance which button is the safe one. "
+            f"Got {captured['bg']!r}."
+        )
+        assert captured["bg"] == Colors.CARD_BG, (
+            f"Cancel bg should be Colors.CARD_BG (white-ish), got {captured['bg']!r}"
         )
 
 

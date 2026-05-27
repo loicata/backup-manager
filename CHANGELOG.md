@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.32] - 2026-05-27
+
+### Fixed
+- **Cancel and Delete buttons in the confirmation panel had visibly different heights.** User report on the v3.7.31 install: the ``Cancel`` button was noticeably smaller than the red ``Delete`` button — they did not look like siblings. Cause: v3.7.31 fixed the destructive button visibility by switching it from ``ttk.Button`` to ``tk.Button``, but Cancel was still ``ttk.Button``. The two widget classes have completely different default padding (ttk ~28 px high vs tk ~46 px with our padding overrides), and visually they did not line up.
+- **Fix**: both Cancel and Confirm buttons are now ``tk.Button`` with IDENTICAL ``padx`` / ``pady`` / ``font`` / ``relief`` / ``borderwidth``. Only the colours differ — Cancel uses ``Colors.CARD_BG`` + ``Colors.TEXT`` with a light grey border, destructive Confirm uses ``Colors.DANGER`` + white, non-destructive Confirm uses ``Colors.ACCENT`` + white. The shared geometry options are extracted into a single ``common_kwargs`` dict at the top of ``_build_buttons`` so the two widgets cannot drift apart silently in a future edit. The trade-off: the non-destructive Confirm loses the native ``Accent.TButton`` sv_ttk look, but the size parity is worth more than the theme polish on this specific panel (only seen during Delete profile / Backup chain failure prompts).
+
+### Tests
+- +5 regression tests in ``tests/unit/test_confirm_panel.py::TestButtonVisualParity`` (class renamed from ``TestDestructiveButtonVisibility`` to reflect the wider scope): both buttons MUST be ``tk.Button`` (a future refactor that re-introduces a mixed ttk/tk pair fails immediately), Cancel and Confirm MUST share every size-affecting option (``padx`` / ``pady`` / ``relief`` / ``borderwidth`` / ``font`` — values captured INSIDE the after-callback to avoid the ``TclError: invalid command`` that ``cget`` raises on a destroyed widget), destructive confirm carries ``bg=Colors.DANGER`` (visibility regression from 3.7.30), non-destructive confirm carries ``bg=Colors.ACCENT``, and Cancel carries ``bg=Colors.CARD_BG`` (must never share the destructive/accent colour — the user has to tell at a glance which button is safe).
+
 ## [3.7.31] - 2026-05-26
 
 ### Fixed

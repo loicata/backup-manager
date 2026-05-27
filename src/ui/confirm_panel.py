@@ -350,7 +350,7 @@ def _build_buttons(
     on_confirm: Callable[[], None],
     on_cancel: Callable[[], None],
 ) -> None:
-    """Right-aligned Cancel + Confirm buttons.
+    """Right-aligned Cancel + Confirm buttons of identical visual weight.
 
     Cancel sits to the LEFT of Confirm (Windows convention) and
     takes initial focus so the user can press Enter to confirm or
@@ -358,56 +358,69 @@ def _build_buttons(
     who is hammering Enter to dismiss a toast finds Cancel focused,
     not the destructive button — one extra Tab keeps them safe.
 
-    The destructive confirm button is built as a ``tk.Button`` (not
-    ``ttk.Button``) so the red background actually paints under the
-    sv_ttk Sun Valley theme. sv_ttk's ``ttk.Button`` layout uses
-    image-based sprites that ignore ``style.configure(..., background=...)``
-    on custom styles — only the ``Accent.TButton`` it ships natively
-    paints correctly. The same workaround is used elsewhere in the app
-    (the ``Delete profile`` button in the sidebar, ``app.py:904``).
-    Non-destructive confirms keep the native ``Accent.TButton`` look.
+    Both buttons are built as ``tk.Button`` (legacy widget) with
+    identical ``padx`` / ``pady`` / ``font`` / ``relief``. Only the
+    colours differ:
+
+    - ``Cancel``: white-ish background, dark text, light grey border.
+    - Destructive confirm: red background, white text.
+    - Non-destructive confirm: accent blue background, white text.
+
+    Why not ``ttk.Button``? Under the sv_ttk Sun Valley theme, the
+    ttk button layout uses image sprites that:
+    (a) ignore ``style.configure(..., background=...)`` on custom
+        styles — so a red ``Danger.TButton`` rendered invisible at
+        rest (v3.7.30 user report), and
+    (b) gave ttk Cancel a noticeably smaller height than the
+        ``tk.Button`` Delete (v3.7.31 user report) because the two
+        widget classes have completely different default padding.
+
+    Sticking to ``tk.Button`` for both buttons in this panel gets us
+    perfect size parity AND a working red background, at the cost of
+    losing the native Accent.TButton look on the non-destructive
+    confirm — an acceptable trade for the only-place-this-panel-shows
+    use case.
     """
     btn_row = ttk.Frame(parent)
     btn_row.pack(anchor="e", pady=(Spacing.LARGE, 0))
 
-    cancel_btn = ttk.Button(
+    # Shared geometry. Anything that affects size must live here so
+    # the two buttons cannot drift apart silently.
+    common_kwargs: dict = {
+        "relief": "flat",
+        "font": Fonts.bold(),
+        "padx": Spacing.XLARGE,
+        "pady": Spacing.MEDIUM,
+        "cursor": "hand2",
+        "borderwidth": 1,
+    }
+
+    cancel_btn = tk.Button(
         btn_row,
         text=cancel_label,
         command=on_cancel,
-        width=12,
+        bg=Colors.CARD_BG,
+        fg=Colors.TEXT,
+        activebackground=Colors.TAB_BG,
+        activeforeground=Colors.TEXT,
+        highlightbackground=Colors.CARD_BORDER,
+        highlightthickness=1,
+        **common_kwargs,
     )
     cancel_btn.pack(side="left", padx=(0, _BUTTON_GAP))
 
-    confirm_btn: tk.Widget
-    if destructive:
-        # tk.Button (not ttk) is the only widget under sv_ttk that
-        # respects a custom red background. Hover state mirrors the
-        # ``Danger.TButton`` style.map entry in theme.py for visual
-        # consistency with the sidebar Delete button.
-        confirm_btn = tk.Button(
-            btn_row,
-            text=confirm_label,
-            command=on_confirm,
-            bg=Colors.DANGER,
-            fg="white",
-            activebackground="#c0392b",
-            activeforeground="white",
-            relief="flat",
-            font=Fonts.bold(),
-            padx=Spacing.XLARGE,
-            pady=Spacing.MEDIUM,
-            cursor="hand2",
-            borderwidth=0,
-        )
-    else:
-        # Non-destructive confirm: native sv_ttk accent button (blue).
-        confirm_btn = ttk.Button(
-            btn_row,
-            text=confirm_label,
-            command=on_confirm,
-            width=12,
-            style="Accent.TButton",
-        )
+    confirm_bg = Colors.DANGER if destructive else Colors.ACCENT
+    confirm_active = "#c0392b" if destructive else Colors.ACCENT_HOVER
+    confirm_btn = tk.Button(
+        btn_row,
+        text=confirm_label,
+        command=on_confirm,
+        bg=confirm_bg,
+        fg="white",
+        activebackground=confirm_active,
+        activeforeground="white",
+        **common_kwargs,
+    )
     confirm_btn.pack(side="left")
 
     # Initial focus on Cancel — the safe default. Enter == confirm

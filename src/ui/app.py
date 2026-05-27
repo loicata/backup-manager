@@ -940,9 +940,11 @@ class BackupManagerApp:
         self.tab_encryption = EncryptionTab(self.notebook)
         self.tab_schedule = ScheduleTab(self.notebook, scheduler=self.scheduler)
         self.tab_email = EmailTab(self.notebook)
-        self.tab_recovery = RecoveryTab(self.notebook)
+        self.tab_recovery = RecoveryTab(self.notebook, notify_fn=self._notify)
         self.tab_verify = VerifyTab(self.notebook, events=self.events)
-        self.tab_history = HistoryTab(self.notebook)
+        self.tab_history = HistoryTab(
+            self.notebook, notify_fn=self._notify, confirm_fn=self._confirm
+        )
 
         # Add tabs to notebook
         tabs = [
@@ -2044,6 +2046,46 @@ class BackupManagerApp:
         if select_tab is not None:
             with contextlib.suppress(Exception):
                 self.notebook.select(select_tab)
+
+    def _confirm(
+        self,
+        *,
+        title: str,
+        body: str,
+        confirm_label: str,
+        cancel_label: str = "Cancel",
+        destructive: bool = False,
+    ) -> bool:
+        """Show a blocking inline confirmation panel and return the user's choice.
+
+        Thin wrapper around :func:`confirm_inline` that fills in the
+        main-frame hide/restore callbacks every call site would
+        otherwise have to remember. Used by sub-tabs (``HistoryTab``
+        delete confirm, future Yes/No prompts) that hold a reference
+        to this method via the ``confirm_fn`` constructor injection.
+
+        Args:
+            title: Short header line.
+            body: Multi-line body. ``\\n\\n`` separates paragraphs.
+            confirm_label: Text on the confirm button.
+            cancel_label: Text on the cancel button. Defaults to ``"Cancel"``.
+            destructive: When True, the confirm button is rendered in red.
+
+        Returns:
+            ``True`` if the user clicked Confirm, ``False`` on Cancel
+            or any other dismissal (Escape, window close).
+        """
+        result = confirm_inline(
+            self._main_frame,
+            title=title,
+            body=body,
+            confirm_label=confirm_label,
+            cancel_label=cancel_label,
+            destructive=destructive,
+            hide_callback=self._hide_main_layout,
+            restore_callback=self._restore_main_layout,
+        )
+        return result.confirmed
 
     def _finalize_profile_deletion(self, profile: BackupProfile) -> None:
         """Remove profile config and refresh the UI.

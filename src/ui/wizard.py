@@ -12,13 +12,14 @@ Two paths:
     and automatic bucket provisioning.
 """
 
+import contextlib
 import logging
 import threading
 import tkinter as tk
 import uuid
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 from src.core.config import (
     BackupProfile,
@@ -41,6 +42,7 @@ from src.storage.s3_setup import (
     estimate_total_cost,
     format_cost,
 )
+from src.ui.confirm_panel import notify_inline
 from src.ui.theme import Colors, Fonts, Spacing
 
 logger = logging.getLogger(__name__)
@@ -173,13 +175,16 @@ class SetupWizard:
         )
         self._progress.pack(fill="x")
 
-        # Content area with scrollbar
-        content_outer = ttk.Frame(self._win)
-        content_outer.pack(fill="both", expand=True)
+        # Content area with scrollbar. Stored as an attribute so the
+        # inline notify panel (validation errors on Next) can pack_forget
+        # the scrollable area, take its place full-pane, then re-pack on
+        # dismiss. Same recipe as ``_hide_main_layout`` in ``app.py``.
+        self._content_outer = ttk.Frame(self._win)
+        self._content_outer.pack(fill="both", expand=True)
 
-        self._canvas = tk.Canvas(content_outer, highlightthickness=0)
+        self._canvas = tk.Canvas(self._content_outer, highlightthickness=0)
         self._scrollbar = ttk.Scrollbar(
-            content_outer,
+            self._content_outer,
             orient="vertical",
             command=self._canvas.yview,
         )
@@ -205,15 +210,18 @@ class SetupWizard:
         # Mousewheel scrolling
         self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-        # Footer with navigation
-        footer = ttk.Frame(self._win)
-        footer.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
+        # Footer with navigation. Stored as an attribute so the inline
+        # notify panel can hide it during display \u2014 otherwise the user
+        # would see Back / Next / Cancel alongside the panel's own OK
+        # button which is visually confusing.
+        self._footer_frame = ttk.Frame(self._win)
+        self._footer_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
 
-        self._back_btn = ttk.Button(footer, text="\u2190 Back", command=self._go_back)
+        self._back_btn = ttk.Button(self._footer_frame, text="\u2190 Back", command=self._go_back)
         self._back_btn.pack(side="left")
 
         self._next_btn = ttk.Button(
-            footer,
+            self._footer_frame,
             text="Next \u2192",
             style="Accent.TButton",
             command=self._go_next,
@@ -221,7 +229,7 @@ class SetupWizard:
         self._next_btn.pack(side="right")
 
         ttk.Button(
-            footer,
+            self._footer_frame,
             text="Cancel",
             command=self._cancel,
         ).pack(side="right", padx=Spacing.MEDIUM)
@@ -319,11 +327,38 @@ class SetupWizard:
         self._title_label.config(text=title)
         self._step_label.config(text=f"Step {self._step} of {self._total_steps}")
 
+    def _hide_content_for_panel(self) -> None:
+        """Hide the scrollable content + footer so a notify panel can take their place.
+
+        Mirrors :meth:`BackupManagerApp._hide_main_layout` — same
+        pattern, scoped to the wizard ``Toplevel``. The header banner
+        and progress bar at the top stay visible so the user still
+        sees which step the validation came from.
+        """
+        with contextlib.suppress(Exception):
+            self._content_outer.pack_forget()
+        with contextlib.suppress(Exception):
+            self._footer_frame.pack_forget()
+
+    def _restore_content_after_panel(self) -> None:
+        """Re-pack the scrollable content + footer after the notify panel dismisses."""
+        with contextlib.suppress(Exception):
+            self._content_outer.pack(fill="both", expand=True)
+        with contextlib.suppress(Exception):
+            self._footer_frame.pack(fill="x", padx=Spacing.LARGE, pady=Spacing.LARGE)
+
     def _go_next(self) -> None:
         """Advance to the next step, or create the profile on the last step."""
         error = self._validate_current_step()
         if error:
-            messagebox.showwarning("Validation", error, parent=self._win)
+            notify_inline(
+                self._win,
+                title="Validation",
+                body=error,
+                level="warning",
+                hide_callback=self._hide_content_for_panel,
+                restore_callback=self._restore_content_after_panel,
+            )
             return
 
         if self._step == self._total_steps:

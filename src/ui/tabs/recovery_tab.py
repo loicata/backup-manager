@@ -11,10 +11,11 @@ import logging
 import shutil
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 
 from src.core.config import BackupProfile, StorageConfig, StorageType
 from src.installer import FEAT_S3, FEAT_SFTP, get_available_features
@@ -141,7 +142,12 @@ def _is_backup_object(key: str) -> bool:
 class RecoveryTab(ScrollableTab):
     """Unified restore / retrieve tab."""
 
-    def __init__(self, parent, **kwargs):
+    def __init__(
+        self,
+        parent,
+        notify_fn: Callable[..., None] | None = None,
+        **kwargs,
+    ):
         super().__init__(parent, **kwargs)
         self._stored_password: str = ""
         self._user_modified_pw = False
@@ -152,6 +158,12 @@ class RecoveryTab(ScrollableTab):
         self._listed_backups: list[dict] = []
         self._selected_backups: set[str] = set()
         self._scan_animation_id: str | None = None
+        # Injected by ``BackupManagerApp._build_ui`` so the tab can
+        # surface validation warnings (missing destination, missing
+        # backup, encrypted-without-password, ...) via the same inline
+        # panel pattern used everywhere else in the app instead of
+        # ``messagebox.showwarning`` modals.
+        self._notify_fn = notify_fn
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -1451,7 +1463,11 @@ class RecoveryTab(ScrollableTab):
         dest_path = self.dest_path_var.get().strip()
 
         if not dest_path:
-            messagebox.showwarning("Recovery", "Please select a destination.")
+            self._notify_fn(
+                title="Recovery",
+                body="Please select a destination.",
+                level="warning",
+            )
             return
 
         if stype == StorageType.LOCAL.value:
@@ -1468,11 +1484,19 @@ class RecoveryTab(ScrollableTab):
         """
         backup_path = self._get_local_path().strip()
         if not backup_path:
-            messagebox.showwarning("Recovery", "Please select a backup.")
+            self._notify_fn(
+                title="Recovery",
+                body="Please select a backup.",
+                level="warning",
+            )
             return
         src = Path(backup_path)
         if not src.exists():
-            messagebox.showwarning("Recovery", f"Backup does not exist:\n{backup_path}")
+            self._notify_fn(
+                title="Recovery",
+                body=f"Backup does not exist:\n\n{backup_path}",
+                level="warning",
+            )
             return
 
         password = self._get_effective_password()
@@ -1480,10 +1504,13 @@ class RecoveryTab(ScrollableTab):
             src.is_dir() and any(f.suffix == ".wbenc" for f in src.rglob("*"))
         )
         if has_encrypted and not password:
-            messagebox.showwarning(
-                "Recovery",
-                "This backup contains encrypted files but no password "
-                "was provided.\nPlease enter your encryption password.",
+            self._notify_fn(
+                title="Recovery",
+                body=(
+                    "This backup contains encrypted files but no password "
+                    "was provided.\n\nPlease enter your encryption password."
+                ),
+                level="warning",
             )
             return
 
@@ -1501,7 +1528,11 @@ class RecoveryTab(ScrollableTab):
             dest_path: Destination directory path.
         """
         if not self._selected_backups:
-            messagebox.showwarning("Recovery", "Please select at least one backup.")
+            self._notify_fn(
+                title="Recovery",
+                body="Please select at least one backup.",
+                level="warning",
+            )
             return
 
         password = self._get_effective_password()

@@ -3,8 +3,9 @@
 import os
 import subprocess
 import tkinter as tk
+from collections.abc import Callable
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 from src.ui.theme import Colors, Spacing
 
@@ -12,7 +13,14 @@ from src.ui.theme import Colors, Spacing
 class HistoryTab(ttk.Frame):
     """Browse and view backup execution logs."""
 
-    def __init__(self, parent, log_dir: Path = None, **kwargs):
+    def __init__(
+        self,
+        parent,
+        log_dir: Path = None,
+        notify_fn: Callable[..., None] | None = None,
+        confirm_fn: Callable[..., bool] | None = None,
+        **kwargs,
+    ):
         super().__init__(parent, **kwargs)
         appdata = os.environ.get("APPDATA", "")
         self._log_dir = log_dir or Path(appdata) / "BackupManager" / "logs"
@@ -20,6 +28,14 @@ class HistoryTab(ttk.Frame):
         # the double-click, context-menu and keyboard shortcuts to act
         # on the row the user selected.
         self._iid_to_path: dict[str, Path] = {}
+        # Injected by ``BackupManagerApp._build_ui``: notify_fn opens
+        # an inline ``notify_inline`` panel in the main frame (warnings
+        # and errors), confirm_fn opens an inline ``confirm_inline``
+        # panel (Yes/No prompts). Both must be supplied in production —
+        # the few legacy test instantiations that pass ``None`` simply
+        # never reach the validation paths below.
+        self._notify_fn = notify_fn
+        self._confirm_fn = confirm_fn
         self._build_ui()
 
     def _build_ui(self):
@@ -196,7 +212,11 @@ class HistoryTab(ttk.Frame):
         try:
             os.startfile(str(path))
         except OSError as exc:
-            messagebox.showwarning("Open log", f"Could not open {path.name}: {exc}")
+            self._notify_fn(
+                title="Open log",
+                body=f"Could not open {path.name}:\n\n{exc}",
+                level="warning",
+            )
 
     def _copy_selected_path(self) -> None:
         path = self._selected_log_path()
@@ -212,22 +232,25 @@ class HistoryTab(ttk.Frame):
         path = self._selected_log_path()
         if path is None:
             return
-        # Kept as askyesno (not migrated to confirm_inline in 3.7.30)
-        # because the HistoryTab does not have a reference to the
-        # main frame the inline panel would attach to. Migrating
-        # would require an injection pattern (constructor callback
-        # or service locator) — out of scope for the inline-confirm
-        # release. Re-evaluate when more tabs need inline confirms.
-        if not messagebox.askyesno(
-            "Delete log",
-            f"Delete this log file?\n\n{path.name}\n\n"
-            "This only removes the log file, not the backup itself.",
-        ):
+        confirmed = self._confirm_fn(
+            title="Delete log",
+            body=(
+                f"Delete this log file?\n\n{path.name}\n\n"
+                "This only removes the log file, not the backup itself."
+            ),
+            confirm_label="Delete",
+            destructive=True,
+        )
+        if not confirmed:
             return
         try:
             path.unlink()
         except OSError as exc:
-            messagebox.showwarning("Delete log", f"Could not delete {path.name}: {exc}")
+            self._notify_fn(
+                title="Delete log",
+                body=f"Could not delete {path.name}:\n\n{exc}",
+                level="warning",
+            )
             return
         self.refresh()
 

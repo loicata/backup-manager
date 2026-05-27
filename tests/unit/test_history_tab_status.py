@@ -151,8 +151,11 @@ class TestRefreshPopulatesStatusAndPath:
         history_tab.refresh()
         history_tab.log_tree.selection_set(history_tab.log_tree.get_children()[0])
 
-        # Auto-confirm the "are you sure" dialog
-        monkeypatch.setattr("src.ui.tabs.history_tab.messagebox.askyesno", lambda *a, **kw: True)
+        # Auto-confirm the "are you sure" inline panel (3.7.41 migration:
+        # ``confirm_fn`` replaces ``messagebox.askyesno``). The fixture
+        # builds the tab without callbacks — inject a True-returning
+        # stub directly on the instance for this scenario.
+        monkeypatch.setattr(history_tab, "_confirm_fn", lambda **kw: True)
 
         history_tab._delete_selected()
 
@@ -168,7 +171,8 @@ class TestRefreshPopulatesStatusAndPath:
         history_tab.refresh()
         history_tab.log_tree.selection_set(history_tab.log_tree.get_children()[0])
 
-        monkeypatch.setattr("src.ui.tabs.history_tab.messagebox.askyesno", lambda *a, **kw: False)
+        # Decline the inline confirm — log file must stay on disk.
+        monkeypatch.setattr(history_tab, "_confirm_fn", lambda **kw: False)
 
         history_tab._delete_selected()
 

@@ -2004,27 +2004,33 @@ class BackupManagerApp:
         self._load_profiles()
 
     def _delete_profile_backups_async(self, profile: BackupProfile) -> None:
-        """Delete all backups for a profile, with a live progress dialog.
+        """Delete all backups for a profile, with a live progress panel.
 
-        Replaces the previous fire-and-forget pattern (close the
-        confirm dialog, sweep silently in the background) with a
-        modal Toplevel that shows a 0..N progress bar driven by
-        ``delete_profile_backups``'s progress callback. The dialog
-        auto-closes once the sweep finishes.
+        Renders progression as a full-screen inline panel (since
+        3.7.33 — replaces the legacy ``DeleteProgressDialog``
+        ``tk.Toplevel`` modal). The panel sits in the main window
+        the same way ``confirm_inline`` and ``_show_about`` do, so
+        the deletion sweep never opens a system pop-up.
         """
         from src.core.backup_engine import delete_profile_backups
-        from src.ui.delete_progress_dialog import DeleteProgressDialog
+        from src.ui.progress_panel import InlineProgressPanel
 
         configs = [profile.storage] + list(profile.mirror_destinations)
         configs = [c for c in configs if c.destination_path or c.sftp_host or c.s3_bucket]
 
-        progress_dialog = DeleteProgressDialog(self.root)
+        progress_panel = InlineProgressPanel(
+            self._main_frame,
+            title=f"Deleting backups of '{profile.name}'…",
+            completion_title="Deletion complete",
+            hide_callback=self._hide_main_layout,
+            restore_callback=self._restore_main_layout,
+        )
         result: list = [None]
 
         def _progress_cb(current: int, total: int, name: str) -> None:
-            # Fired from the worker thread — DeleteProgressDialog.update
+            # Fired from the worker thread — InlineProgressPanel.update
             # handles the marshalling onto the Tk main thread.
-            progress_dialog.update(current, total, name)
+            progress_panel.update(current, total, name)
 
         def _do_delete():
             try:
@@ -2034,9 +2040,6 @@ class BackupManagerApp:
                     progress_callback=_progress_cb,
                 )
             except Exception as e:  # pragma: no cover — defensive
-                # Unexpected blow-up at the engine level: surface it
-                # via the same result tuple shape so the polling loop
-                # can clean up the dialog and report.
                 logger.exception("delete_profile_backups raised")
                 result[0] = (0, [str(e)])
 
@@ -2045,16 +2048,15 @@ class BackupManagerApp:
                 self.root.after(200, _poll)
                 return
             deleted, errors = result[0]
-            # Snap the bar to 100 % and schedule the dialog auto-close.
-            progress_dialog.complete()
+            progress_panel.complete()
             for err in errors:
                 logger.warning("Backup deletion error: %s", err)
             # Defer the user-visible warning + finalisation until AFTER
-            # the dialog has finished its closing animation, otherwise
-            # the messagebox steals focus while the modal is still
+            # the panel has finished its closing animation, otherwise
+            # the messagebox steals focus while the panel is still
             # visible underneath and looks like a stacking glitch.
             self.root.after(
-                progress_dialog._COMPLETION_HOLD_MS + 50,
+                InlineProgressPanel.COMPLETION_HOLD_MS + 50,
                 self._finish_delete_profile_backups,
                 profile,
                 deleted,

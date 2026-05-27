@@ -5,6 +5,18 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.33] - 2026-05-27
+
+### Changed
+- **Backup-deletion progress now renders as a full-screen inline panel** instead of a ``tk.Toplevel`` modal pop-up. User report on the v3.7.32 install: clicking ``Delete profile`` with the ``Also delete backups`` checkbox checked still opened a small ``"Deleting backups — Preparing deletion…"`` pop-up window. That pop-up was a separate widget tree (the legacy ``DeleteProgressDialog``) that escaped both the 3.7.29 inventory of ``messagebox`` calls and the 3.7.30 confirm-panel migration — it pre-dated both and was implemented directly as a ``Toplevel``.
+- **New module** ``src/ui/progress_panel.py`` exposes ``InlineProgressPanel(parent_frame, *, title, completion_title, hide_callback, restore_callback)`` with the same ``update(current, total, name)`` / ``complete()`` / ``destroy()`` API as the legacy dialog so the caller in ``_delete_profile_backups_async`` was a 6-line swap. The panel hides the main layout via ``hide_callback`` (same recipe as the confirm panel and About), shows a centred title + 480 px progress bar + counter, marshals every worker-thread call onto the Tk main thread via ``parent.after(0, ...)``, and auto-destroys 500 ms after ``complete()`` so the 100 % state is visible briefly before the layout snaps back. The hide/restore callbacks are matched: a hide that raised does NOT trigger the restore (prevents the UI ending up in an inconsistent state). Idempotent ``destroy()`` (auto-timer + explicit caller close both safe).
+
+### Removed
+- ``src/ui/delete_progress_dialog.py`` and its 11 tests in ``tests/unit/test_delete_progress_dialog.py``. The legacy ``Toplevel`` modal was the last pop-up window the app opened during normal use. The contract it tested (``update`` / ``complete`` / ``destroy`` / thread marshalling / name truncation / idempotent teardown) is fully covered by the new ``tests/unit/test_progress_panel.py``.
+
+### Tests
+- +23 tests in ``tests/unit/test_progress_panel.py``: construction validation (``None`` parent, empty/non-string title or completion_title), rendered widgets present (Progressbar + title Label), ``update`` semantics (bar value+max set, zero-total tolerated, name shown in title, counter formatted ``N / M``), name-truncation rules (long names truncate keeping the tail with a leading ellipsis at ``_NAME_TRUNCATE_AT``; short names returned verbatim; boundary length unchanged), ``complete`` snaps to 100 % AND swaps the title, idempotent ``destroy`` (double-call safe, panel widget removed from host, auto-destroy timer fires after ``COMPLETION_HOLD_MS`` — verified via Tk event-loop pump), hide/restore callback ordering and exception isolation (restore skipped when hide raised — symmetric protection), and thread-safe ``update`` / ``complete`` from a worker thread without raising.
+
 ## [3.7.32] - 2026-05-27
 
 ### Fixed

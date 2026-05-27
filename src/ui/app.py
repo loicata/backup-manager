@@ -14,7 +14,7 @@ import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import ttk
 
 from src import __version__
 from src.core.backup_engine import BackupEngine, CancelledError
@@ -40,7 +40,7 @@ from src.ui.tabs.run_tab import RunTab
 from src.ui.tabs.schedule_tab import ScheduleTab
 from src.ui.tabs.storage_tab import StorageTab
 from src.ui.tabs.verify_tab import VerifyTab
-from src.ui.confirm_panel import ConfirmExtra, confirm_inline
+from src.ui.confirm_panel import ConfirmExtra, NotifyLevel, confirm_inline, notify_inline
 from src.ui.theme import (
     APP_TITLE,
     MIN_SIZE,
@@ -781,16 +781,6 @@ class BackupManagerApp:
         # Alert frame placeholder (shown when targets are unavailable)
         self._alert_frame: tk.Frame | None = None
 
-        # In-app toast notifications.  Replaces ``messagebox.showinfo``
-        # for transient acknowledgements (profile saved, modules
-        # status, etc.) so the UI never opens a modal pop-up for a
-        # message the user does not need to click.  The manager is
-        # hosted on ``main`` so toasts overlay both the sidebar and
-        # the notebook from the bottom-centre of the window.
-        from src.ui.notifications import ToastManager
-
-        self.toasts = ToastManager(main)
-
     def _build_sidebar(self, parent):
         """Build the left sidebar with profile list."""
         sidebar = tk.Frame(parent, bg=Colors.SIDEBAR_BG, width=200)
@@ -1500,18 +1490,25 @@ class BackupManagerApp:
         if self._backup_running:
             if silent:
                 return True
-            messagebox.showwarning(
-                "Backup in progress",
-                "A backup is currently running. Profile changes will be "
-                "available after it completes.",
+            self._notify(
+                title="Backup in progress",
+                body=(
+                    "A backup is currently running. Profile changes will be "
+                    "available after it completes."
+                ),
+                level="warning",
             )
             return False
 
         # Validate encryption
         enc_error = self.tab_encryption.validate()
         if enc_error:
-            self.notebook.select(self.tab_encryption)
-            messagebox.showwarning("Validation", enc_error)
+            self._notify(
+                title="Encryption settings invalid",
+                body=enc_error,
+                level="warning",
+                select_tab=self.tab_encryption,
+            )
             return False
 
         profile = self._current_profile
@@ -1523,11 +1520,14 @@ class BackupManagerApp:
         new_name = general["name"]
         for p in self._profiles:
             if p.id != profile.id and p.name.lower() == new_name.lower():
-                self.notebook.select(self.tab_general)
-                messagebox.showwarning(
-                    "Validation",
-                    f"A profile named '{p.name}' already exists. "
-                    "Please choose a different name.",
+                self._notify(
+                    title="Profile name already in use",
+                    body=(
+                        f"A profile named '{p.name}' already exists. "
+                        "Please choose a different name."
+                    ),
+                    level="warning",
+                    select_tab=self.tab_general,
                 )
                 return False
 
@@ -1559,8 +1559,12 @@ class BackupManagerApp:
         # Check for duplicate destinations
         dup_error = self._check_duplicate_destinations(storage["storage"], mirrors)
         if dup_error:
-            self.notebook.select(self.tab_storage)
-            messagebox.showwarning("Validation", dup_error)
+            self._notify(
+                title="Duplicate destination",
+                body=dup_error,
+                level="warning",
+                select_tab=self.tab_storage,
+            )
             return False
 
         retention = self.tab_retention.collect_config()
@@ -1600,8 +1604,12 @@ class BackupManagerApp:
                 sched_cfg.frequency, profile.full_schedule_mode
             )
             if invalid_msg:
-                self.notebook.select(self.tab_general)
-                messagebox.showwarning("Validation", invalid_msg)
+                self._notify(
+                    title="Schedule incompatible with full-backup mode",
+                    body=invalid_msg,
+                    level="warning",
+                    select_tab=self.tab_general,
+                )
                 return False
 
         email = self.tab_email.collect_config()
@@ -1642,16 +1650,21 @@ class BackupManagerApp:
 
         # Immediate user feedback BEFORE the secondary work (registry
         # write + profile-list rebuild) — those take 100-300 ms on a
-        # laptop and the user reads the toast as "the click did
+        # laptop and the user reads the panel as "the click did
         # nothing" when they happen first. The data is safely on disk
         # at this point, so the confirmation is truthful.
         #
-        # Switched from ``messagebox.showinfo`` (modal pop-up) to a
-        # bottom-centre toast in 3.7.29 — saving a profile is a
-        # routine acknowledgement, the user should not have to click
-        # OK on a pop-up every single time.
+        # History: messagebox.showinfo pop-up (pre-3.7.29) → bottom-
+        # centre toast (3.7.29) → inline notification panel (3.7.34).
+        # Switched to the panel for visual consistency with every
+        # other user-feedback screen in the app — toast was the only
+        # outlier left.
         if not silent:
-            self.toasts.success(f"Profile '{profile.name}' saved")
+            self._notify(
+                title="Profile saved",
+                body=f"Profile '{profile.name}' was saved successfully.",
+                level="success",
+            )
 
         # Apply auto-start setting
         if general["autostart"]:
@@ -1767,10 +1780,13 @@ class BackupManagerApp:
         section automatically.
         """
         if self._backup_running:
-            messagebox.showwarning(
-                "Backup in progress",
-                "A backup is currently running. Please wait for it to "
-                "complete before creating a new profile.",
+            self._notify(
+                title="Backup in progress",
+                body=(
+                    "A backup is currently running. Please wait for it "
+                    "to complete before creating a new profile."
+                ),
+                level="warning",
             )
             return
 
@@ -1896,12 +1912,21 @@ class BackupManagerApp:
             return
 
         if profile.object_lock_enabled:
-            self.toasts.info(
-                f"Profile '{name}' removed. Backups on Amazon AWS S3 "
-                "are protected by Object Lock and will expire "
-                "automatically at the end of the retention period."
-            )
+            # _finalize FIRST so the profile is gone by the time the
+            # notification panel shows. Otherwise the user would see
+            # the deleted profile still selected in the sidebar
+            # behind the panel after dismissal.
             self._finalize_profile_deletion(profile)
+            self._notify(
+                title=f"Profile '{name}' removed",
+                body=(
+                    "Backups on Amazon AWS S3 are protected by Object "
+                    "Lock and cannot be deleted by the app. They will "
+                    "expire automatically at the end of the retention "
+                    "period."
+                ),
+                level="info",
+            )
             return
 
         if result.extras.get("delete_backups", False):
@@ -1952,6 +1977,47 @@ class BackupManagerApp:
             self.notebook.pack(fill="both", expand=True)
         with contextlib.suppress(Exception):
             self._save_frame.pack(side="bottom", fill="x")
+
+    def _notify(
+        self,
+        *,
+        title: str,
+        body: str,
+        level: NotifyLevel = "info",
+        button_label: str = "OK",
+        select_tab=None,
+    ) -> None:
+        """Show a blocking inline notification panel.
+
+        Thin wrapper around :func:`notify_inline` that fills in the
+        main-frame hide/restore callbacks every call site would
+        otherwise have to remember. Use for ALL one-way feedback —
+        success acknowledgements, validation errors, info notices —
+        so the user sees the same panel shape everywhere.
+
+        Args:
+            title: Short header line.
+            body: Multi-line body. ``\\n\\n`` separates paragraphs.
+            level: ``success`` / ``info`` / ``warning`` / ``error``
+                — drives the icon and its colour.
+            button_label: Dismissal button text. Defaults to ``"OK"``.
+            select_tab: Optional ttk.Frame instance of a tab to
+                ``notebook.select()`` AFTER the panel closes. Use for
+                validation errors that point at a specific tab so the
+                user lands on the offending field when they dismiss.
+        """
+        notify_inline(
+            self._main_frame,
+            title=title,
+            body=body,
+            level=level,
+            button_label=button_label,
+            hide_callback=self._hide_main_layout,
+            restore_callback=self._restore_main_layout,
+        )
+        if select_tab is not None:
+            with contextlib.suppress(Exception):
+                self.notebook.select(select_tab)
 
     def _finalize_profile_deletion(self, profile: BackupProfile) -> None:
         """Remove profile config and refresh the UI.
@@ -2080,10 +2146,13 @@ class BackupManagerApp:
         callback has a stable, named target.
         """
         if errors:
-            messagebox.showwarning(
-                "Partial cleanup",
-                f"Deleted {deleted} backup(s) but {len(errors)} "
-                f"error(s) occurred.\nCheck logs for details.",
+            self._notify(
+                title="Partial cleanup",
+                body=(
+                    f"Deleted {deleted} backup(s) but {len(errors)} "
+                    f"error(s) occurred.\n\nCheck the log files for details."
+                ),
+                level="warning",
             )
         self._finalize_profile_deletion(profile)
 
@@ -2267,7 +2336,14 @@ class BackupManagerApp:
 
         active_profiles = [p for p in self._profiles if p.active]
         if not active_profiles:
-            messagebox.showwarning("Backup", "No active profile to run.")
+            self._notify(
+                title="No active profile",
+                body=(
+                    "There is no active profile to back up. Enable at least "
+                    "one profile, or create a new one, before running a backup."
+                ),
+                level="warning",
+            )
             return
 
         # Validate each profile's storage config up-front so we fail fast
@@ -2278,20 +2354,22 @@ class BackupManagerApp:
             try:
                 profile.storage.validate()
             except ValueError as e:
-                self.notebook.select(self.tab_storage)
-                messagebox.showwarning(
-                    "Backup",
-                    f"Invalid configuration on '{profile.name}': {e}",
+                self._notify(
+                    title=f"Invalid storage configuration on '{profile.name}'",
+                    body=str(e),
+                    level="error",
+                    select_tab=self.tab_storage,
                 )
                 return
             for i, mirror in enumerate(profile.mirror_destinations):
                 try:
                     mirror.validate()
                 except ValueError as e:
-                    self.notebook.select(mirror_tabs[i])
-                    messagebox.showwarning(
-                        "Backup",
-                        f"Invalid configuration on '{profile.name}' " f"(mirror {i + 1}): {e}",
+                    self._notify(
+                        title=f"Invalid mirror {i + 1} configuration on '{profile.name}'",
+                        body=str(e),
+                        level="error",
+                        select_tab=mirror_tabs[i],
                     )
                     return
 
@@ -2715,11 +2793,10 @@ class BackupManagerApp:
         """Start integrity verification for the current profile."""
         profile, _idx = self._get_selected_profile()
         if profile is None:
-            from tkinter import messagebox
-
-            messagebox.showwarning(
-                "No profile selected",
-                "Please select a profile in the sidebar before verifying.",
+            self._notify(
+                title="No profile selected",
+                body="Please select a profile in the sidebar before verifying.",
+                level="warning",
             )
             return
 
@@ -3473,16 +3550,19 @@ class BackupManagerApp:
                 logger.warning("Auto-save failed: %s", exc)
 
     def _show_modules(self):
-        """Show feature/module availability via a bottom-centre toast.
+        """Show feature/module availability via an inline notification panel.
 
-        Replaces the legacy ``messagebox.showinfo("Modules", ...)`` so
-        the diagnostic is non-blocking. The success path collapses to
-        a single short line ("All features available") because the
-        common case is "everything works" and the user does not need
-        a multi-line breakdown to know that. Only when something is
-        missing does the toast carry the per-feature detail — and
-        even then it is capped to 5 lines + a "+N more" footer so the
-        toast envelope stays within ``_TOAST_MAX_WIDTH``.
+        History: messagebox.showinfo pop-up (pre-3.7.29) → bottom-
+        centre toast (3.7.29) → inline notification panel (3.7.34).
+        Switched to the panel so the diagnostic uses the SAME screen
+        shape as every other user-feedback surface in the app.
+
+        The success path collapses to a single short line ("All N
+        features available") because the common case is "everything
+        works" and the user does not need a multi-line breakdown to
+        know that. Only when something is missing does the panel
+        carry the per-feature detail — still capped at 5 lines + a
+        "+N more" footer so the body stays scannable.
         """
         from src.installer import check_all
 
@@ -3493,17 +3573,23 @@ class BackupManagerApp:
             if not info["available"]
         ]
         if not missing:
-            self.toasts.success(f"All {len(results)} features available")
+            self._notify(
+                title="Modules",
+                body=f"All {len(results)} features are available.",
+                level="success",
+            )
             return
 
-        lines = [
-            f"{len(missing)} of {len(results)} features missing:",
-        ]
+        lines = [f"{len(missing)} of {len(results)} features missing:"]
         for feat, deps in missing[:5]:
             lines.append(f"  • {feat}: {deps}")
         if len(missing) > 5:
             lines.append(f"  … and {len(missing) - 5} more")
-        self.toasts.info("\n".join(lines))
+        self._notify(
+            title="Modules",
+            body="\n".join(lines),
+            level="warning",
+        )
 
     def _show_about(self):
         """Show About as a full-screen inline panel replacing the notebook."""
@@ -4087,10 +4173,16 @@ class BackupManagerApp:
         def _send_report():
             description = desc_text.get("1.0", "end-1c").strip()
             if not description:
-                messagebox.showwarning(
-                    "Description required",
-                    "Please describe the issue before sending.",
-                    parent=self.root,
+                # Inline notify INSIDE the bug-report panel — the panel
+                # is itself a full-frame replacement of the notebook, so
+                # we cannot reuse self._notify (which hides _main_frame).
+                # Anchoring to self._bug_frame keeps the validation
+                # inline and consistent (no system pop-up).
+                notify_inline(
+                    self._bug_frame,
+                    title="Description required",
+                    body="Please describe the issue before sending.",
+                    level="warning",
                 )
                 return
 
@@ -4098,12 +4190,15 @@ class BackupManagerApp:
             id_file = id_path_var.get()
 
             if is_advanced and not id_file:
-                messagebox.showwarning(
-                    "ID required",
-                    "Advanced mode requires an identity document.\n"
-                    "Uncheck the advanced option to send a standard "
-                    "report without ID.",
-                    parent=self.root,
+                notify_inline(
+                    self._bug_frame,
+                    title="Identity document required",
+                    body=(
+                        "Advanced mode requires an identity document.\n\n"
+                        "Uncheck the advanced option to send a standard "
+                        "report without ID."
+                    ),
+                    level="warning",
                 )
                 return
 
@@ -4116,11 +4211,14 @@ class BackupManagerApp:
                 )
             except Exception:
                 logger.error("Failed to generate bug report", exc_info=True)
-                messagebox.showerror(
-                    "Report generation failed",
-                    "Could not create the bug report folder.\n"
-                    "Check the log file for details and try again.",
-                    parent=self.root,
+                notify_inline(
+                    self._bug_frame,
+                    title="Report generation failed",
+                    body=(
+                        "Could not create the bug report folder.\n\n"
+                        "Check the log file for details and try again."
+                    ),
+                    level="error",
                 )
                 return
             try:

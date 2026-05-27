@@ -22,8 +22,11 @@ import pytest
 from src.ui.confirm_panel import (
     ConfirmExtra,
     ConfirmResult,
+    _NOTIFY_VARIANTS,
     _validate_args,
+    _validate_notify_args,
     confirm_inline,
+    notify_inline,
 )
 
 
@@ -499,3 +502,177 @@ class TestPanelTeardown:
         after = set(panel_host.winfo_children())
 
         assert (after - before) == set()
+
+
+# =====================================================================
+# notify_inline tests (added 3.7.34 — single-button acknowledgement
+# panel that replaced the toast system).
+# =====================================================================
+
+
+class TestNotifyValidation:
+    """``_validate_notify_args`` rejects bad input before touching the UI."""
+
+    def test_none_parent_raises(self):
+        with pytest.raises(TypeError):
+            _validate_notify_args(None, "T", "B", "OK", "info")
+
+    def test_empty_title_raises(self, panel_host):
+        with pytest.raises(ValueError):
+            _validate_notify_args(panel_host, "", "B", "OK", "info")
+
+    def test_empty_body_raises(self, panel_host):
+        with pytest.raises(ValueError):
+            _validate_notify_args(panel_host, "T", "", "OK", "info")
+
+    def test_empty_button_label_raises(self, panel_host):
+        with pytest.raises(ValueError):
+            _validate_notify_args(panel_host, "T", "B", "", "info")
+
+    def test_unknown_level_raises(self, panel_host):
+        with pytest.raises(ValueError):
+            _validate_notify_args(panel_host, "T", "B", "OK", "fatal")
+
+    def test_non_string_title_raises(self, panel_host):
+        with pytest.raises(ValueError):
+            _validate_notify_args(panel_host, 42, "B", "OK", "info")  # type: ignore[arg-type]
+
+
+class TestNotifyEndToEnd:
+    """``notify_inline`` returns only after the user clicks OK."""
+
+    def test_ok_click_dismisses_and_returns(self, panel_host):
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
+
+        result = notify_inline(
+            panel_host,
+            title="Saved",
+            body="Profile 'L2' was saved successfully.",
+            level="success",
+        )
+
+        # Return value is intentionally None — the user has no
+        # decision to make.
+        assert result is None
+
+    def test_custom_button_label_is_used(self, panel_host):
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "Got it"))
+
+        notify_inline(
+            panel_host,
+            title="Notice",
+            body="Body",
+            level="info",
+            button_label="Got it",
+        )
+        # Reaching here without a hang means the custom-labelled
+        # button was found and clicked.
+
+    def test_panel_destroyed_after_dismiss(self, panel_host):
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
+
+        before = set(panel_host.winfo_children())
+        notify_inline(panel_host, title="T", body="B", level="info")
+        after = set(panel_host.winfo_children())
+
+        assert (after - before) == set(), (
+            "notify_inline left a widget under the host — the panel must "
+            "fully clean up on dismissal"
+        )
+
+    def test_escape_dismisses_too(self, panel_host):
+        """Escape works as a dismissal accelerator."""
+
+        def press_escape():
+            panel_host.event_generate("<Escape>")
+
+        panel_host.after(50, press_escape)
+        notify_inline(panel_host, title="T", body="B", level="info")
+        # If escape didn't dismiss, the test would hang.
+
+    def test_return_dismisses_too(self, panel_host):
+        """Return / Enter works as a dismissal accelerator."""
+
+        def press_return():
+            panel_host.event_generate("<Return>")
+
+        panel_host.after(50, press_return)
+        notify_inline(panel_host, title="T", body="B", level="info")
+
+
+class TestNotifyVariantStyling:
+    """Each level paints its icon with the level-specific colour."""
+
+    @staticmethod
+    def _find_icon_label(root: tk.Misc, expected_icon: str):
+        """Locate the header icon label by its glyph (✓ / ℹ / ⚠ / ⛔)."""
+        for w in _walk(root):
+            if isinstance(w, ttk.Label) and str(w.cget("text")) == expected_icon:
+                return w
+        return None
+
+    @pytest.mark.parametrize("level", ["success", "info", "warning", "error"])
+    def test_each_level_icon_uses_variant_colour(self, panel_host, level):
+        captured = {"fg": None}
+        expected_icon = _NOTIFY_VARIANTS[level]["icon"]
+
+        def inspect_then_ok():
+            icon = self._find_icon_label(panel_host, expected_icon)
+            if icon is not None:
+                captured["fg"] = str(icon.cget("foreground"))
+            _click_first_button_with_text(panel_host, "OK")
+
+        panel_host.after(50, inspect_then_ok)
+        notify_inline(panel_host, title="T", body="B", level=level)
+
+        expected = _NOTIFY_VARIANTS[level]["icon_color"]
+        assert captured["fg"] == expected, (
+            f"level={level!r} icon ({expected_icon!r}) must use colour "
+            f"{expected!r}, got {captured['fg']!r}"
+        )
+
+
+def _walk(root: tk.Misc):
+    """Depth-first walk over a widget subtree (helper for variant tests)."""
+    stack: list[tk.Misc] = [root]
+    while stack:
+        widget = stack.pop()
+        yield widget
+        try:
+            stack.extend(widget.winfo_children())
+        except tk.TclError:
+            pass
+
+
+class TestNotifyHideRestoreCallbacks:
+    """``hide_callback`` runs before the panel; ``restore_callback`` after."""
+
+    def test_callbacks_fired_in_order(self, panel_host):
+        events: list[str] = []
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
+
+        notify_inline(
+            panel_host,
+            title="T",
+            body="B",
+            level="info",
+            hide_callback=lambda: events.append("hide"),
+            restore_callback=lambda: events.append("restore"),
+        )
+
+        assert events == ["hide", "restore"]
+
+    def test_hide_callback_failure_does_not_abort_panel(self, panel_host):
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
+
+        def failing_hide():
+            raise RuntimeError("simulated")
+
+        # Must not propagate; panel still shows and user can click OK.
+        notify_inline(
+            panel_host,
+            title="T",
+            body="B",
+            level="info",
+            hide_callback=failing_hide,
+        )

@@ -5,6 +5,26 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.34] - 2026-05-27
+
+### Changed
+- **Unified ALL user feedback on the inline panel pattern.** Decision (26/05/2026 review of v3.7.33): every success / info / warning / error message in the app must look like the ``Delete profile`` panel — same icon-coloured header, centred body, single OK button at the bottom-right. The toast bar at the bottom-centre (introduced in 3.7.29) and the remaining ``messagebox.showwarning`` / ``showinfo`` / ``showerror`` calls in ``src/ui/app.py`` are replaced. Net effect: one visual contract instead of three (toast + popup + panel), no more pop-up windows during normal use.
+- **New** ``notify_inline(parent_frame, *, title, body, level, button_label)`` in ``src/ui/confirm_panel.py``. Mirror of ``confirm_inline`` but with a single dismissal button (no choice to make, only acknowledgement). Four severity levels map to the icon and its colour: ``success`` ✓ green, ``info`` ℹ blue, ``warning`` ⚠ amber, ``error`` ⛔ red. The OK button is always the neutral accent blue — the action is "close this", never destructive. Synchronous return via ``wait_variable`` so call sites can swap from ``messagebox.show*`` with a one-line edit.
+- **New** ``BackupManagerApp._notify(*, title, body, level, button_label, select_tab)`` helper. Thin wrapper around ``notify_inline`` that fills in the main-frame hide/restore callbacks every call site would otherwise repeat. The optional ``select_tab`` parameter switches to the offending tab AFTER the panel dismisses, so a validation error like "Profile name already in use" lands the user on the ``General`` tab to fix the field.
+- **17 sites migrated** in ``src/ui/app.py``: the three 3.7.29 toast calls (``Profile saved``, ``Object Lock notice``, ``Modules feature status``) plus 14 ``messagebox.showwarning`` / ``showerror`` validation popups (Backup in progress × 2, Encryption invalid, Profile name duplicate, Destination duplicate, Schedule incompatible, Partial cleanup, No active profile, Invalid storage / mirror config, No profile selected, Description required, Identity document required, Report generation failed). Each migration carries the right severity level so the icon colour matches the message intent. Bug-report sub-panel notifications use ``notify_inline(self._bug_frame, ...)`` directly to overlay inside the bug-report frame without disturbing the main layout.
+- ``_build_header`` in ``confirm_panel.py`` now accepts an optional ``icon_color`` argument so notify and confirm panels can both colour the header glyph by severity. ``confirm_inline`` itself now passes ``Colors.WARNING`` for the icon — any confirmation prompt is at minimum a "pay attention" prompt — without re-colouring the icon to red on destructive prompts (the red Confirm button already conveys that).
+
+### Removed
+- ``src/ui/notifications.py`` (the ``ToastManager`` + ``Toast`` widget pair shipped in 3.7.29). The bottom-centre toast strip is gone — every former toast call site now opens the inline panel instead. Decision driven by the cohérence-maximale goal: a toast at the bottom of the window was the only visual outlier left after the 3.7.30/.33 inline-panel migrations.
+- ``tests/unit/test_toast_notifications.py`` (22 tests). The behaviour they pinned is no longer reachable — notify_inline replaces it end-to-end and is covered by the new test class below.
+- The ``self.toasts = ToastManager(main)`` initialisation in ``BackupManagerApp._build_ui``.
+
+### Tests
+- +20 tests in ``tests/unit/test_confirm_panel.py`` covering ``notify_inline``: input validation (``None`` parent, empty/non-string title / body / button label, unknown ``level``), end-to-end click round-trip (OK dismisses and returns ``None``, custom button label is used, panel cleaned up on dismiss, Escape and Return are accelerators), per-level icon colour parametrised across the four severity levels (success/info/warning/error), and hide/restore callback ordering with exception isolation. Plus 1 existing test in ``tests/unit/test_backup_type_race.py::test_explicit_save_warns_during_backup`` updated to patch ``_notify`` instead of ``messagebox.showwarning`` (same guard intent, new plumbing).
+
+### Out of scope for this release
+- 8 sites in sub-windows (``wizard.py``: 1 site, ``recovery_tab.py``: 5, ``history_tab.py``: 2) still use ``messagebox`` because the tabs / wizard do not currently have a reference to ``_main_frame``. Migrating requires a service-injection pattern on the tab / wizard constructors — to land in a follow-up release.
+
 ## [3.7.33] - 2026-05-27
 
 ### Changed

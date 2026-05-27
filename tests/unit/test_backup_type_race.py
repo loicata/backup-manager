@@ -236,20 +236,30 @@ class TestSaveProfileGuardDuringBackup:
         assert app._current_profile.backup_type == original_backup_type
 
     def test_explicit_save_warns_during_backup(self, app_with_profiles, monkeypatch):
+        """An explicit Save during a backup must surface the warning panel.
+
+        Updated for 3.7.34: ``_save_profile`` now uses the in-app
+        inline ``_notify(level="warning", title="Backup in progress",
+        ...)`` instead of ``messagebox.showwarning``. We patch the
+        helper rather than ``messagebox`` so the test stays focused
+        on the guard's behaviour, not the underlying widget plumbing.
+        """
         app, _, _ = app_with_profiles
         app._backup_running = True
 
-        shown = []
+        shown: list[dict] = []
         monkeypatch.setattr(
-            "src.ui.app.messagebox.showwarning",
-            lambda *a, **kw: shown.append((a, kw)),
+            app,
+            "_notify",
+            lambda **kwargs: shown.append(kwargs),
         )
 
         result = app._save_profile(silent=False)
 
         assert result is False
-        assert shown, "User should have seen a 'Backup in progress' warning"
-        assert "Backup in progress" in shown[0][0][0]
+        assert shown, "User should have seen a 'Backup in progress' notification panel"
+        assert "Backup in progress" in shown[0]["title"]
+        assert shown[0]["level"] == "warning"
 
     def test_save_works_normally_when_no_backup_running(self, app_with_profiles):
         app, _, _ = app_with_profiles

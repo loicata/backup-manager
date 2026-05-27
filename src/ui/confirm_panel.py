@@ -1,9 +1,17 @@
-"""In-app inline confirmation panel.
+"""In-app inline confirmation and notification panels.
 
-Replacement for ``tkinter.messagebox.askyesno`` when the question
-deserves more space than a single-line modal can offer, or when two
-sequential ``askyesno`` calls can be merged into one decision with
-a checkbox.
+Two public functions, same visual pattern:
+
+- :func:`confirm_inline` (since 3.7.30) — replacement for
+  ``tkinter.messagebox.askyesno``. Cancel + Confirm buttons,
+  returns the user's Yes/No decision plus optional checkbox
+  state via :class:`ConfirmResult`.
+- :func:`notify_inline` (since 3.7.34) — replacement for
+  ``tkinter.messagebox.showinfo`` / ``showwarning`` / ``showerror``
+  AND the bottom-centre toasts. Single OK button. Returns nothing
+  (the user has no choice to make, only an acknowledgement). Four
+  severity levels (``success`` / ``info`` / ``warning`` / ``error``)
+  drive the icon and its colour.
 
 Design choices:
 
@@ -43,9 +51,20 @@ import tkinter as tk
 from collections.abc import Callable
 from dataclasses import dataclass
 from tkinter import ttk
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from src.ui.theme import Colors, Fonts, Spacing
+
+NotifyLevel = Literal["success", "info", "warning", "error"]
+
+# Per-severity icon + foreground colour. Adding a level is one
+# entry, not a fan-out of conditionals in the body of notify_inline.
+_NOTIFY_VARIANTS: dict[NotifyLevel, dict[str, str]] = {
+    "success": {"icon": "✓", "icon_color": Colors.SUCCESS},
+    "info": {"icon": "ℹ", "icon_color": Colors.ACCENT},
+    "warning": {"icon": "⚠", "icon_color": Colors.WARNING},
+    "error": {"icon": "⛔", "icon_color": Colors.DANGER},
+}
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +283,12 @@ def _build_panel(
     centre = ttk.Frame(panel)
     centre.place(relx=0.5, rely=0.5, anchor="center")
 
-    _build_header(centre, icon=icon, title=title)
+    # Confirm prompts use the warning amber icon by default (any
+    # confirmation is at minimum a "pay attention" prompt). Destructive
+    # actions stand out via the red Confirm button — re-colouring the
+    # icon to red as well would over-state the severity for routine
+    # delete confirmations.
+    _build_header(centre, icon=icon, title=title, icon_color=Colors.WARNING)
     _build_body(centre, body)
     if extras:
         _build_extras(centre, extras, extras_vars)
@@ -285,16 +309,27 @@ def _build_panel(
     return panel
 
 
-def _build_header(parent: tk.Misc, *, icon: str, title: str) -> None:
-    """Icon + title on one row."""
+def _build_header(
+    parent: tk.Misc,
+    *,
+    icon: str,
+    title: str,
+    icon_color: str | None = None,
+) -> None:
+    """Icon + title on one row.
+
+    ``icon_color`` is optional; when ``None`` the icon uses the
+    default label foreground. Passing a colour lets the caller
+    convey the severity at a glance (green for success, red for
+    error, etc.) without needing distinct icons per level.
+    """
     header = ttk.Frame(parent)
     header.pack(anchor="w", pady=(0, Spacing.LARGE))
 
-    ttk.Label(
-        header,
-        text=icon,
-        font=(Fonts.FAMILY, Fonts.SIZE_HEADER, "bold"),
-    ).pack(side="left", padx=(0, Spacing.MEDIUM))
+    icon_kwargs: dict = {"text": icon, "font": (Fonts.FAMILY, Fonts.SIZE_HEADER, "bold")}
+    if icon_color is not None:
+        icon_kwargs["foreground"] = icon_color
+    ttk.Label(header, **icon_kwargs).pack(side="left", padx=(0, Spacing.MEDIUM))
 
     ttk.Label(
         header,
@@ -428,3 +463,197 @@ def _build_buttons(
     # location does NOT also trigger Enter to mean "press the
     # focused button".
     cancel_btn.focus_set()
+
+
+# ---------------------------------------------------------------------
+# notify_inline — one-button acknowledgement panel.
+# Same visual pattern as confirm_inline, single OK button, no return
+# value (the user has no choice, only an acknowledgement).
+# ---------------------------------------------------------------------
+
+
+def notify_inline(
+    parent_frame: tk.Misc,
+    *,
+    title: str,
+    body: str,
+    level: NotifyLevel = "info",
+    button_label: str = "OK",
+    hide_callback: Callable[[], None] | None = None,
+    restore_callback: Callable[[], None] | None = None,
+) -> None:
+    """Display a blocking inline notification panel.
+
+    Single dismissal button (default label ``"OK"``). Use for one-way
+    acknowledgements that the user must read but cannot say no to —
+    replaces ``messagebox.showinfo`` / ``showwarning`` / ``showerror``
+    and the bottom-centre toasts.
+
+    Visual pattern strictly matches :func:`confirm_inline` so the user
+    sees the same screen shape regardless of the prompt type: centred
+    title with a level-coloured icon, body underneath, one button
+    bottom-right.
+
+    Severity mapping (drives icon + icon colour):
+
+    =========  ====  =================
+    level      icon  colour
+    =========  ====  =================
+    success    ✓     green (SUCCESS)
+    info       ℹ     blue (ACCENT)
+    warning    ⚠     amber (WARNING)
+    error      ⛔    red (DANGER)
+    =========  ====  =================
+
+    The button itself is always the accent blue (the action is
+    neutral — closing the notification — never destructive).
+
+    Args:
+        parent_frame: Frame the panel is built inside. Typically
+            ``BackupManagerApp._main_frame``.
+        title: Short header line.
+        body: Multi-line body. ``\\n\\n`` separates paragraphs.
+        level: One of ``"success"`` / ``"info"`` / ``"warning"`` /
+            ``"error"``. Defaults to ``"info"``.
+        button_label: Dismissal button text. Defaults to ``"OK"``.
+        hide_callback: Called once BEFORE the panel mounts.
+        restore_callback: Called once AFTER the panel is destroyed.
+
+    Raises:
+        TypeError: If ``parent_frame`` is ``None``.
+        ValueError: If ``title`` / ``body`` / ``button_label`` is
+            empty, or ``level`` is not in :data:`_NOTIFY_VARIANTS`.
+    """
+    _validate_notify_args(parent_frame, title, body, button_label, level)
+    variant = _NOTIFY_VARIANTS[level]
+
+    if hide_callback is not None:
+        try:
+            hide_callback()
+        except Exception:
+            logger.debug("hide_callback raised — proceeding anyway", exc_info=True)
+
+    decision_var = tk.BooleanVar(value=False, master=parent_frame)
+
+    panel = _build_notify_panel(
+        parent_frame,
+        title=title,
+        body=body,
+        icon=variant["icon"],
+        icon_color=variant["icon_color"],
+        button_label=button_label,
+        on_dismiss=lambda: _resolve_notify(decision_var),
+    )
+
+    parent_frame.wait_variable(decision_var)
+
+    try:
+        panel.destroy()
+    except tk.TclError:
+        pass
+
+    if restore_callback is not None:
+        try:
+            restore_callback()
+        except Exception:
+            logger.debug("restore_callback raised — UI may be partial", exc_info=True)
+
+
+def _validate_notify_args(
+    parent_frame: tk.Misc,
+    title: str,
+    body: str,
+    button_label: str,
+    level: str,
+) -> None:
+    """Reject obviously-bad notify_inline calls before touching the UI."""
+    if parent_frame is None:
+        raise TypeError("parent_frame must not be None")
+    for name, value in (
+        ("title", title),
+        ("body", body),
+        ("button_label", button_label),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string, got {value!r}")
+    if level not in _NOTIFY_VARIANTS:
+        raise ValueError(
+            f"level must be one of {sorted(_NOTIFY_VARIANTS)}, got {level!r}"
+        )
+
+
+def _resolve_notify(var: tk.BooleanVar) -> None:
+    """Unblock ``wait_variable`` — the user has clicked OK."""
+    try:
+        var.set(True)
+    except tk.TclError:
+        logger.debug("decision_var.set raised (master gone)", exc_info=True)
+
+
+def _build_notify_panel(
+    parent_frame: tk.Misc,
+    *,
+    title: str,
+    body: str,
+    icon: str,
+    icon_color: str,
+    button_label: str,
+    on_dismiss: Callable[[], None],
+) -> ttk.Frame:
+    """Assemble the notify panel widget tree.
+
+    Returns the outer ``ttk.Frame`` so the caller can destroy the
+    whole subtree on dismissal. Mirrors :func:`_build_panel` but with
+    a single OK button instead of Cancel + Confirm.
+    """
+    panel = ttk.Frame(parent_frame)
+    panel.pack(fill="both", expand=True)
+
+    centre = ttk.Frame(panel)
+    centre.place(relx=0.5, rely=0.5, anchor="center")
+
+    _build_header(centre, icon=icon, title=title, icon_color=icon_color)
+    _build_body(centre, body)
+    _build_notify_button(centre, button_label, on_dismiss)
+
+    # Escape and Return both dismiss — there is only one outcome.
+    panel.bind_all("<Escape>", lambda _e: on_dismiss())
+    panel.bind_all("<Return>", lambda _e: on_dismiss())
+    return panel
+
+
+def _build_notify_button(
+    parent: tk.Misc,
+    button_label: str,
+    on_dismiss: Callable[[], None],
+) -> None:
+    """Single right-aligned dismissal button, accent-coloured.
+
+    Uses ``tk.Button`` (not ``ttk.Button``) for the same reasons
+    documented in :func:`_build_buttons`: sv_ttk's image-sprite
+    layout would ignore the accent background on a custom style,
+    and we want the geometry to match the confirm-panel buttons
+    so the two panel types feel identical.
+    """
+    btn_row = ttk.Frame(parent)
+    btn_row.pack(anchor="e", pady=(Spacing.LARGE, 0))
+
+    ok_btn = tk.Button(
+        btn_row,
+        text=button_label,
+        command=on_dismiss,
+        bg=Colors.ACCENT,
+        fg="white",
+        activebackground=Colors.ACCENT_HOVER,
+        activeforeground="white",
+        relief="flat",
+        font=Fonts.bold(),
+        padx=Spacing.XLARGE,
+        pady=Spacing.MEDIUM,
+        cursor="hand2",
+        borderwidth=1,
+    )
+    ok_btn.pack(side="left")
+    # Focus the OK button so Enter / Space both dismiss naturally —
+    # there is no destructive alternative to protect against.
+    ok_btn.focus_set()

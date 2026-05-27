@@ -5,6 +5,16 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.41] - 2026-05-27
+
+### Fixed
+- **Restoring an encrypted multi-source backup placed the FIRST source's files flat at the restore root** — every subsequent source was correctly nested under its own folder, but the first one was extracted without its enclosing directory. User report (27/05/2026 on the v3.7.40 install, profile ``tes_crypter`` with two sources ``F:/Documents/Divers/Economie`` and ``F:/Documents/Divers/BFM``): after restore, ``Economie/*`` files sat directly under the restore directory next to a correctly-nested ``BFM/`` folder. Asymmetric and confusing — the user had to manually recreate the ``Economie/`` folder by moving files around.
+- **Root cause** in ``RecoveryTab._decrypt_and_extract`` (``src/ui/tabs/recovery_tab.py``): the pre-3.7.41 code learned a ``strip_prefix`` from the FIRST tar member it saw (``"Economie/"`` here, derived from ``member.name.split("/")[0] + "/"``) and unconditionally stripped that prefix from every subsequent member's name. ``Economie/*`` matched and got stripped flat at the root; ``BFM/*`` did NOT match the ``"Economie/"`` prefix and survived intact — hence the visible asymmetry. The code dated back to a single-source assumption where the wrapping folder was an artefact to remove. Once multi-source backups became common, the strip stopped being a clean-up and started destroying user data structure.
+- **Fix**: drop the ``strip_prefix`` heuristic entirely and use ``member.name`` verbatim. ``collector.py::add_file`` (line ~336) already builds every tar entry as ``f"{source_root.name}/{inner_rel}"`` — the tar IS correct on disk, the extraction was the one corrupting it. Post-fix, restoration mirrors the structure of the LOCAL non-encrypted path at ``_do_local_restore`` line ~1615 which uses ``f.relative_to(src)`` to preserve every source-folder name. Crypto vs non-crypto restorations now produce identical layouts.
+
+### Tests
+- +5 tests in ``tests/unit/test_decrypt_extract_multi_source.py`` — they build a real ``.tar.wbenc`` via the production ``EncryptingWriter`` (no mocks, because the failure mode was integration-shaped and mocks would have missed it again): 2-source archive must keep BOTH top-level folders (the exact user-reported scenario), explicit negative assertion that the first source's files do NOT appear at the restore root, 3-source generalisation, single-source non-regression (wrapping folder still preserved — matches the LOCAL non-encrypted behaviour), and wrong-password rejection unchanged (the fix sits in the same function, this anchors that the friendly ``"The password you provided is incorrect"`` error path is untouched).
+
 ## [3.7.40] - 2026-05-27
 
 ### Fixed

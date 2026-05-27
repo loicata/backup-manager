@@ -1794,7 +1794,6 @@ class RecoveryTab(ScrollableTab):
         long_path_mkdir(restore_dir)
 
         count = 0
-        strip_prefix = ""
 
         try:
             from cryptography.exceptions import InvalidTag
@@ -1808,11 +1807,24 @@ class RecoveryTab(ScrollableTab):
                     for member in tar:
                         if member.name.endswith(".wbverify"):
                             continue
-                        if not strip_prefix and "/" in member.name:
-                            strip_prefix = member.name.split("/")[0] + "/"
+                        # ``member.name`` is already the correct path
+                        # built by ``collector.py:add_file`` (line ~336)
+                        # which prefixes every entry with
+                        # ``source_root.name/``. Using it verbatim
+                        # preserves the source-folder structure for
+                        # multi-source profiles — e.g. a profile with
+                        # sources ``F:/Divers/Economie`` + ``F:/Divers/BFM``
+                        # extracts as ``restore_dir/Economie/...`` and
+                        # ``restore_dir/BFM/...``. The pre-3.7.41 code
+                        # tried to strip the first-encountered top-level
+                        # folder from every member; that worked for a
+                        # single-source backup but extracted the FIRST
+                        # source flat at the root when multiple sources
+                        # were configured (the second + subsequent
+                        # top-level folders did not match the strip
+                        # prefix and survived intact — visible asymmetry
+                        # at restore time).
                         name = member.name
-                        if strip_prefix and name.startswith(strip_prefix):
-                            name = name[len(strip_prefix) :]
                         if not name:
                             continue
                         target = restore_dir / name

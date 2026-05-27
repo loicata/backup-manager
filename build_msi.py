@@ -93,7 +93,8 @@ def _build_wxs(version: str) -> str:
         icon_attr = 'Icon="BackupManagerIcon"'
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Product Id="*"
            Name="Backup Manager"
            Language="1033"
@@ -116,6 +117,29 @@ def _build_wxs(version: str) -> str:
 
     {license_line}
     {icon_lines}
+
+    <!--
+      Close any running BackupManager.exe BEFORE replacing the binary
+      (since 3.7.36). Without this, re-installing the MSI on top of a
+      running instance left the old process holding the single-instance
+      mutex in memory; the user's next launch of the new binary saw the
+      mutex, wrote ``.show_signal`` and exited without raising the
+      window (the old instance might be in the system tray, busy in a
+      callback, or simply unresponsive — see v3.7.35 user report).
+
+      ``CloseMessage="yes"`` sends WM_CLOSE to every top-level window
+      of the target process so the app gets the chance to save state
+      cleanly. ``TerminateProcess="10000"`` then force-kills any window
+      that did not close within 10 s (e.g. a modal dialog that was
+      waiting on user input).
+    -->
+    <util:CloseApplication Id="CloseBackupManagerExe"
+                           Target="BackupManager.exe"
+                           CloseMessage="yes"
+                           PromptToContinue="no"
+                           TerminateProcess="10000"
+                           RebootPrompt="no"
+                           EndSessionMessage="no" />
 
     <!-- Directory structure -->
     <Directory Id="TARGETDIR" Name="SourceDir">

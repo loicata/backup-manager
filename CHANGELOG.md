@@ -5,6 +5,17 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.36] - 2026-05-27
+
+### Fixed
+- **MSI re-install on top of a running instance left the next launch silently failing.** User report on the v3.7.35 install: after installing the MSI (which replaces the ``.exe`` on disk), the next double-click of the desktop shortcut produced "nothing visible". Root cause: the MSI ``InstallFiles`` action only replaces the binary, it does not stop the running process. The OLD process (e.g. 3.7.34, possibly sat in the system tray) kept holding the cross-process ``BackupManager_v3_SingleInstance`` mutex. The new binary booted, saw the mutex via ``CreateMutexW`` returning ``ERROR_ALREADY_EXISTS=183``, wrote the ``.show_signal`` fallback file and exited. The running instance was supposed to detect the signal via its 500 ms poll and call ``_show_window`` — but a tray-only instance with no foreground window did NOT visibly raise (a withdrawn root + the user looking at their desktop = no obvious change).
+- **Double fix (defence in depth):**
+  - **(A) Win32 ``SetForegroundWindow`` from the new instance.** New helper ``_bring_existing_instance_to_front`` in ``src/__main__.py`` enumerates top-level windows via ``EnumWindows``, finds the first one whose title starts with ``"Backup Manager"`` (prefix match so a v3.7.36 launcher still finds the v3.7.34 / .35 window), then calls ``ShowWindow(hwnd, SW_RESTORE=9)`` followed by ``SetForegroundWindow(hwnd)``. The user just clicked the shortcut so we are the foreground process — Windows lets the call succeed and the existing window comes to the front immediately. The signal-file polling stays in place as a belt-and-braces fallback for the rare case where the Win32 raise is blocked (UIPI restriction, hidden+iconic combo, etc.).
+  - **(B) MSI ``util:CloseApplication`` before file replacement.** ``build_msi.py`` now adds a ``<util:CloseApplication Target="BackupManager.exe" CloseMessage="yes" TerminateProcess="10000" />`` block. WM_CLOSE is broadcast to every top-level window of the running process so the app gets the chance to save state cleanly, then any window that has not closed within 10 s is force-killed. Scheduling defaults to ``before InstallInitialize``, i.e. before ``InstallFiles`` overwrites the binary — exactly the moment we need. Requires the existing ``WixUtilExtension`` (already linked for the Defender exclusion custom actions); only addition is the ``xmlns:util`` namespace declaration on the ``<Wix>`` root.
+
+### Tests
+- +12 tests in ``tests/unit/test_single_instance_raise.py`` covering: non-Windows skip (returns False without touching ``ctypes.windll``), no-matching-window returns False without raising, single matching window calls ``ShowWindow(SW_RESTORE=9)`` then ``SetForegroundWindow`` in that order, prefix-match works across the 3.7.34 → 3.7.36 version range, first-match-wins (enumeration stops at the first hit), empty-title windows are skipped, unrelated "Backup Manager"-like app names do not falsely match the prefix, ``EnumWindows`` exception is swallowed and returns False, ``SetForegroundWindow`` UIPI-style failure does not crash the bootstrap. Plus 2 integration tests pinning that ``_acquire_single_instance`` calls the raise helper BEFORE writing the signal file when ``ERROR_ALREADY_EXISTS`` fires, and does NOT call it on a genuine first launch.
+
 ## [3.7.35] - 2026-05-27
 
 ### Changed

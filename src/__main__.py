@@ -185,12 +185,103 @@ def _get_signal_file() -> Path:
     return Path(appdata) / "BackupManager" / ".show_signal"
 
 
+# Title prefix used by ``BackupManagerApp`` for its root window
+# (``"Backup Manager v{version}"``). Anchoring the EnumWindows match
+# on the prefix lets a v3.7.36 second instance still find the
+# v3.7.35 window of a not-yet-restarted user.
+_WINDOW_TITLE_PREFIX = "Backup Manager"
+
+
+def _bring_existing_instance_to_front() -> bool:
+    """Find and raise the existing Backup Manager window.
+
+    Companion to the signal-file mechanism (since 3.7.36). When a
+    second instance is started — typically because the user double-
+    clicked the desktop shortcut while the app sits in the system
+    tray — we cannot rely solely on the ``.show_signal`` polling
+    loop: the running instance might be slow to react, blocked in
+    a long Tk callback, or have its window in the withdrawn state.
+    A direct Win32 ``SetForegroundWindow`` from the new instance
+    raises the existing window immediately, then the new instance
+    exits as before.
+
+    Returns:
+        True when a candidate window was found and the
+        ``ShowWindow`` + ``SetForegroundWindow`` calls were made.
+        False on non-Windows, on enumeration error, or when no
+        window matched the ``Backup Manager`` title prefix.
+
+    Notes:
+        - ``EnumWindows`` enumerates top-level windows including
+          hidden ones, so ``root.withdraw()`` does not hide the
+          window from us.
+        - ``ShowWindow(hwnd, SW_RESTORE=9)`` first to undo any
+          minimised / withdrawn state, then ``SetForegroundWindow``
+          to bring it to focus. Windows imposes restrictions on
+          SetForegroundWindow when the caller is not the foreground
+          process — in our case the user just clicked the shortcut,
+          so we are the foreground process and the call succeeds.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        found_hwnd = ctypes.c_void_p(0)
+
+        # EnumWindows callback signature: (HWND, LPARAM) -> BOOL.
+        # Return True to continue enumeration, False to stop.
+        enum_proc_type = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
+        )
+
+        def _enum_proc(hwnd: int, _lparam) -> bool:
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            if buffer.value.startswith(_WINDOW_TITLE_PREFIX):
+                found_hwnd.value = hwnd
+                return False  # stop enumeration
+            return True
+
+        callback = enum_proc_type(_enum_proc)
+        user32.EnumWindows(callback, None)
+
+        if not found_hwnd.value:
+            return False
+
+        # SW_RESTORE = 9: undo minimised / withdrawn state and
+        # show the window in its previous size/position.
+        sw_restore = 9
+        user32.ShowWindow(found_hwnd, sw_restore)
+        user32.SetForegroundWindow(found_hwnd)
+        return True
+    except Exception:
+        logger.debug("Could not raise existing Backup Manager window", exc_info=True)
+        return False
+
+
 def _acquire_single_instance() -> bool:
     """Ensure only one instance of the application is running.
 
     Returns True if this is the first instance.
-    Uses a mutex for detection and a signal file to tell the
-    running instance to bring its window to the foreground.
+
+    Detection layers:
+        1. Named mutex (cross-process, lives in the kernel).
+        2. On collision: directly raise the existing window via
+           :func:`_bring_existing_instance_to_front` (Win32
+           SetForegroundWindow) for immediate UX feedback.
+        3. Fallback: signal file polled by the running instance so
+           a stuck SetForegroundWindow (e.g. UIPI restriction) is
+           still caught a few hundred milliseconds later.
+
+    The dual mechanism was added in 3.7.36 after a user report:
+    re-installing the MSI did NOT kill the running 3.7.34 instance;
+    the new 3.7.35 launch saw the mutex, wrote the signal file
+    and exited, but the running 3.7.34 instance was sat in the
+    system tray and the signal poll did not visibly raise the
+    window. Direct SetForegroundWindow is the belt-and-braces.
     """
     global _mutex_handle
     try:
@@ -200,7 +291,11 @@ def _acquire_single_instance() -> bool:
         last_error = kernel32.GetLastError()
 
         if last_error == 183:  # ERROR_ALREADY_EXISTS
-            # Write signal file so the running instance shows itself
+            # Best-effort direct raise FIRST so the user sees the
+            # window come back immediately. Fallback signal file
+            # is still written so a stuck or hidden window is
+            # caught by the running instance's _check_signal loop.
+            _bring_existing_instance_to_front()
             signal_file = _get_signal_file()
             signal_file.parent.mkdir(parents=True, exist_ok=True)
             signal_file.write_text("show", encoding="utf-8")

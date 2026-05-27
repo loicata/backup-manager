@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.31] - 2026-05-26
+
+### Fixed
+- **Destructive ``Delete`` button in the new confirmation panel rendered invisible at rest.** User report on the v3.7.30 install: the ``Delete`` button on the Delete-profile inline panel showed no visible text or background — only when the cursor hovered the area did the red hover state appear. Cause: ``confirm_panel.py`` was building the destructive confirm as a ``ttk.Button`` with ``style="Danger.TButton"``, but under sv_ttk (Sun Valley theme) the ttk button layout uses image sprites and ignores custom ``background`` configured via ``style.configure``. Only the ``Accent.TButton`` style ships native sprites; ``Danger.TButton`` is custom and paints nothing.
+- **Fix**: the destructive confirm button is now built as a ``tk.Button`` (legacy widget that respects ``bg``/``fg``/``activebackground`` directly), matching the workaround already used for the ``Delete profile`` button in the sidebar (``src/ui/app.py:904``). Non-destructive confirms keep ``ttk.Button`` + ``Accent.TButton`` (sv_ttk native, renders correctly).
+
+### Tests
+- +3 regression tests in ``tests/unit/test_confirm_panel.py::TestDestructiveButtonVisibility``: the destructive confirm MUST be a ``tk.Button`` (not ``ttk.Button``) so sv_ttk paints it, MUST carry ``bg=Colors.DANGER`` directly on the widget (a future refactor that re-routes through ``style.configure`` would silently re-break the visibility), and non-destructive confirms MUST stay ``ttk.Button`` so they keep the native Accent look. The 20 existing confirm-panel tests still pass — the helper ``_click_first_button_with_text`` was widened to accept both widget classes.
+
 ## [3.7.30] - 2026-05-26
 
 ### Added

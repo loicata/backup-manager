@@ -39,16 +39,21 @@ def panel_host(tk_root):
 
 
 def _click_first_button_with_text(root: tk.Misc, text: str) -> bool:
-    """Walk the widget tree and invoke the first ttk.Button matching ``text``.
+    """Walk the widget tree and invoke the first button matching ``text``.
+
+    Accepts both ``ttk.Button`` (cancel + non-destructive confirm)
+    AND ``tk.Button`` (destructive confirm uses the legacy tk widget
+    because sv_ttk's ttk button layout ignores custom red backgrounds
+    — see :mod:`src.ui.confirm_panel` for the rationale).
 
     Returns True on success, False if no button matched (caller is
-    expected to assert).  Used by tests that need to simulate the
-    user clicking Confirm / Cancel without manual coordinates.
+    expected to assert).
     """
     stack: list[tk.Misc] = [root]
     while stack:
         widget = stack.pop()
-        if isinstance(widget, ttk.Button) and widget.cget("text") == text:
+        is_button = isinstance(widget, (ttk.Button, tk.Button))
+        if is_button and widget.cget("text") == text:
             widget.invoke()
             return True
         try:
@@ -272,6 +277,123 @@ class TestHideAndRestoreCallbacks:
         )
         # ConfirmResult must still be the user's decision.
         assert result.confirmed is True
+
+
+class TestDestructiveButtonVisibility:
+    """Regression: the destructive confirm button MUST paint red.
+
+    Bug fixed in 3.7.31: under sv_ttk (Sun Valley theme), a
+    ``ttk.Button`` with ``style="Danger.TButton"`` ignores the
+    configured red ``background`` because sv_ttk's button layout
+    uses image sprites. The button rendered with NO visible
+    background — only on hover did the active state kick in and
+    show colour. Users could not see the destructive action.
+
+    The fix uses ``tk.Button`` (legacy widget) instead of
+    ``ttk.Button`` for the destructive case so the red background
+    actually paints. These tests pin that contract so a future
+    refactor cannot silently re-introduce the bug.
+    """
+
+    def _find_button_with_text(self, root: tk.Misc, text: str):
+        stack: list[tk.Misc] = [root]
+        while stack:
+            widget = stack.pop()
+            if isinstance(widget, (ttk.Button, tk.Button)) and widget.cget("text") == text:
+                return widget
+            try:
+                stack.extend(widget.winfo_children())
+            except tk.TclError:
+                pass
+        return None
+
+    def test_destructive_confirm_is_tk_button_not_ttk(self, panel_host):
+        """Destructive confirm must be tk.Button (paints under sv_ttk)."""
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "Delete"))
+        confirm_inline(
+            panel_host,
+            title="Delete profile 'X'?",
+            body="Body",
+            confirm_label="Delete",
+            destructive=True,
+        )
+        # Re-build a fresh panel and inspect its tree before clicking.
+        # (The previous panel was destroyed after confirm.)
+        decision_received = {"value": None}
+
+        def inspect_then_cancel():
+            btn = self._find_button_with_text(panel_host, "Delete")
+            decision_received["value"] = btn
+            _click_first_button_with_text(panel_host, "Cancel")
+
+        panel_host.after(50, inspect_then_cancel)
+        confirm_inline(
+            panel_host,
+            title="Delete profile 'X'?",
+            body="Body",
+            confirm_label="Delete",
+            destructive=True,
+        )
+
+        delete_btn = decision_received["value"]
+        assert delete_btn is not None, "Delete button not found in the panel"
+        assert isinstance(delete_btn, tk.Button) and not isinstance(delete_btn, ttk.Button), (
+            f"Destructive confirm must be tk.Button (paints under sv_ttk), "
+            f"got {type(delete_btn).__name__}. ttk.Button with Danger.TButton "
+            f"style renders invisible under the Sun Valley theme."
+        )
+
+    def test_destructive_confirm_has_red_background(self, panel_host):
+        """The red bg must be literally configured on the widget."""
+        from src.ui.theme import Colors
+
+        captured = {"bg": None}
+
+        def inspect_then_cancel():
+            btn = self._find_button_with_text(panel_host, "Delete")
+            if btn is not None:
+                captured["bg"] = btn.cget("bg")
+            _click_first_button_with_text(panel_host, "Cancel")
+
+        panel_host.after(50, inspect_then_cancel)
+        confirm_inline(
+            panel_host,
+            title="Delete profile 'X'?",
+            body="Body",
+            confirm_label="Delete",
+            destructive=True,
+        )
+
+        assert captured["bg"] == Colors.DANGER, (
+            f"Destructive confirm bg must be Colors.DANGER ({Colors.DANGER}), "
+            f"got {captured['bg']!r}. If this is empty / system default, the "
+            f"button will render invisible on a white panel background."
+        )
+
+    def test_non_destructive_confirm_is_ttk_button(self, panel_host):
+        """Non-destructive confirm stays ttk.Button (native sv_ttk Accent)."""
+        captured = {"widget": None}
+
+        def inspect_then_cancel():
+            btn = self._find_button_with_text(panel_host, "Run next")
+            captured["widget"] = btn
+            _click_first_button_with_text(panel_host, "Cancel")
+
+        panel_host.after(50, inspect_then_cancel)
+        confirm_inline(
+            panel_host,
+            title="Run next?",
+            body="Body",
+            confirm_label="Run next",
+            destructive=False,
+        )
+
+        btn = captured["widget"]
+        assert btn is not None
+        assert isinstance(btn, ttk.Button), (
+            f"Non-destructive confirm should keep the native sv_ttk "
+            f"ttk.Button (Accent.TButton style) — got {type(btn).__name__}"
+        )
 
 
 class TestPanelTeardown:

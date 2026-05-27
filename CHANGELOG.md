@@ -5,6 +5,24 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.35] - 2026-05-27
+
+### Changed
+- **Success / info notifications now auto-dismiss without an OK button.** User report on the v3.7.34 install: after saving a profile, the inline confirmation panel forced a click on the OK button to continue. That's friction the user does not need — the action is done, the panel is just a confirmation. Old toast behaviour (auto-dismiss after a couple of seconds) restored, but inside the same full-frame panel layout introduced in 3.7.34 so the visual consistency is preserved.
+- **Per-level interaction policy** in ``notify_inline`` (``src/ui/confirm_panel.py``):
+  - ``success``: auto-dismiss after 2.5 s, no OK button rendered.
+  - ``info``: auto-dismiss after 3 s, no OK button rendered.
+  - ``warning``: stays until clicked — the user MUST acknowledge.
+  - ``error``: stays until clicked — same reason. An error that auto-vanished would let the user miss the alert if they looked away for a moment.
+  
+  All four levels still respect ``Escape`` and ``Enter`` as dismissal shortcuts. In the auto-dismiss modes, a click anywhere on the panel also dismisses early — the user is not held captive while waiting for the timer.
+- **New ``auto_dismiss_ms`` parameter** on ``notify_inline`` lets callers override the per-level default: pass an integer ≥ 1 to force an auto-dismiss after that many ms (no OK button shown), pass ``0`` to force click-to-dismiss regardless of level (the OK button is rendered). ``None`` (the default) keeps the per-level policy. Used to keep tests fast without changing production semantics.
+- ``_build_notify_panel`` takes a new ``show_button`` flag; when False, the panel binds a ``<Button-1>`` handler on both the outer frame and the centred body so any click on the panel dismisses early. Avoids users feeling held captive while a timer ticks.
+
+### Tests
+- +10 tests in ``tests/unit/test_confirm_panel.py``: split the original "every level renders an OK button" coverage into two classes — ``TestNotifyClickToDismiss`` (warning / error render the button and wait) and ``TestNotifyAutoDismiss`` (success / info render NO button and auto-vanish). New cases pin the per-level policy: success / info do NOT render the OK button, success auto-dismisses on its own timer (verified with a short ``auto_dismiss_ms=100`` override), a click anywhere on a success panel dismisses before the timer fires, warning STAYS visible while the user hasn't acted (verified by measuring panel children at 150 ms before the test-injected Escape at 300 ms), and ``auto_dismiss_ms=0`` is the explicit way to force click-to-dismiss on a success-level call. Added validation tests for the new parameter (negative / non-int / bool — Booleans are ints in Python so we reject them explicitly).
+- Reused the existing ``TestNotifyVariantStyling`` and ``TestNotifyHideRestoreCallbacks`` classes: switched their dismissal mechanism from "click the OK button" to "press Escape" because the warning level now keeps the button but success / info do not, and Escape works in BOTH modes.
+
 ## [3.7.34] - 2026-05-27
 
 ### Changed

@@ -515,64 +515,84 @@ class TestNotifyValidation:
 
     def test_none_parent_raises(self):
         with pytest.raises(TypeError):
-            _validate_notify_args(None, "T", "B", "OK", "info")
+            _validate_notify_args(None, "T", "B", "OK", "info", None)
 
     def test_empty_title_raises(self, panel_host):
         with pytest.raises(ValueError):
-            _validate_notify_args(panel_host, "", "B", "OK", "info")
+            _validate_notify_args(panel_host, "", "B", "OK", "info", None)
 
     def test_empty_body_raises(self, panel_host):
         with pytest.raises(ValueError):
-            _validate_notify_args(panel_host, "T", "", "OK", "info")
+            _validate_notify_args(panel_host, "T", "", "OK", "info", None)
 
     def test_empty_button_label_raises(self, panel_host):
         with pytest.raises(ValueError):
-            _validate_notify_args(panel_host, "T", "B", "", "info")
+            _validate_notify_args(panel_host, "T", "B", "", "info", None)
 
     def test_unknown_level_raises(self, panel_host):
         with pytest.raises(ValueError):
-            _validate_notify_args(panel_host, "T", "B", "OK", "fatal")
+            _validate_notify_args(panel_host, "T", "B", "OK", "fatal", None)
 
     def test_non_string_title_raises(self, panel_host):
         with pytest.raises(ValueError):
-            _validate_notify_args(panel_host, 42, "B", "OK", "info")  # type: ignore[arg-type]
+            _validate_notify_args(panel_host, 42, "B", "OK", "info", None)  # type: ignore[arg-type]
+
+    def test_negative_auto_dismiss_raises(self, panel_host):
+        with pytest.raises(ValueError):
+            _validate_notify_args(panel_host, "T", "B", "OK", "info", -100)
+
+    def test_non_int_auto_dismiss_raises(self, panel_host):
+        with pytest.raises(ValueError):
+            _validate_notify_args(panel_host, "T", "B", "OK", "info", "2500")  # type: ignore[arg-type]
+
+    def test_bool_auto_dismiss_raises(self, panel_host):
+        """Booleans are ints in Python — reject them explicitly."""
+        with pytest.raises(ValueError):
+            _validate_notify_args(panel_host, "T", "B", "OK", "info", True)  # type: ignore[arg-type]
 
 
-class TestNotifyEndToEnd:
-    """``notify_inline`` returns only after the user clicks OK."""
+class TestNotifyClickToDismiss:
+    """Warning / error levels MUST render an OK button and wait for it."""
 
-    def test_ok_click_dismisses_and_returns(self, panel_host):
+    def test_warning_renders_ok_button(self, panel_host):
         panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
 
         result = notify_inline(
             panel_host,
-            title="Saved",
-            body="Profile 'L2' was saved successfully.",
-            level="success",
+            title="Validation error",
+            body="A profile named 'L2' already exists.",
+            level="warning",
         )
-
         # Return value is intentionally None — the user has no
         # decision to make.
         assert result is None
 
-    def test_custom_button_label_is_used(self, panel_host):
+    def test_error_renders_ok_button(self, panel_host):
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
+
+        notify_inline(
+            panel_host,
+            title="Configuration invalid",
+            body="Could not validate destination.",
+            level="error",
+        )
+
+    def test_custom_button_label_is_used_on_warning(self, panel_host):
         panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "Got it"))
 
         notify_inline(
             panel_host,
             title="Notice",
             body="Body",
-            level="info",
+            level="warning",
             button_label="Got it",
         )
-        # Reaching here without a hang means the custom-labelled
-        # button was found and clicked.
 
-    def test_panel_destroyed_after_dismiss(self, panel_host):
+    def test_panel_destroyed_after_click(self, panel_host):
         panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
 
         before = set(panel_host.winfo_children())
-        notify_inline(panel_host, title="T", body="B", level="info")
+        notify_inline(panel_host, title="T", body="B", level="warning")
         after = set(panel_host.winfo_children())
 
         assert (after - before) == set(), (
@@ -580,24 +600,158 @@ class TestNotifyEndToEnd:
             "fully clean up on dismissal"
         )
 
-    def test_escape_dismisses_too(self, panel_host):
-        """Escape works as a dismissal accelerator."""
+    def test_escape_dismisses_warning(self, panel_host):
+        """Escape works as a dismissal accelerator even with the OK button."""
 
         def press_escape():
             panel_host.event_generate("<Escape>")
 
         panel_host.after(50, press_escape)
-        notify_inline(panel_host, title="T", body="B", level="info")
-        # If escape didn't dismiss, the test would hang.
+        notify_inline(panel_host, title="T", body="B", level="warning")
 
-    def test_return_dismisses_too(self, panel_host):
+    def test_return_dismisses_warning(self, panel_host):
         """Return / Enter works as a dismissal accelerator."""
 
         def press_return():
             panel_host.event_generate("<Return>")
 
         panel_host.after(50, press_return)
-        notify_inline(panel_host, title="T", body="B", level="info")
+        notify_inline(panel_host, title="T", body="B", level="warning")
+
+
+class TestNotifyAutoDismiss:
+    """Success / info auto-dismiss; no OK button is rendered."""
+
+    @staticmethod
+    def _has_button_with_text(root: tk.Misc, text: str) -> bool:
+        stack: list[tk.Misc] = [root]
+        while stack:
+            widget = stack.pop()
+            if isinstance(widget, (ttk.Button, tk.Button)) and widget.cget("text") == text:
+                return True
+            try:
+                stack.extend(widget.winfo_children())
+            except tk.TclError:
+                pass
+        return False
+
+    def test_success_renders_no_ok_button(self, panel_host):
+        """Success uses auto-dismiss, no button to click."""
+        captured = {"has_button": None}
+
+        def inspect_then_finish():
+            captured["has_button"] = self._has_button_with_text(panel_host, "OK")
+            panel_host.event_generate("<Escape>")  # early dismiss
+
+        panel_host.after(50, inspect_then_finish)
+        notify_inline(panel_host, title="Saved", body="OK", level="success")
+
+        assert captured["has_button"] is False, (
+            "Success-level notify_inline must NOT render an OK button — "
+            "the panel auto-dismisses, the user has nothing to click."
+        )
+
+    def test_info_renders_no_ok_button(self, panel_host):
+        captured = {"has_button": None}
+
+        def inspect_then_finish():
+            captured["has_button"] = self._has_button_with_text(panel_host, "OK")
+            panel_host.event_generate("<Escape>")
+
+        panel_host.after(50, inspect_then_finish)
+        notify_inline(panel_host, title="FYI", body="something", level="info")
+
+        assert captured["has_button"] is False
+
+    def test_success_auto_dismisses_on_its_own(self, panel_host):
+        """No click, no key — the timer fires and the panel returns.
+
+        Short ``auto_dismiss_ms`` override keeps the test fast.
+        """
+        # 100 ms is plenty for the timer to fire under pytest. We
+        # do NOT schedule any user input — only the timer can
+        # release wait_variable here.
+        notify_inline(
+            panel_host,
+            title="Saved",
+            body="OK",
+            level="success",
+            auto_dismiss_ms=100,
+        )
+        # Reaching here means the timer dismissed without our help.
+
+    def test_click_anywhere_dismisses_early(self, panel_host):
+        """A click on the panel itself dismisses before the timer fires."""
+
+        def click_panel():
+            # Find the panel (a ttk.Frame direct child of panel_host),
+            # then synthesise a click on it.
+            for child in panel_host.winfo_children():
+                if isinstance(child, ttk.Frame):
+                    child.event_generate("<Button-1>")
+                    return
+
+        # 30 s timer would otherwise hang the test if the click did
+        # NOT dismiss — so a passing test proves the click worked.
+        panel_host.after(50, click_panel)
+        notify_inline(
+            panel_host,
+            title="Saved",
+            body="OK",
+            level="success",
+            auto_dismiss_ms=30_000,
+        )
+
+    def test_warning_default_does_not_auto_dismiss(self, panel_host):
+        """A warning must NOT vanish on its own — user must acknowledge."""
+        import time
+
+        # Schedule an Escape after 200 ms so the test eventually
+        # finishes even if the assertion below holds. The point:
+        # the warning panel was STILL there when we measured at 150 ms.
+        result_when_measured = {"panel_still_present": None}
+
+        def measure():
+            # If the panel auto-dismissed, the centre frame would
+            # be gone. We just check there are still children.
+            result_when_measured["panel_still_present"] = bool(panel_host.winfo_children())
+
+        def dismiss():
+            panel_host.event_generate("<Escape>")
+
+        panel_host.after(150, measure)
+        panel_host.after(300, dismiss)
+        start = time.monotonic()
+        notify_inline(panel_host, title="X", body="Y", level="warning")
+        elapsed = time.monotonic() - start
+
+        assert result_when_measured["panel_still_present"] is True, (
+            "warning-level notify_inline must NOT auto-dismiss — "
+            "the user has to acknowledge an error / warning"
+        )
+        # And the wait took at least until the Escape (~300 ms).
+        assert elapsed >= 0.25
+
+    def test_caller_override_to_zero_forces_click_to_dismiss(self, panel_host):
+        """``auto_dismiss_ms=0`` cancels the per-level default."""
+        captured = {"has_button": None}
+
+        def inspect_then_finish():
+            captured["has_button"] = self._has_button_with_text(panel_host, "OK")
+            panel_host.event_generate("<Escape>")
+
+        panel_host.after(50, inspect_then_finish)
+        notify_inline(
+            panel_host,
+            title="Saved",
+            body="OK",
+            level="success",
+            auto_dismiss_ms=0,  # cancel the success default
+        )
+        assert captured["has_button"] is True, (
+            "auto_dismiss_ms=0 must force click-to-dismiss → the OK "
+            "button MUST be rendered even on a success-level call"
+        )
 
 
 class TestNotifyVariantStyling:
@@ -616,13 +770,15 @@ class TestNotifyVariantStyling:
         captured = {"fg": None}
         expected_icon = _NOTIFY_VARIANTS[level]["icon"]
 
-        def inspect_then_ok():
+        def inspect_then_dismiss():
             icon = self._find_icon_label(panel_host, expected_icon)
             if icon is not None:
                 captured["fg"] = str(icon.cget("foreground"))
-            _click_first_button_with_text(panel_host, "OK")
+            # Dismiss via Escape — works for both modes (click-to-
+            # dismiss with the OK button, and auto-dismiss without).
+            panel_host.event_generate("<Escape>")
 
-        panel_host.after(50, inspect_then_ok)
+        panel_host.after(50, inspect_then_dismiss)
         notify_inline(panel_host, title="T", body="B", level=level)
 
         expected = _NOTIFY_VARIANTS[level]["icon_color"]
@@ -649,13 +805,14 @@ class TestNotifyHideRestoreCallbacks:
 
     def test_callbacks_fired_in_order(self, panel_host):
         events: list[str] = []
+        # warning level has the OK button — easy to click in the test.
         panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
 
         notify_inline(
             panel_host,
             title="T",
             body="B",
-            level="info",
+            level="warning",
             hide_callback=lambda: events.append("hide"),
             restore_callback=lambda: events.append("restore"),
         )
@@ -673,6 +830,6 @@ class TestNotifyHideRestoreCallbacks:
             panel_host,
             title="T",
             body="B",
-            level="info",
+            level="warning",
             hide_callback=failing_hide,
         )

@@ -57,13 +57,22 @@ from src.ui.theme import Colors, Fonts, Spacing
 
 NotifyLevel = Literal["success", "info", "warning", "error"]
 
-# Per-severity icon + foreground colour. Adding a level is one
-# entry, not a fan-out of conditionals in the body of notify_inline.
-_NOTIFY_VARIANTS: dict[NotifyLevel, dict[str, str]] = {
-    "success": {"icon": "✓", "icon_color": Colors.SUCCESS},
-    "info": {"icon": "ℹ", "icon_color": Colors.ACCENT},
-    "warning": {"icon": "⚠", "icon_color": Colors.WARNING},
-    "error": {"icon": "⛔", "icon_color": Colors.DANGER},
+# Per-severity defaults. Adding a level is one entry, not a fan-out
+# of conditionals in the body of notify_inline.
+#
+# ``auto_dismiss_ms`` policy:
+#   - success / info: the user has nothing to decide, the panel
+#     vanishes on its own after a short delay (a click anywhere or
+#     Escape dismisses earlier).
+#   - warning / error: the user MUST acknowledge — the panel stays
+#     until the OK button is clicked (or Enter / Escape pressed).
+#     A timer that auto-dismissed an error would let the user miss
+#     the alert if they looked away for a second.
+_NOTIFY_VARIANTS: dict[NotifyLevel, dict] = {
+    "success": {"icon": "✓", "icon_color": Colors.SUCCESS, "auto_dismiss_ms": 2500},
+    "info": {"icon": "ℹ", "icon_color": Colors.ACCENT, "auto_dismiss_ms": 3000},
+    "warning": {"icon": "⚠", "icon_color": Colors.WARNING, "auto_dismiss_ms": None},
+    "error": {"icon": "⛔", "icon_color": Colors.DANGER, "auto_dismiss_ms": None},
 }
 
 logger = logging.getLogger(__name__)
@@ -479,34 +488,43 @@ def notify_inline(
     body: str,
     level: NotifyLevel = "info",
     button_label: str = "OK",
+    auto_dismiss_ms: int | None = None,
     hide_callback: Callable[[], None] | None = None,
     restore_callback: Callable[[], None] | None = None,
 ) -> None:
-    """Display a blocking inline notification panel.
+    """Display an inline notification panel.
 
-    Single dismissal button (default label ``"OK"``). Use for one-way
-    acknowledgements that the user must read but cannot say no to —
-    replaces ``messagebox.showinfo`` / ``showwarning`` / ``showerror``
-    and the bottom-centre toasts.
+    Two interaction modes depending on severity:
+
+    - **success** / **info**: the panel auto-dismisses after a short
+      delay (2.5 / 3 s by default) — the user has nothing to
+      decide, so we do not force a click. A click anywhere on the
+      panel or pressing Escape dismisses earlier.
+    - **warning** / **error**: the panel stays until the user
+      clicks the OK button (or presses Enter / Escape). An error
+      that auto-vanished would let the user miss the alert if they
+      looked away.
+
+    Callers can override the per-level default via
+    ``auto_dismiss_ms``: pass an integer to force auto-dismiss
+    after that many milliseconds, pass ``0`` (or ``None`` for the
+    warning/error levels) to require an explicit click.
 
     Visual pattern strictly matches :func:`confirm_inline` so the user
     sees the same screen shape regardless of the prompt type: centred
-    title with a level-coloured icon, body underneath, one button
-    bottom-right.
+    title with a level-coloured icon, body underneath. The OK button
+    is only rendered when the panel is in click-to-dismiss mode.
 
-    Severity mapping (drives icon + icon colour):
+    Severity mapping (drives icon + icon colour + default dismiss):
 
-    =========  ====  =================
-    level      icon  colour
-    =========  ====  =================
-    success    ✓     green (SUCCESS)
-    info       ℹ     blue (ACCENT)
-    warning    ⚠     amber (WARNING)
-    error      ⛔    red (DANGER)
-    =========  ====  =================
-
-    The button itself is always the accent blue (the action is
-    neutral — closing the notification — never destructive).
+    =========  ====  =====================  ===================
+    level      icon  colour                 default auto-dismiss
+    =========  ====  =====================  ===================
+    success    ✓     green (SUCCESS)        2.5 s
+    info       ℹ     blue (ACCENT)          3 s
+    warning    ⚠     amber (WARNING)        click required
+    error      ⛔    red (DANGER)           click required
+    =========  ====  =====================  ===================
 
     Args:
         parent_frame: Frame the panel is built inside. Typically
@@ -516,16 +534,24 @@ def notify_inline(
         level: One of ``"success"`` / ``"info"`` / ``"warning"`` /
             ``"error"``. Defaults to ``"info"``.
         button_label: Dismissal button text. Defaults to ``"OK"``.
+            Only shown when the panel waits for an explicit click.
+        auto_dismiss_ms: Override the per-level default. Pass an
+            integer ≥ 1 to auto-dismiss after that many ms (no OK
+            button shown), pass ``0`` to force click-to-dismiss
+            regardless of level. ``None`` (default) uses the
+            severity's default policy.
         hide_callback: Called once BEFORE the panel mounts.
         restore_callback: Called once AFTER the panel is destroyed.
 
     Raises:
         TypeError: If ``parent_frame`` is ``None``.
         ValueError: If ``title`` / ``body`` / ``button_label`` is
-            empty, or ``level`` is not in :data:`_NOTIFY_VARIANTS`.
+            empty, ``level`` is not in :data:`_NOTIFY_VARIANTS`, or
+            ``auto_dismiss_ms`` is negative.
     """
-    _validate_notify_args(parent_frame, title, body, button_label, level)
+    _validate_notify_args(parent_frame, title, body, button_label, level, auto_dismiss_ms)
     variant = _NOTIFY_VARIANTS[level]
+    effective_dismiss_ms = _resolve_auto_dismiss_ms(auto_dismiss_ms, variant["auto_dismiss_ms"])
 
     if hide_callback is not None:
         try:
@@ -542,8 +568,17 @@ def notify_inline(
         icon=variant["icon"],
         icon_color=variant["icon_color"],
         button_label=button_label,
+        show_button=effective_dismiss_ms is None,
         on_dismiss=lambda: _resolve_notify(decision_var),
     )
+
+    if effective_dismiss_ms is not None:
+        # Schedule the auto-dismiss; the wait_variable below still
+        # blocks until either the timer fires or the user clicks /
+        # presses Escape early. ``after`` returns an id we do NOT
+        # cancel — _resolve_notify is idempotent (the second
+        # ``var.set(True)`` is a no-op once True).
+        parent_frame.after(effective_dismiss_ms, lambda: _resolve_notify(decision_var))
 
     parent_frame.wait_variable(decision_var)
 
@@ -559,12 +594,32 @@ def notify_inline(
             logger.debug("restore_callback raised — UI may be partial", exc_info=True)
 
 
+def _resolve_auto_dismiss_ms(
+    override: int | None,
+    default_for_level: int | None,
+) -> int | None:
+    """Compute the effective auto-dismiss delay.
+
+    Caller override semantics:
+    - ``None``: use the per-level default.
+    - ``0``: force click-to-dismiss regardless of level (returns
+      ``None`` to the caller, i.e. "no timer").
+    - ``int > 0``: use this delay.
+    """
+    if override is None:
+        return default_for_level
+    if override == 0:
+        return None
+    return override
+
+
 def _validate_notify_args(
     parent_frame: tk.Misc,
     title: str,
     body: str,
     button_label: str,
     level: str,
+    auto_dismiss_ms: int | None,
 ) -> None:
     """Reject obviously-bad notify_inline calls before touching the UI."""
     if parent_frame is None:
@@ -580,6 +635,14 @@ def _validate_notify_args(
         raise ValueError(
             f"level must be one of {sorted(_NOTIFY_VARIANTS)}, got {level!r}"
         )
+    if auto_dismiss_ms is not None:
+        if not isinstance(auto_dismiss_ms, int) or isinstance(auto_dismiss_ms, bool):
+            raise ValueError(
+                f"auto_dismiss_ms must be an int or None, "
+                f"got {type(auto_dismiss_ms).__name__}"
+            )
+        if auto_dismiss_ms < 0:
+            raise ValueError(f"auto_dismiss_ms must be >= 0, got {auto_dismiss_ms}")
 
 
 def _resolve_notify(var: tk.BooleanVar) -> None:
@@ -598,13 +661,18 @@ def _build_notify_panel(
     icon: str,
     icon_color: str,
     button_label: str,
+    show_button: bool,
     on_dismiss: Callable[[], None],
 ) -> ttk.Frame:
     """Assemble the notify panel widget tree.
 
     Returns the outer ``ttk.Frame`` so the caller can destroy the
-    whole subtree on dismissal. Mirrors :func:`_build_panel` but with
-    a single OK button instead of Cancel + Confirm.
+    whole subtree on dismissal. Mirrors :func:`_build_panel` but
+    with at most one OK button.
+
+    Auto-dismiss mode (``show_button=False``): no button is rendered.
+    Clicking anywhere on the panel still dismisses early, so the
+    user is not held captive when the timer is set too long.
     """
     panel = ttk.Frame(parent_frame)
     panel.pack(fill="both", expand=True)
@@ -614,9 +682,18 @@ def _build_notify_panel(
 
     _build_header(centre, icon=icon, title=title, icon_color=icon_color)
     _build_body(centre, body)
-    _build_notify_button(centre, button_label, on_dismiss)
+    if show_button:
+        _build_notify_button(centre, button_label, on_dismiss)
+    else:
+        # Click anywhere on the panel dismisses early. Bind to BOTH
+        # the outer panel and the inner centre frame so the click
+        # is caught regardless of which dead space the user hit.
+        for widget in (panel, centre):
+            widget.bind("<Button-1>", lambda _e: on_dismiss())
 
     # Escape and Return both dismiss — there is only one outcome.
+    # Bound at the panel level so the keys work even when the focus
+    # is somewhere else (notebook tab, sidebar entry, etc.).
     panel.bind_all("<Escape>", lambda _e: on_dismiss())
     panel.bind_all("<Return>", lambda _e: on_dismiss())
     return panel

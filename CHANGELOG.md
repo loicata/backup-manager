@@ -5,6 +5,15 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.40] - 2026-05-27
+
+### Fixed
+- **Saving a profile silently switched the user to a DIFFERENT profile.** User report on v3.7.39 install: on the "My Backup" profile, General tab, clicking Save flashed the ``✓ Profile saved`` panel and then bumped the sidebar selection to "AWS Backup" (the first active profile in the list). The tabs reloaded with AWS Backup's content. The user lost their place. Root cause in ``BackupManagerApp._save_profile``: after a save, ``_load_profiles()`` was called WITHOUT the ``select_first=False`` kwarg, so the listbox repopulation auto-selected the first active profile via the default branch (``_load_profile(first_active_profile)``). Symptom-free for the user who only had one profile or saved the first active one — visible the moment a non-first profile was being edited.
+- **Fix**: ``_save_profile`` now passes ``select_first=False`` to ``_load_profiles`` AND immediately re-selects the profile that was just saved via the existing ``_select_profile_in_sidebar(profile)`` helper. The user's sidebar selection, listbox highlight and active tab all stay anchored on the profile they were editing.
+
+### Tests
+- ``tests/unit/test_app_load_profiles_select_first.py::TestStartupCallersKeepDefault::test_save_profile_does_not_force_false`` was pinning the OLD (bugged) behaviour — replaced with ``TestCallSitesPassSelectFirstFalse::test_save_profile_passes_select_first_false`` that asserts BOTH the ``select_first=False`` call AND the ``_select_profile_in_sidebar(profile)`` re-anchor. The check is a static source-inspection guard so a future refactor cannot silently re-introduce the swap.
+
 ## [3.7.39] - 2026-05-27
 
 ### Fixed

@@ -1673,7 +1673,13 @@ class BackupManagerApp:
         else:
             AutoStart.disable()
 
-        self._load_profiles()
+        # Refresh the sidebar WITHOUT auto-selecting the first active
+        # profile — otherwise saving "My Backup" would silently switch
+        # the user to "AWS Backup" (the first active in the list). The
+        # current profile is re-selected explicitly below so the user
+        # stays on the screen they just saved.
+        self._load_profiles(select_first=False)
+        self._select_profile_in_sidebar(profile)
         # Saving a profile invalidates any outstanding target-precheck
         # alert (e.g. a mirror that the user just deleted).  Drop the
         # stale alert rather than leaving it visible over the tabs.

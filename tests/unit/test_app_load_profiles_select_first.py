@@ -47,12 +47,12 @@ class TestLoadProfilesSelectFirstSignature:
 
 
 class TestCallSitesPassSelectFirstFalse:
-    """The three callers that own their selection must pass False.
+    """Callers that own their selection must pass False.
 
     A static check on the function body catches a future refactor that
     accidentally re-introduces the double load — much cheaper than a
     full-UI integration test, and tied to the exact mechanism rather
-    than a symptom (freeze duration).
+    than a symptom (freeze duration / wrong-profile-after-save).
     """
 
     def _body(self, method) -> str:
@@ -73,26 +73,38 @@ class TestCallSitesPassSelectFirstFalse:
             BackupManagerApp._move_profile_down
         )
 
+    def test_save_profile_passes_select_first_false(self) -> None:
+        """Since 3.7.40 — saving must NOT switch the user to the first
+        active profile.
+
+        Before 3.7.40 ``_save_profile`` called ``_load_profiles()`` with
+        the default ``select_first=True``. Result: saving "My Backup"
+        silently switched the user to "AWS Backup" (the first active
+        in the sidebar). The fix passes ``select_first=False`` AND
+        re-selects the current profile explicitly via
+        ``_select_profile_in_sidebar(profile)``.
+        """
+        body = self._body(BackupManagerApp._save_profile)
+        assert "self._load_profiles(select_first=False)" in body, (
+            "_save_profile must pass select_first=False to _load_profiles "
+            "so saving does NOT swap the user onto the first active profile"
+        )
+        assert "self._select_profile_in_sidebar(profile)" in body, (
+            "_save_profile must re-select the just-saved profile in the "
+            "sidebar after the listbox is repopulated — otherwise the "
+            "sidebar selection is empty and the user has no visual "
+            "anchor for which profile they were editing"
+        )
+
 
 class TestStartupCallersKeepDefault:
     """Sites whose role IS to display "the" current profile (e.g. the
     first-launch path) must keep the default ``select_first=True``,
     otherwise the user sees a populated sidebar with empty tabs.
-
-    A simple way to test this without booting Tk is to check that the
-    affected methods do NOT contain the explicit ``select_first=False``
-    kwarg — they rely on the default.
     """
 
     def _body(self, method) -> str:
         return textwrap.dedent(inspect.getsource(method))
-
-    def test_save_profile_does_not_force_false(self) -> None:
-        # _save_profile calls _load_profiles() at the end; it does not
-        # immediately re-select a known profile and therefore must
-        # NOT pass select_first=False (otherwise the user sees a sidebar
-        # with no tab content after Save).
-        assert "select_first=False" not in self._body(BackupManagerApp._save_profile)
 
     def test_relaunch_wizard_after_delete_keeps_default(self) -> None:
         # _relaunch_wizard_after_delete also creates a profile but the

@@ -5,6 +5,29 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.38] - 2026-05-27
+
+### Fixed
+- **Save bar (bottom blue button) disappeared after clicking Save.** User report on v3.7.37: after clicking the Save button on the General tab, the inline notification panel ``✓ Profile saved`` auto-dismissed correctly — but on the way back the bottom Save bar was gone. The form was visible, the tabs were visible, but the blue Save bar at the bottom had vanished. Same bug would have affected every other call site of ``confirm_inline`` and ``_notify`` (Delete profile cancel, validation warnings, etc.) — the user just hit Save first.
+- **Root cause** in ``BackupManagerApp._restore_main_layout``: the helper repacks notebook + save bar after an inline panel closes, but did it in the wrong order:
+
+  ```python
+  # WRONG: notebook eats all the space, save_frame has nowhere to land
+  self.notebook.pack(fill="both", expand=True)
+  self._save_frame.pack(side="bottom", fill="x")
+  ```
+
+  ``pack`` allocates space to ``expand=True`` widgets AFTER the fixed-size siblings. Packing the notebook first told Tk "give this widget every pixel"; the save bar packed afterwards on ``side="bottom"`` could not fit and was invisible. The original ``_build_ui`` packing (line 982) gets it right via ``before=self.notebook``; ``_restore_main_layout`` was missing the symmetric recipe.
+
+- **Fix**: pack the save bar FIRST (reserves its bottom slot) THEN the notebook with ``before=self._save_frame``:
+
+  ```python
+  self._save_frame.pack(fill="x", side="bottom")
+  self.notebook.pack(fill="both", expand=True, before=self._save_frame)
+  ```
+
+  Mirrors the recipe already used by the three other restore call sites (close About, close Bug report, close Ready panel).
+
 ## [3.7.37] - 2026-05-27
 
 ### Fixed

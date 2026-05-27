@@ -1972,11 +1972,25 @@ class BackupManagerApp:
             self._save_frame.pack_forget()
 
     def _restore_main_layout(self) -> None:
-        """Re-show notebook + save frame after an inline panel closes."""
+        """Re-show notebook + save frame after an inline panel closes.
+
+        Order is critical here: the ``_save_frame`` MUST be packed
+        BEFORE the notebook (or with ``before=self.notebook``) so its
+        bottom slot is reserved first. Otherwise the notebook's
+        ``expand=True`` swallows the entire pane and the Save bar
+        disappears off the bottom edge — v3.7.37 user report after
+        clicking Save on the General tab.
+
+        The original ``_save_frame`` packing in ``_build_ui`` (line
+        981) uses ``before=self.notebook`` — we mirror that same
+        recipe here so a future ``_save_frame`` slot change in
+        ``_build_ui`` only needs one symmetric edit (here AND in
+        the other restore call sites: ``_show_about`` close, etc.).
+        """
         with contextlib.suppress(Exception):
-            self.notebook.pack(fill="both", expand=True)
+            self._save_frame.pack(fill="x", side="bottom")
         with contextlib.suppress(Exception):
-            self._save_frame.pack(side="bottom", fill="x")
+            self.notebook.pack(fill="both", expand=True, before=self._save_frame)
 
     def _notify(
         self,

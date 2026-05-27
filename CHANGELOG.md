@@ -5,6 +5,12 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.37] - 2026-05-27
+
+### Fixed
+- **``Start backup`` / ``Cancel`` buttons clipped at the bottom of the Run tab.** User report on the v3.7.36 install: when the selected profile was differential (e.g. ``AWS Backup``) the ``Last backup`` card grew to **three lines** (status + source size + ``Last full: …``) instead of two; the extra ~20 px pushed the button row off the bottom of the window, leaving only their tops visible. Root cause in ``src/ui/tabs/run_tab.py:_build_ui``: the log frame was packed with ``side="top", expand=True`` BEFORE the button frame was packed (also ``side="top"``). Tk's pack manager allocates space to ``expand=True`` widgets after the fixed-size siblings, so the log frame ate the remaining vertical space and the button row, packed later, was squeezed against the window edge and clipped when the cards above grew.
+- **Fix**: the button frame is now created AND packed with ``side="bottom"`` BEFORE the log frame. Pack order matters here — packing the bottom-side widget first reserves its slot at the bottom of the parent, then the log frame's ``side="top", expand=True`` fills only the remaining space between the alerts row and the buttons. Visual layout is unchanged (log on top, buttons at the bottom) but the buttons are now guaranteed visible regardless of how much the cards above grow.
+
 ## [3.7.36] - 2026-05-27
 
 ### Fixed

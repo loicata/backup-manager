@@ -225,6 +225,43 @@ class RunTab(ttk.Frame):
         self.alerts_frame = ttk.Frame(self)
         self.alerts_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.MEDIUM))
 
+        # Buttons row — created and packed BEFORE the log frame so Tk
+        # reserves the bottom-side slot first. Without this priority
+        # the log frame's ``expand=True`` swallowed the remaining
+        # vertical space and clipped the Start / Cancel buttons when
+        # the Last-backup card grew to 3 lines (differential profile
+        # with a recorded "Last full: …" — v3.7.36 user report).
+        # Packed with ``side="bottom"`` so the visual order is still
+        # log on top, buttons at the bottom.
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(side="bottom", fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
+
+        self.start_btn = tk.Button(
+            btn_frame,
+            text="▶ Start backup",
+            bg=Colors.ACCENT,
+            fg="white",
+            activebackground=Colors.ACCENT_HOVER,
+            activeforeground="white",
+            relief="flat",
+            font=Fonts.normal(),
+        )
+        self.start_btn.pack(side="left")
+
+        self.cancel_btn = tk.Button(
+            btn_frame,
+            text="■ Cancel",
+            bg=Colors.DANGER,
+            fg="white",
+            activebackground="#c0392b",
+            activeforeground="white",
+            relief="flat",
+            font=Fonts.normal(),
+            state="disabled",
+            disabledforeground=Colors.TEXT_DISABLED,
+        )
+        self.cancel_btn.pack(side="left", padx=Spacing.MEDIUM)
+
         # Log output — Treeview-based to mirror the Schedule journal
         # styling (clear background, structured rows). Events with a
         # ``details`` payload (e.g. the collector's "Skipped N file(s)"
@@ -303,36 +340,6 @@ class RunTab(ttk.Frame):
         # built-in row selection visual that helps users see which
         # action they are about to fire.
         self.log_tree.bind("<Button-1>", self._on_log_tree_click, add="+")
-
-        # Buttons
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill="x", padx=Spacing.LARGE, pady=(0, Spacing.LARGE))
-
-        self.start_btn = tk.Button(
-            btn_frame,
-            text="▶ Start backup",
-            bg=Colors.ACCENT,
-            fg="white",
-            activebackground=Colors.ACCENT_HOVER,
-            activeforeground="white",
-            relief="flat",
-            font=Fonts.normal(),
-        )
-        self.start_btn.pack(side="left")
-
-        self.cancel_btn = tk.Button(
-            btn_frame,
-            text="■ Cancel",
-            bg=Colors.DANGER,
-            fg="white",
-            activebackground="#c0392b",
-            activeforeground="white",
-            relief="flat",
-            font=Fonts.normal(),
-            state="disabled",
-            disabledforeground=Colors.TEXT_DISABLED,
-        )
-        self.cancel_btn.pack(side="left", padx=Spacing.MEDIUM)
 
     def _build_health_dashboard(self):
         """Build the 3-card health dashboard row."""

@@ -1271,9 +1271,6 @@ class BackupEngine:
         Raises:
             RuntimeError: If any file fails integrity verification.
         """
-        if not _effective_auto_verify(ctx.profile):
-            return
-
         is_local_dir = (
             ctx.backup_path is not None and ctx.backup_path.exists() and ctx.backup_path.is_dir()
         )
@@ -1282,6 +1279,30 @@ class BackupEngine:
             and ctx.backup_path.exists()
             and ctx.backup_path.name.endswith(".tar.wbenc")
         )
+
+        # CRITICAL: for local encrypted backups, register the reference
+        # SHA-256 in ``verify_hashes.json`` REGARDLESS of ``auto_verify``.
+        # The ``auto_verify`` flag governs only whether we re-read the
+        # archive RIGHT NOW (a costly second pass over the freshly-written
+        # file). It must NOT prevent the Verify-tab's periodic re-checks
+        # from having a reference data point to compare against.
+        #
+        # Pre-3.7.43, ``auto_verify=False`` on an encrypted profile
+        # silently dropped this write — every subsequent Verify-tab pass
+        # produced "No reference hash — cannot verify" warnings on every
+        # ``.tar.wbenc`` the profile had produced. Visible the moment a
+        # user with ``auto_verify=False`` (the default for "Verify
+        # integrity after backup" unchecked) opened the Verify tab.
+        #
+        # Plain (non-encrypted) backups derive their reference from the
+        # ``.wbverify`` manifest sidecar (per-file hashes) which IS
+        # written during ``_phase_save_manifest`` regardless of
+        # ``auto_verify`` — they were not affected by the bug.
+        if is_local_encrypted:
+            self._register_encrypted_reference_hash(ctx)
+
+        if not _effective_auto_verify(ctx.profile):
+            return
 
         if is_local_dir:
             self._phase("Verifying backup (hash)...")
@@ -1294,24 +1315,55 @@ class BackupEngine:
                 raise RuntimeError(msg)
 
         elif is_local_encrypted:
-            from src.core.hashing import compute_sha256
-
-            self._phase("Verifying encrypted backup...")
-            self._check_cancel()
+            # Reference hash already registered above. Just emit the
+            # post-backup OK log for parity with the pre-3.7.43 user
+            # experience when ``auto_verify=True``.
             size = ctx.backup_path.stat().st_size
-            if size == 0:
-                raise RuntimeError(f"Encrypted archive is empty: {ctx.backup_path.name}")
-            # Store SHA-256 hash of the archive for future periodic verification
-            archive_hash = compute_sha256(ctx.backup_path)
-            ctx.config_manager.save_verify_hash(ctx.backup_path.name, archive_hash, size)
             self._log(
-                f"Verification OK: {ctx.backup_path.name} " f"({size:,} bytes, GCM-authenticated)"
+                f"Verification OK: {ctx.backup_path.name} ({size:,} bytes, GCM-authenticated)"
             )
 
         elif ctx.backup_remote_name and ctx.backend is not None:
             self._phase("Verifying remote backup (file count + sizes)...")
             self._check_cancel()
             self._verify_remote(ctx)
+
+    def _register_encrypted_reference_hash(self, ctx: PipelineContext) -> None:
+        """Compute + store the SHA-256 of a ``.tar.wbenc`` archive.
+
+        Called from :meth:`_phase_verify` for every local encrypted
+        backup, ALWAYS (whether ``auto_verify`` is True or False).
+
+        The hash lands in ``verify_hashes.json`` via
+        :meth:`ConfigManager.save_verify_hash`, which wraps the dict
+        in an HMAC envelope so the reference cannot be silently
+        rewritten by a file-system attacker.
+
+        Args:
+            ctx: Pipeline context. ``ctx.backup_path`` must point at
+                an existing ``.tar.wbenc`` file.
+
+        Raises:
+            RuntimeError: If the archive is zero bytes (would otherwise
+                land a useless reference hash in the store).
+        """
+        from src.core.hashing import compute_sha256
+
+        # Phase label intentionally keeps the ``Verifying`` prefix —
+        # the integration test ``test_cancel_during_verify_raises``
+        # (and any UI observer that filters phase strings the same
+        # way) subscribes to ``phase_changed`` and triggers on the
+        # substring ``"Verifying"``. Pre-3.7.43 this branch emitted
+        # ``"Verifying encrypted backup..."`` for the same work; the
+        # rename to "Hashing" would have silently broken the cancel
+        # contract for those subscribers.
+        self._phase("Verifying encrypted archive (registering reference hash)...")
+        self._check_cancel()
+        size = ctx.backup_path.stat().st_size
+        if size == 0:
+            raise RuntimeError(f"Encrypted archive is empty: {ctx.backup_path.name}")
+        archive_hash = compute_sha256(ctx.backup_path)
+        ctx.config_manager.save_verify_hash(ctx.backup_path.name, archive_hash, size)
 
     def _verify_remote(self, ctx: PipelineContext) -> None:
         """Verify a remote backup by checking files on the server.

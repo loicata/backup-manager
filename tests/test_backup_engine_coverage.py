@@ -263,6 +263,78 @@ class TestVerifyEncryptedBackup:
         hashes = env["config_manager"].load_verify_hashes()
         assert len(hashes) >= 1
 
+    def test_encrypted_backup_stores_hash_even_when_auto_verify_disabled(self, env, profile):
+        """Encrypted backup MUST store the reference hash even when
+        ``auto_verify=False`` — otherwise the Verify-tab can never
+        re-check the archive later ("No reference hash" warning).
+
+        This is the v3.7.43 fix: pre-3.7.43 the early ``return`` at
+        the top of ``_phase_verify`` skipped the
+        ``save_verify_hash`` call alongside the post-backup verify,
+        so every ``.tar.wbenc`` produced by a profile with the
+        "Verify integrity after backup" checkbox UNCHECKED was
+        invisible to the periodic Verify-tab forever.
+        """
+        profile.encrypt_primary = True
+        profile.encryption = EncryptionConfig(enabled=True, stored_password="test_password_1234")
+        # The fix's exact precondition: auto_verify OFF + local +
+        # encrypted. Without the fix this combination silently
+        # produced an empty verify_hashes.json.
+        profile.verification = VerificationConfig(auto_verify=False, alert_on_failure=True)
+        engine = _engine(env)
+        result = engine.run_backup(profile)
+
+        assert result.files_processed >= 1, "backup itself must still succeed"
+
+        hashes = env["config_manager"].load_verify_hashes()
+        assert len(hashes) >= 1, (
+            "verify_hashes.json must contain an entry for the .tar.wbenc "
+            "even when auto_verify=False — required for periodic Verify-tab"
+        )
+        # And the entry must point at the actual archive on disk —
+        # an entry under the wrong key would not help either.
+        archive_name = next(iter(hashes))
+        assert archive_name.endswith(".tar.wbenc"), (
+            f"reference hash must be keyed on the .tar.wbenc filename, got {archive_name!r}"
+        )
+        # The recorded size must match the file on disk so the
+        # Verify-tab can short-circuit on size mismatch before
+        # computing the full SHA-256.
+        backup_files = list(env["dest"].rglob("*.tar.wbenc"))
+        assert len(backup_files) == 1
+        assert hashes[archive_name]["size"] == backup_files[0].stat().st_size
+
+    def test_encrypted_backup_with_auto_verify_false_skips_log_line(self, env, profile):
+        """``auto_verify=False`` still skips the post-backup ``Verification OK``
+        log emission — only the reference-hash registration is forced.
+
+        Regression guard: a future refactor that "unifies" the two
+        flows by always logging would defeat the original intent of
+        the ``auto_verify=False`` toggle (skip the costly second pass
+        for users who prefer fast turnaround).
+        """
+        profile.encrypt_primary = True
+        profile.encryption = EncryptionConfig(enabled=True, stored_password="test_password_1234")
+        profile.verification = VerificationConfig(auto_verify=False, alert_on_failure=True)
+        engine = _engine(env)
+
+        # Capture the engine's log lines via the public _log mechanism.
+        # ``_log`` writes to the events bus AND the file logger; the
+        # easier capture point is to patch the method directly.
+        captured_logs: list[str] = []
+        original_log = engine._log
+        engine._log = lambda msg, *a, **kw: captured_logs.append(msg) or original_log(msg, *a, **kw)
+
+        engine.run_backup(profile)
+
+        # The "Verification OK" line lives in the ``auto_verify=True``
+        # branch and must NOT appear when the flag is False.
+        verification_ok_lines = [m for m in captured_logs if "Verification OK" in m]
+        assert verification_ok_lines == [], (
+            "auto_verify=False must skip the post-backup 'Verification OK' "
+            f"log line. Got: {verification_ok_lines}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Manifest upload failure — non-fatal

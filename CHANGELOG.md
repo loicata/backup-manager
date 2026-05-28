@@ -5,6 +5,18 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.43] - 2026-05-28
+
+### Fixed
+- **Encrypted backups created with "Verify integrity after backup" UNCHECKED were invisible to the periodic Verify-tab forever.** User report (28/05/2026, v3.7.41 install): selecting the ``tes crypter`` profile in Verify → "Verify all backups" produced a single WARNING row ``"primary | tes_crypter_FULL_2026-05-27_220027.tar.wbenc | No reference hash — cannot verify (71,426,281 bytes)"`` even though the archive was on disk and structurally valid. The Verify-tab on plain (non-encrypted) backups worked, so the bug was specific to the encrypted code path.
+- **Root cause** in ``BackupEngine._phase_verify`` (``src/core/backup_engine.py``): the function started with ``if not _effective_auto_verify(ctx.profile): return`` — when ``auto_verify`` was False the function exited BEFORE reaching the ``ctx.config_manager.save_verify_hash(...)`` call that registers the reference SHA-256 for ``.tar.wbenc`` archives. The flag was supposed to skip only the IMMEDIATE post-backup re-read (costly second pass over the freshly-written file), but it also dropped the registration of the reference data point the periodic Verify-tab needs to detect later drift. Pre-3.7.43 the failure was silent: the backup completed, the ``.wbcommit`` marker was written, ``list_backups()`` showed the archive, but ``verify_hashes.json`` stayed empty for that entry. The Verify-tab's ``"No reference hash"`` warning was the only user-visible symptom and only appeared the first time the user opened that tab on an encrypted profile.
+- **Why plain backups were not affected**: their reference data lives in the per-file ``.wbverify`` manifest sidecar (written during ``_phase_save_manifest`` regardless of ``auto_verify``). Only encrypted archives, whose manifest is embedded INSIDE the tar, depend on ``verify_hashes.json`` as their external reference — and that write was the one being skipped.
+- **Fix**: extract the reference-hash registration into a new ``_register_encrypted_reference_hash`` helper and call it from ``_phase_verify`` BEFORE the ``auto_verify`` early-return. ``auto_verify`` still does its job (skips the post-backup ``"Verification OK"`` log line and the redundant second pass), but the hash + size + timestamp always land in ``verify_hashes.json`` for every ``.tar.wbenc`` written locally. ``_phase_verify`` itself shrinks below 30 lines per CLAUDE.md and the helper carries its own docstring + invariants.
+
+### Tests
+- +2 tests in ``tests/test_backup_engine_coverage.py::TestVerifyEncryptedBackup`` closing the coverage hole the bug had hidden in: ``test_encrypted_backup_stores_hash_even_when_auto_verify_disabled`` exercises the exact precondition (encrypted + local + ``auto_verify=False``) and asserts that ``verify_hashes.json`` ends up non-empty with the right key (``.tar.wbenc`` filename) and right size (matches the file on disk). ``test_encrypted_backup_with_auto_verify_false_skips_log_line`` is the symmetric guard: a future refactor that "unifies" the two flows by always logging ``"Verification OK"`` would defeat the original ``auto_verify=False`` user intent (skip the costly second pass). Pre-3.7.43 the first test failed (zero entries in the dict). Post-fix both pass.
+- The existing ``test_encrypted_backup_stored_hash`` continues to cover the happy path (``auto_verify=True``) so the change to ``_phase_verify`` does not regress it.
+
 ## [3.7.42] - 2026-05-27
 
 ### Changed

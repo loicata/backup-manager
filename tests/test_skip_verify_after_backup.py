@@ -194,7 +194,22 @@ class TestPhaseVerifyEarlyExit:
         mock_remote.assert_not_called()
 
     def test_skip_when_user_off_for_local_encrypted(self, tmp_path):
-        """Local encrypted .tar.wbenc + user off → no verify call."""
+        """Local encrypted .tar.wbenc + user off:
+
+        - The post-backup re-read is still skipped (``auto_verify=False``
+          intent preserved — fast turnaround for the user).
+        - BUT the reference SHA-256 is now ALWAYS registered in
+          ``verify_hashes.json`` so the periodic Verify-tab can re-check
+          the archive later. Pre-3.7.43 the early ``return`` at the top
+          of ``_phase_verify`` skipped both — the registration AND the
+          re-read — leaving every ``.tar.wbenc`` invisible to the
+          Verify-tab forever ("No reference hash — cannot verify").
+
+        This is the v3.7.43 fix. The pre-3.7.43 assertion
+        (``compute_sha256 NOT called``) was pinning the BUG, not the
+        intent. Updated to pin the new contract: hash IS computed,
+        registration IS called.
+        """
         profile = BackupProfile(
             storage=StorageConfig(
                 storage_type=StorageType.LOCAL,
@@ -208,9 +223,16 @@ class TestPhaseVerifyEarlyExit:
         engine = self._make_engine()
         ctx = self._make_ctx(profile, backup_path)
 
-        with patch("src.core.hashing.compute_sha256") as mock_hash:
+        with patch("src.core.hashing.compute_sha256", return_value="deadbeef") as mock_hash:
             engine._phase_verify(ctx)
-        mock_hash.assert_not_called()
+
+        # Reference hash IS computed (v3.7.43 fix).
+        mock_hash.assert_called_once_with(backup_path)
+        # And it IS persisted via save_verify_hash on the config manager.
+        ctx.config_manager.save_verify_hash.assert_called_once()
+        call_args = ctx.config_manager.save_verify_hash.call_args
+        assert call_args[0][0] == backup_path.name, "must be keyed on the archive filename"
+        assert call_args[0][1] == "deadbeef", "must persist the computed hash"
 
     def test_runs_when_user_off_but_remote(self, tmp_path):
         """User off + remote → STILL runs verify (force-on override)."""

@@ -77,8 +77,73 @@ class TestExtractStatus:
             "Cancelling backup...\nBackup cancelled by user\n"
             "Starting new run\nBackup complete: 10 files in 0.5s",
         )
-        # Our classifier priorities ``success`` first — anchor that.
+        # Our classifier priorities ``success`` over ``cancelled`` — anchor that.
         assert HistoryTab._extract_status(log) == "success"
+
+    def test_no_changes_detected_classified_as_skipped(self, tmp_path):
+        """A differential / incremental run that finds 0 changes emits
+        the dual marker "No changes detected — backup skipped" + the
+        usual "Backup complete: 0 files" epilogue. Since 3.7.44 the
+        History tab distinguishes this from a real success.
+        """
+        log = _write_log(
+            tmp_path,
+            "backup_a_7.log",
+            "Starting backup 'AWS Backup'\n"
+            "Filter: 0 changed, 20 unchanged\n"
+            "No changes detected — backup skipped\n"
+            "Backup complete: 0 files in 0.0 min",
+        )
+        assert HistoryTab._extract_status(log) == "skipped"
+
+    def test_skipped_beats_success_when_both_markers_present(self, tmp_path):
+        """The skipped marker takes precedence over the generic
+        "Backup complete:" line — the engine emits BOTH on a no-
+        changes run, and we want the user to see "Skipped", not
+        "Success", in the Status column."""
+        log = _write_log(
+            tmp_path,
+            "backup_a_skip_priority.log",
+            "No changes detected — backup skipped\nBackup complete: 0 files",
+        )
+        assert HistoryTab._extract_status(log) == "skipped"
+
+    def test_compound_skip_marker_required(self, tmp_path):
+        """Either token alone does NOT trigger skipped — both
+        ``No changes detected`` AND ``backup skipped`` must be present.
+        Defends against a hypothetical future log line that uses one
+        token in isolation (e.g. an exclude-pattern message that
+        happens to contain ``skipped``).
+        """
+        log_one_token = _write_log(
+            tmp_path,
+            "backup_a_skip_partial.log",
+            "Some file skipped due to permission\nBackup complete: 10 files",
+        )
+        assert HistoryTab._extract_status(log_one_token) == "success"
+
+    def test_skipped_displays_as_skipped_in_treeview(self, history_tab, tmp_path):
+        """End-to-end: a skipped log shows the right label in the
+        Status column AND carries the right tag. Catches a regression
+        where ``status_display`` dict misses the ``skipped`` key (would
+        fall back to ``"—"`` even though the row is tagged correctly).
+        """
+        _write_log(
+            tmp_path,
+            "backup_skip_e2e_20260528_100021.log",
+            "Starting backup 'AWS Backup'\n"
+            "No changes detected — backup skipped\n"
+            "Backup complete: 0 files in 0.0 min",
+        )
+        history_tab.refresh()
+        rows = list(history_tab.log_tree.get_children())
+        assert len(rows) == 1
+        values = history_tab.log_tree.item(rows[0], "values")
+        assert values[2] == "Skipped", (
+            f"Status column must display 'Skipped', got {values[2]!r}"
+        )
+        tags = history_tab.log_tree.item(rows[0], "tags")
+        assert "skipped" in tags, f"Row must carry the skipped tag, got {tags!r}"
 
 
 class TestRefreshPopulatesStatusAndPath:

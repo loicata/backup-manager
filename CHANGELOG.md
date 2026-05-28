@@ -5,6 +5,16 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.44] - 2026-05-28
+
+### Added
+- **"Skipped" status in the History tab** distinguishes a backup that ran but had nothing to do from one that produced a real archive. User observation (28/05/2026): the daily 10:00 ``AWS Backup`` differential run found ``0 changed / 20 unchanged`` files and was correctly skipped by the engine (no S3 object created), but the History tab showed ``Success`` next to it — visually identical to the days that actually wrote a new ``DIFF`` to S3. No way to tell "schedule fired and there was real work" from "schedule fired and nothing to back up".
+- **New ``skipped`` status** classified from the dual marker ``"No changes detected"`` AND ``"backup skipped"`` (both substrings must be present — defends against a hypothetical future log line that uses one token in isolation). Displayed as ``Skipped`` in the Status column with the ``Colors.ACCENT`` (blue) tag colour so it stands out from the green ``Success`` and the gray ``—`` (unknown).
+- **Precedence rule pinned in the docstring**: ``skipped`` is now checked BEFORE the generic ``"Backup complete:"`` marker because the engine emits BOTH on a no-changes run (the ``"Backup complete: 0 files in 0.0 min"`` epilogue still fires). The existing precedence ``success > cancelled`` (anchored by ``test_success_beats_cancelled_in_reordered_log``) is preserved unchanged.
+
+### Tests
+- +4 tests in ``tests/unit/test_history_tab_status.py``: ``test_no_changes_detected_classified_as_skipped`` (the exact AWS Backup 28/05 log shape — both markers present), ``test_skipped_beats_success_when_both_markers_present`` (precedence regression guard), ``test_compound_skip_marker_required`` (a single ``"skipped"`` token in isolation does NOT trigger — protects against a future ``"file skipped due to permission"`` line wrongly classifying the whole run), ``test_skipped_displays_as_skipped_in_treeview`` (end-to-end: the Status column shows ``Skipped`` AND the row carries the ``skipped`` tag for the colour).
+
 ## [3.7.43] - 2026-05-28
 
 ### Fixed

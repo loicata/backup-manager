@@ -60,6 +60,7 @@ class HistoryTab(ttk.Frame):
 
         # Status tag colors — consistent with Verify tab semantics.
         self.log_tree.tag_configure("success", foreground=Colors.SUCCESS)
+        self.log_tree.tag_configure("skipped", foreground=Colors.ACCENT)
         self.log_tree.tag_configure("cancelled", foreground="#f39c12")
         self.log_tree.tag_configure("failed", foreground=Colors.DANGER)
         self.log_tree.tag_configure("unknown", foreground=Colors.TEXT_SECONDARY)
@@ -112,6 +113,7 @@ class HistoryTab(ttk.Frame):
             status = self._extract_status(log_file)
             status_display = {
                 "success": "Success",
+                "skipped": "Skipped",
                 "cancelled": "Cancelled",
                 "failed": "Failed",
                 "unknown": "—",
@@ -164,9 +166,30 @@ class HistoryTab(ttk.Frame):
         a cancelled backup is sometimes a tray notification rather than
         the cancellation marker itself.
 
+        Precedence (since 3.7.44):
+
+        1. ``skipped`` — a differential / incremental backup that found
+           zero changes since its reference and produced no new archive.
+           The engine emits ``"No changes detected — backup skipped"``
+           followed by ``"Backup complete: 0 files in 0.0 min"``. We
+           check the skip marker BEFORE the generic complete marker so
+           the History tab distinguishes "did nothing useful" from
+           "did real work" — visible cue that the schedule fired but
+           the destination got no new bytes.
+        2. ``success`` — the generic ``"Backup complete:"`` marker
+           (with at least one file written, otherwise it would have
+           been classified ``skipped`` above).
+        3. ``cancelled`` — user-initiated cancel. Checked AFTER
+           success so a "cancel attempt then completed" log
+           (the canonical ``test_success_beats_cancelled_in_reordered_log``
+           case) stays classified as ``success``.
+        4. ``failed`` — explicit failure or any line containing
+           ``ERROR``.
+        5. ``unknown`` — fallback for partial / truncated logs.
+
         Returns:
-            One of ``"success"``, ``"cancelled"``, ``"failed"`` or
-            ``"unknown"``.
+            One of ``"skipped"``, ``"success"``, ``"cancelled"``,
+            ``"failed"`` or ``"unknown"``.
         """
         try:
             with open(log_file, encoding="utf-8") as f:
@@ -174,6 +197,13 @@ class HistoryTab(ttk.Frame):
         except OSError:
             return "unknown"
 
+        # ``skipped`` is checked FIRST and uses a compound marker
+        # (both substrings must be present) so an unrelated mention
+        # of "skipped" elsewhere in the log cannot falsely flag a
+        # successful run as skipped. The engine always emits both
+        # tokens together in the no-changes path.
+        if "No changes detected" in content and "backup skipped" in content:
+            return "skipped"
         if "Backup complete:" in content:
             return "success"
         if "Backup cancelled" in content:

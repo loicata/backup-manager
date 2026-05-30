@@ -88,16 +88,36 @@ class ScheduleJournal:
             self._entries.append(asdict(entry))
             self._save()
 
-    def update_last(self, **kwargs) -> None:
-        """Update the most recent journal entry (thread-safe).
+    def update_last(self, profile_id: str = "", **kwargs) -> None:
+        """Update the most recent journal entry for a profile (thread-safe).
+
+        Targets the most recent entry whose ``profile_id`` matches —
+        NOT the global last entry. Concurrent runs on *different*
+        profiles interleave their ``add()`` / ``update_last()`` calls,
+        so the global last entry may belong to another profile. Updating
+        it blindly wrote one profile's ``success`` (and its file counts)
+        onto another profile's row and left the real run stuck on
+        ``started`` — the 30/05/2026 "crypter shows Failed but the
+        backup actually succeeded" bug.
 
         Args:
-            **kwargs: Fields to update on the last entry.
+            profile_id: Profile whose latest entry to update. Empty
+                (legacy callers without a profile context) falls back to
+                the global last entry.
+            **kwargs: Fields to set on the matched entry.
         """
         with self._lock:
-            if self._entries:
-                self._entries[-1].update(kwargs)
-                self._save()
+            if not self._entries:
+                return
+            if profile_id:
+                for entry in reversed(self._entries):
+                    if entry.get("profile_id") == profile_id:
+                        entry.update(kwargs)
+                        self._save()
+                        return
+                return
+            self._entries[-1].update(kwargs)
+            self._save()
 
     def get_entries(self, limit: int = 50, profile_id: str = "") -> list[dict]:
         """Retrieve journal entries (thread-safe).
@@ -122,22 +142,29 @@ class ScheduleJournal:
             self._save()
 
     def get_last_run(self, profile_id: str) -> dict | None:
-        """Get the most recent backup run for a given profile (thread-safe).
+        """Get the most recent FINISHED backup run for a profile (thread-safe).
 
-        Skips non-backup entries (e.g. verify triggers) so the
-        dashboard only shows actual backup results.
+        Skips verify triggers and non-terminal entries (``started`` /
+        ``waiting``): a ``started`` row is either a run still in flight
+        (the live progress bar already conveys that) or an orphan left
+        by a crash / by the pre-3.7.47 ``update_last`` bug — neither
+        should be painted as a *failed* backup on the dashboard card.
+        Returns the last entry with a terminal status.
 
         Args:
             profile_id: Profile to look up.
 
         Returns:
-            The last matching backup entry dict, or None.
+            The last terminal backup entry dict, or None.
         """
+        terminal = {"success", "failed", "cancelled", "skipped"}
         with self._lock:
             for entry in reversed(self._entries):
                 if entry.get("profile_id") != profile_id:
                     continue
                 if entry.get("trigger") == "verify":
+                    continue
+                if entry.get("status") not in terminal:
                     continue
                 return entry
             return None
@@ -549,16 +576,29 @@ class InAppScheduler:
                 )
             )
 
-        # Mark as in-progress BEFORE the callback so a concurrent
-        # "sleep detected" pass cannot re-trigger the same profile.
-        with self._in_progress_lock:
-            self._profile_in_progress.add(profile.id)
+        # Claim the profile's run slot atomically BEFORE the callback.
+        # If a UI "Start backup" (or another pass) already holds it, skip
+        # this trigger entirely: calling the callback would invoke
+        # run_backup, which logs the confusing "Backup rejected" line
+        # before the ProfileLockError even propagates. The concurrent run
+        # already satisfies this schedule window.
+        if not self.try_acquire_profile(profile.id):
+            logger.info("Scheduled trigger skipped (already running): %s", profile.name)
+            with self._op_lock:
+                self._journal.update_last(
+                    profile_id=profile.id,
+                    status="skipped",
+                    detail="concurrent run already in progress",
+                    timestamp=datetime.now().isoformat(),
+                )
+            return
 
         # Callback runs OUTSIDE the lock (can take minutes)
         try:
             self._backup_callback(profile)
             with self._op_lock:
                 self._journal.update_last(
+                    profile_id=profile.id,
                     status="success",
                     timestamp=datetime.now().isoformat(),
                 )
@@ -598,6 +638,7 @@ class InAppScheduler:
             level("Scheduled backup %s: %s", outcome_label, profile.name)
             with self._op_lock:
                 self._journal.update_last(
+                    profile_id=profile.id,
                     status="skipped" if is_skip else "failed",
                     detail=f"{type(e).__name__}: {e}",
                     timestamp=datetime.now().isoformat(),
@@ -666,13 +707,14 @@ class InAppScheduler:
                 profile.name,
             )
             with self._op_lock:
-                self._journal.update_last(status="started")
+                self._journal.update_last(profile_id=profile.id, status="started")
 
             # Callback runs OUTSIDE the lock
             try:
                 self._backup_callback(profile)
                 with self._op_lock:
                     self._journal.update_last(
+                        profile_id=profile.id,
                         status="success",
                         timestamp=datetime.now().isoformat(),
                     )
@@ -692,6 +734,7 @@ class InAppScheduler:
                 )
                 with self._op_lock:
                     self._journal.update_last(
+                        profile_id=profile.id,
                         status="failed",
                         detail=f"Retry {attempt}/{total_attempts}: {type(e).__name__}: {e}",
                         timestamp=datetime.now().isoformat(),
@@ -760,11 +803,13 @@ class InAppScheduler:
             with self._op_lock:
                 if result.success:
                     self._journal.update_last(
+                        profile_id=profile.id,
                         status="success",
                         detail=f"Verified {result.ok_count} backups OK",
                     )
                 else:
                     self._journal.update_last(
+                        profile_id=profile.id,
                         status="failed",
                         detail=f"{result.error_count} error(s), {result.ok_count} OK",
                     )
@@ -778,6 +823,7 @@ class InAppScheduler:
             logger.exception("Verification failed for '%s'", profile.name)
             with self._op_lock:
                 self._journal.update_last(
+                    profile_id=profile.id,
                     status="failed",
                     detail=f"Verify error: {type(e).__name__}: {e}",
                 )
@@ -785,6 +831,34 @@ class InAppScheduler:
     # ------------------------------------------------------------------
     # Public mark/unmark API for backups triggered OUTSIDE the scheduler
     # ------------------------------------------------------------------
+
+    def try_acquire_profile(self, profile_id: str) -> bool:
+        """Atomically claim a profile's run slot (test-and-set).
+
+        Under ``_in_progress_lock``, add ``profile_id`` and return True
+        if the slot was free, or return False if another run already
+        holds it. This is the single point of coordination that stops a
+        scheduled catch-up and a UI "Start backup" from both calling
+        ``run_backup`` on the same profile at once — the race that
+        surfaced as the confusing "Backup rejected" line when a
+        freshly-activated profile became due at the same moment the user
+        clicked Start.
+
+        Whoever acquires MUST release via :meth:`unmark_profile_running`
+        when the run finishes or is abandoned.
+
+        Args:
+            profile_id: Profile identifier (``BackupProfile.id``).
+
+        Returns:
+            True if the slot was free and is now held by the caller;
+            False if it was already taken.
+        """
+        with self._in_progress_lock:
+            if profile_id in self._profile_in_progress:
+                return False
+            self._profile_in_progress.add(profile_id)
+            return True
 
     def mark_profile_running(self, profile_id: str) -> None:
         """Mark a profile as actively running.

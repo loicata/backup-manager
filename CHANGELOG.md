@@ -5,6 +5,28 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.47] - 2026-05-30
+
+### Fixed
+- **A profile's dashboard "Last backup" card could show "Failed" right after a successful backup.** User report (30/05/2026, v3.7.46): the ``crypter`` card read "✗ Failed — 57min ago" while its own run log showed a complete success (archive written, 2356 files, commit marker, rotation). Distinct from the run-rejection race fixed in 3.7.46 — this one is in the journal.
+- **Root cause**: ``ScheduleJournal.update_last()`` updated ``self._entries[-1]`` — the GLOBAL last entry, regardless of profile. When two profiles run back-to-back (the sidebar chain crypter → My Backup → AWS), the ``started`` row of one and the ``success`` of another telescope: crypter's ``success`` (and its 2356-file count) landed on the freshly-appended ``My Backup`` row, and crypter's own entry stayed stuck on ``started``. The dashboard reads ``status == "success"``, so a ``started`` (or stray ``failed``) row painted a successful backup as "Failed". Same mechanism behind the long tail of ``status: "success"`` rows that carry a ``ProfileLockError`` detail.
+- **Fix**: ``update_last(profile_id, …)`` now targets the most recent entry for the *given profile*, not the global last entry; all 13 call sites pass their ``profile_id``. ``get_last_run()`` additionally skips non-terminal rows (``started`` / ``waiting``) so an in-flight run or a crash orphan can never be painted as a failed backup — it returns the last entry with a terminal status (success / failed / cancelled / skipped). Existing corrupt rows are therefore ignored too, so the card self-heals without touching the journal file.
+
+### Tests
+- +9 tests in ``tests/unit/test_schedule_journal.py``: ``update_last`` updates the matching profile's row and leaves other profiles untouched (the exact crypter/My Backup telescoping), unknown-profile and empty-journal no-ops, legacy global fallback; ``get_last_run`` skips orphan ``started`` / ``waiting`` / ``verify`` rows, returns the last terminal entry, and does not leak across profiles.
+- Full suite: 2548 passed, 0 failed, 28 skipped, 92% coverage.
+
+## [3.7.46] - 2026-05-30
+
+### Fixed
+- **"Backup rejected: Another backup is already running" could still appear in 3.7.45** — specifically when a freshly-activated profile was caught by the scheduler's catch-up at the same instant the user clicked "Start backup". User repro (30/05/2026): activated ``My Backup``, clicked Start; the manual chain and the scheduler both reached ``run_backup`` for ``My Backup`` at once and the loser logged the rejection. 3.7.45 only coordinated the manual↔manual case (its ``_backup_running`` / ``_launch_in_progress`` / ``_active_engines`` guard); the scheduler used a *separate* registry (``_profile_in_progress``) and neither path consulted the other in time.
+- **Root cause**: a freshly-activated profile has ``last_trigger = None``, so ``_is_due`` returns True immediately — the scheduler triggers it on the next tick / startup missed-backup check, racing the manual launch. ``run_backup`` logs "Backup rejected" *before* the ``ProfileLockError`` even propagates, so the message surfaced even though the scheduler already classifies that exception as "skipped (concurrent)".
+- **Fix**: a single atomic test-and-set, ``InAppScheduler.try_acquire_profile``, on the shared ``_profile_in_progress`` set, used by BOTH paths. The scheduler's ``_trigger_backup`` now skips the callback entirely (no ``run_backup``, no rejection line) when the slot is already held; the manual ``_precheck_and_run`` claims the slot before launching and, if it cannot, logs ``Backup skipped — already being backed up`` and chains to the next queued profile. The slot is released in the backup thread's ``finally`` (or in ``_on_precheck_cancel`` if the launch is aborted during the precheck), tracked by a new ``_launching_profile_id``.
+
+### Tests
+- +7 tests in ``tests/unit/test_concurrent_run_coordination.py``: ``try_acquire_profile`` test-and-set semantics (acquire / second-fails / release-then-reacquire); the scheduler's ``_trigger_backup`` skipping its callback when the slot is held (manual holds → no second ``run_backup``) and running when free; and the manual ``_precheck_and_run`` skipping + chaining when the slot is taken (scheduler holds → no duplicate launch), claiming the slot when free, and releasing it on precheck cancel.
+- Full suite: 2539 passed, 0 failed, 28 skipped, 92% coverage.
+
 ## [3.7.45] - 2026-05-30
 
 ### Changed

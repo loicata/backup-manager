@@ -720,6 +720,11 @@ class BackupManagerApp:
         # second click would otherwise spawn a duplicate run that the
         # engine's per-profile lock then rejects ("Backup rejected...").
         self._launch_in_progress: bool = False
+        # Profile id whose run slot was claimed by ``_precheck_and_run``
+        # (via ``scheduler.try_acquire_profile``) but whose backup thread
+        # has not taken over yet. Lets ``_on_precheck_cancel`` release the
+        # slot if the launch is aborted during the precheck.
+        self._launching_profile_id: str | None = None
 
         # Setup theme
         self.style = setup_theme(root)
@@ -2533,6 +2538,21 @@ class BackupManagerApp:
                 can later reach exactly this instance via
                 ``_active_engines``.
         """
+        # Claim this profile's run slot (shared with the scheduler) on the
+        # first attempt. If a scheduled catch-up already holds it — the
+        # 3.7.45 race where a freshly-activated profile became due exactly
+        # as the user clicked Start — skip this profile and chain to the
+        # next queued one instead of calling run_backup (which would log
+        # "Backup rejected"). A silent retry re-enters with the slot held.
+        if _retry_attempt == 0 and not self.scheduler.try_acquire_profile(profile.id):
+            self.tab_run._append_log(
+                f"Backup skipped — '{profile.name}' is already being backed up; "
+                f"avoided a duplicate run."
+            )
+            self.root.after(0, self._dequeue_next_backup, False, profile.name)
+            return
+        self._launching_profile_id = profile.id
+
         # Mark the launch as committed so a second click during the
         # asynchronous precheck (the "Checking destinations..." overlay)
         # is queued by ``_run_backup`` instead of spawning a duplicate
@@ -2644,6 +2664,11 @@ class BackupManagerApp:
         # Launch aborted before the backup thread started — release the
         # flag so the next click can start (or queue) normally.
         self._launch_in_progress = False
+        # Release the run slot claimed in _precheck_and_run so the profile
+        # is not left stuck "in progress" after an aborted launch.
+        if self._launching_profile_id is not None:
+            self.scheduler.unmark_profile_running(self._launching_profile_id)
+            self._launching_profile_id = None
 
     def _start_backup_thread(
         self, profile: BackupProfile, engine: BackupEngine
@@ -2664,8 +2689,11 @@ class BackupManagerApp:
         # the flag and skips. Reset in the thread's finally block.
         self._backup_running = True
         # The run now owns the "busy" state; clear the launch flag set in
-        # ``_precheck_and_run`` so it never stays stuck True.
+        # ``_precheck_and_run`` so it never stays stuck True. The run slot
+        # claimed in _precheck_and_run is now owned by the backup thread
+        # (released in its finally via unmark_profile_running).
         self._launch_in_progress = False
+        self._launching_profile_id = None
 
         # Repoll destination health NOW so the Destinations card cannot
         # be left showing a stale "read-only or locked" red painted by
@@ -2730,6 +2758,7 @@ class BackupManagerApp:
                 completed_at = datetime.now().isoformat()
                 with self.scheduler.op_lock:
                     self.scheduler.journal.update_last(
+                        profile_id=profile.id,
                         status="success",
                         files_count=stats.files_processed,
                         bytes_source=stats.bytes_source,
@@ -2778,7 +2807,9 @@ class BackupManagerApp:
                 )
                 result = engine._current_result
                 with self.scheduler.op_lock:
-                    self.scheduler.journal.update_last(status="cancelled")
+                    self.scheduler.journal.update_last(
+                        profile_id=profile.id, status="cancelled"
+                    )
                 if result:
                     self._save_backup_log(profile, result)
                 if profile.email.enabled:
@@ -2796,6 +2827,7 @@ class BackupManagerApp:
                 result = engine._current_result
                 with self.scheduler.op_lock:
                     self.scheduler.journal.update_last(
+                        profile_id=profile.id,
                         status="failed",
                         detail=f"{type(e).__name__}: {e}",
                     )
@@ -3322,6 +3354,7 @@ class BackupManagerApp:
             completed_at = datetime.now().isoformat()
             with self.scheduler.op_lock:
                 self.scheduler.journal.update_last(
+                    profile_id=profile.id,
                     status="success",
                     files_count=stats.files_processed,
                     bytes_source=stats.bytes_source,

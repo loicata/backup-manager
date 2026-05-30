@@ -76,7 +76,9 @@ class TestRunTabIgnoresProgressBetweenBackups:
         args = tab.after.call_args.args
         assert args[0] == 0
         assert args[1] == tab._update_progress
-        assert args[2:] == (42, 100, "manifest.json", "verification")
+        # ``_on_progress`` forwards ``profile_id`` (v3.7.12 per-profile
+        # event tagging) as the trailing argument to ``_update_progress``.
+        assert args[2:] == (42, 100, "manifest.json", "verification", "")
 
     def test_progress_dropped_again_after_success(self) -> None:
         """STATUS=success closes the activity window."""
@@ -122,6 +124,10 @@ class TestRunTabIgnoresLogBetweenBackups:
         tab = RunTab.__new__(RunTab)
         tab._backup_active = False
         tab._current_phase = ""
+        # ``_on_log`` persists to the per-profile history store before
+        # the cross-tab gate. ``None`` disables persistence so these
+        # tests stay focused on the ``_backup_active`` gating contract.
+        tab._history_store = None
         tab.after = MagicMock(name="after")
         tab.start_btn = MagicMock()
         tab.cancel_btn = MagicMock()
@@ -143,11 +149,12 @@ class TestRunTabIgnoresLogBetweenBackups:
         tab = self._make_log_stub()
         tab._update_status("running")
         tab._on_log(message="Building integrity manifest...", level="info", phase="")
-        # One append_log dispatch.
+        # One dispatch. ``_on_log`` now defers to ``_dispatch_log_event``
+        # (v3.7.12 per-profile guard), which calls ``_append_log`` itself.
         assert tab.after.call_count == 1
         args = tab.after.call_args.args
         assert args[0] == 0
-        assert args[1] == tab._append_log
+        assert args[1] == tab._dispatch_log_event
 
     def test_log_dropped_after_terminal_status(self) -> None:
         tab = self._make_log_stub()
@@ -176,11 +183,13 @@ class TestRunTabIgnoresLogBetweenBackups:
             level="info",
             phase="",
         )
-        # The terminal line MUST be appended despite the gate.
+        # The terminal line MUST be appended despite the gate. ``_on_log``
+        # defers to ``_dispatch_log_event``, whose first payload arg is the
+        # message (forwarded to ``_append_log`` after the per-profile check).
         assert tab.after.call_count == 1
         args = tab.after.call_args.args
         assert args[0] == 0
-        assert args[1] == tab._append_log
+        assert args[1] == tab._dispatch_log_event
         assert args[2] == "Backup complete: 265552 files in 73.1 min"
 
     def test_failed_terminal_log_also_passes_through(self) -> None:

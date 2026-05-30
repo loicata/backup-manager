@@ -231,6 +231,14 @@ class TestScheduledBackupNotifications:
         instance.root = MagicMock()
         instance.tab_run = MagicMock()
         instance._update_health_dashboard = MagicMock()
+        # Per-profile engine model + queue drain wiring touched by
+        # ``_scheduled_backup``. Mocked so the test exercises only the
+        # notification/email contract, not health repoll or log I/O.
+        instance._active_engines = {}
+        instance._backup_running = False
+        instance._launch_in_progress = False
+        instance._repoll_destinations_after_backup_start = MagicMock()
+        instance._save_backup_log = MagicMock()
         return instance
 
     def test_failure_sends_tray_notification_then_reraises(self):
@@ -333,6 +341,14 @@ class TestManualBackupNotifications:
         instance.events = MagicMock()
         instance.engine = MagicMock()
         instance.tab_run = MagicMock()
+        # Per-profile engine model + queue drain wiring touched by
+        # ``_start_backup_thread`` and its worker thread's finally block.
+        instance._active_engines = {}
+        instance._backup_running = False
+        instance._launch_in_progress = False
+        instance.root = MagicMock()
+        instance._repoll_destinations_after_backup_start = MagicMock()
+        instance._save_backup_log = MagicMock()
         return instance
 
     def test_cancellation_sends_tray_notification(self):
@@ -344,9 +360,9 @@ class TestManualBackupNotifications:
         instance.engine.run_backup.side_effect = CancelledError()
         instance.engine._current_result = None
 
-        # Call _start_backup_thread and wait for the thread to finish
-        with patch("src.ui.app.BackupEngine"):
-            instance._start_backup_thread(profile)
+        # Per-profile engine model: the engine is passed in (registered
+        # in _active_engines for cancel routing), not created inside.
+        instance._start_backup_thread(profile, instance.engine)
 
         # Wait for the background thread to complete
         import threading

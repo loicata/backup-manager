@@ -18,6 +18,7 @@ from tkinter import ttk
 
 from src import __version__
 from src.core.backup_engine import BackupEngine, CancelledError
+from src.core.backup_queue import select_profiles_to_queue
 from src.core.config import (
     BackupProfile,
     BackupType,
@@ -711,6 +712,14 @@ class BackupManagerApp:
         # Start button — the button now runs every active profile in
         # sidebar order, not just the currently selected one).
         self._backup_queue: list[BackupProfile] = []
+        # True from the moment a launch is committed (precheck started)
+        # until the backup thread takes over (``_backup_running``) or the
+        # launch is aborted. Closes the double-click race window: the
+        # precheck runs asynchronously, so ``_backup_running`` alone is
+        # not yet True while "Checking destinations..." is on screen — a
+        # second click would otherwise spawn a duplicate run that the
+        # engine's per-profile lock then rejects ("Backup rejected...").
+        self._launch_in_progress: bool = False
 
         # Setup theme
         self.style = setup_theme(root)
@@ -2441,6 +2450,20 @@ class BackupManagerApp:
                     )
                     return
 
+        # If a backup is already running (manual, scheduled, or chaining)
+        # or a launch is mid-precheck, do NOT reject the request — queue
+        # it instead and let the running backup's drain pick it up when
+        # it finishes. Coalescing keeps at most one pending run per
+        # profile so a double-click never stacks identical full backups.
+        # This replaces the old behaviour where the second run hit the
+        # engine's per-profile lock and was logged as "Backup rejected".
+        a_backup_is_active = (
+            self._backup_running or self._launch_in_progress or bool(self._active_engines)
+        )
+        if a_backup_is_active:
+            self._queue_backup_requests(active_profiles)
+            return
+
         engine = BackupEngine(self.config_manager, events=self.events)
 
         # Queue everything after the first profile; _backup_thread picks
@@ -2451,6 +2474,38 @@ class BackupManagerApp:
         # sees tabs updated for the profile actually being run.
         self._select_profile_in_sidebar(active_profiles[0])
         self._precheck_and_run(active_profiles[0], engine)
+
+    def _queue_backup_requests(self, requested: list[BackupProfile]) -> None:
+        """Append requested profiles to the backup queue, with coalescing.
+
+        Called by ``_run_backup`` when a backup is already running or
+        mid-launch. Profiles already running (``_active_engines``) or
+        already in ``_backup_queue`` are skipped so a re-click never
+        stacks a second identical run. The in-flight backup's ``finally``
+        block drains the queue via ``_dequeue_next_backup``.
+
+        Args:
+            requested: Active profiles the user asked to back up, in
+                sidebar order.
+        """
+        excluded = set(self._active_engines.keys())
+        excluded.update(p.id for p in self._backup_queue)
+        requested_ids = [p.id for p in requested]
+        to_queue_ids, _skipped = select_profiles_to_queue(requested_ids, excluded)
+
+        by_id = {p.id: p for p in requested}
+        for pid in to_queue_ids:
+            self._backup_queue.append(by_id[pid])
+
+        if to_queue_ids:
+            names = ", ".join(by_id[pid].name for pid in to_queue_ids)
+            self.tab_run._append_log(
+                f"Backup queued — will run after the current backup: {names}"
+            )
+        else:
+            self.tab_run._append_log(
+                "Backup already running or queued for the selected profile(s)."
+            )
 
     def _precheck_and_run(
         self,
@@ -2478,6 +2533,13 @@ class BackupManagerApp:
                 can later reach exactly this instance via
                 ``_active_engines``.
         """
+        # Mark the launch as committed so a second click during the
+        # asynchronous precheck (the "Checking destinations..." overlay)
+        # is queued by ``_run_backup`` instead of spawning a duplicate
+        # run. Cleared in ``_start_backup_thread`` once the backup thread
+        # owns ``_backup_running``, or in ``_on_precheck_cancel`` on abort.
+        self._launch_in_progress = True
+
         if _retry_attempt == 0:
             # Only show the "Checking..." overlay on the first attempt;
             # the silent retry keeps the UI quiet so a transparent
@@ -2579,6 +2641,9 @@ class BackupManagerApp:
         """User clicked Cancel — hide alert, set tray to error."""
         self._hide_target_alert()
         self.tray.set_state(TrayState.BACKUP_ERROR)
+        # Launch aborted before the backup thread started — release the
+        # flag so the next click can start (or queue) normally.
+        self._launch_in_progress = False
 
     def _start_backup_thread(
         self, profile: BackupProfile, engine: BackupEngine
@@ -2598,6 +2663,9 @@ class BackupManagerApp:
         # queued between this point and the engine's _maybe_force_full sees
         # the flag and skips. Reset in the thread's finally block.
         self._backup_running = True
+        # The run now owns the "busy" state; clear the launch flag set in
+        # ``_precheck_and_run`` so it never stays stuck True.
+        self._launch_in_progress = False
 
         # Repoll destination health NOW so the Destinations card cannot
         # be left showing a stale "read-only or locked" red painted by
@@ -3238,6 +3306,10 @@ class BackupManagerApp:
         # profile (sidebar selection) reaches it. The manual path
         # registers the same way in ``_start_backup_thread``.
         self._active_engines[profile.id] = engine
+        # Track failure so the queue drain in ``finally`` can prompt
+        # before chaining the next profile (mirrors the manual path's
+        # ``run_failed``).
+        scheduled_failed = False
         try:
             self.tray.set_state(TrayState.BACKUP_RUNNING)
             stats = engine.run_backup(profile)
@@ -3297,6 +3369,7 @@ class BackupManagerApp:
                 )
 
         except CancelledError:
+            scheduled_failed = True
             self.tray.set_state(TrayState.IDLE)
             self.tray.notify(
                 "Scheduled backup cancelled",
@@ -3313,6 +3386,7 @@ class BackupManagerApp:
                 )
 
         except Exception as e:
+            scheduled_failed = True
             self.tray.set_state(TrayState.BACKUP_ERROR)
             self.tray.notify(
                 "Scheduled backup failed",
@@ -3336,6 +3410,12 @@ class BackupManagerApp:
             # so the next scheduler tick or manual click can spawn a
             # fresh one without colliding with a stale entry.
             self._active_engines.pop(profile.id, None)
+            # Drain any backups the user queued (via the Start button)
+            # while this scheduled run was in flight. Without this, a
+            # manual request made during a scheduled backup would sit in
+            # the queue until the next manual click. Posted to the Tk
+            # thread because _dequeue_next_backup touches widgets.
+            self.root.after(0, self._dequeue_next_backup, scheduled_failed, profile.name)
 
     def _scheduled_precheck_prompt(
         self,

@@ -5,6 +5,21 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.45] - 2026-05-30
+
+### Changed
+- **A backup requested while one is already running is now queued instead of rejected.** User report (30/05/2026, profile ``crypter``): clicking "Start backup" — or double-clicking it, or the daily schedule firing — while a backup for the same profile was still running produced ``Backup rejected: Another backup is already running for this profile in this application.`` and the second request was silently lost. The engine's per-profile lock (``src/core/profile_lock.py``) raised ``ProfileLockError`` and ``BackupEngine.run_backup`` logged it as a rejection. Now ``BackupManagerApp._run_backup`` detects the in-flight (or mid-launch) state and appends the request to the existing ``_backup_queue`` instead; the running backup's ``finally`` drains it via ``_dequeue_next_backup`` when it finishes.
+- **Coalescing — at most one pending run per profile.** Re-clicking "Start backup" (or a schedule firing) for a profile that is already running or already queued does NOT stack a second identical full backup. New pure helper ``src/core/backup_queue.py::select_profiles_to_queue`` partitions requested profile ids into "to queue" vs "skipped", deduplicating against the running set (``_active_engines``), the queued set, and duplicates within the request, while preserving sidebar order. Extracted out of the UI so the rule is unit-testable without a Tk interpreter.
+- **Double-click race window closed.** The precheck ("Checking destinations...") runs asynchronously, so ``_backup_running`` is not yet True while it is on screen — a fast second click used to slip through and spawn a duplicate run the engine lock then rejected. New ``_launch_in_progress`` flag, set at the start of ``_precheck_and_run`` and cleared in ``_start_backup_thread`` / ``_on_precheck_cancel``, makes ``_run_backup`` queue the second click instead.
+- **Scheduled runs now drain the queue too.** A manual click made while a *scheduled* backup was running previously sat in the queue until the next manual click, because only the manual path drained it. ``_scheduled_backup``'s ``finally`` now posts the same ``_dequeue_next_backup`` as the manual path (tracking ``scheduled_failed`` so a failed scheduled run still prompts before chaining the next profile).
+
+### Fixed
+- **11 pre-existing broken tests repaired** — independent of the queue change (they failed on ``main`` before this work, verified by stashing the changes and re-running). All were stale after the earlier "one ``BackupEngine`` per run" refactor and the ``RunHistoryStore`` addition, not real product bugs: ``tests/test_write_error_failfast.py`` (5) called ``_start_backup_thread(profile)`` without the now-required ``engine`` argument and built ``__new__`` instances missing ``_active_engines`` / ``_repoll_destinations_after_backup_start`` / ``_save_backup_log``; ``tests/test_run_tab_progress_isolation.py`` (6) built ``RunTab`` stubs without ``_history_store`` (which ``_on_log`` now writes to before the cross-tab gate) and asserted the old direct ``_append_log`` dispatch and argument shape (``_on_log`` now defers to ``_dispatch_log_event``, ``_on_progress`` forwards ``profile_id``).
+
+### Tests
+- +18 tests in ``tests/unit/test_backup_queue_coalescing.py``: the pure ``select_profiles_to_queue`` helper (exclusion of running/queued ids, internal-duplicate collapsing, order preservation, empty / all-excluded cases, ``TypeError`` on bad input) and the UI wiring against a real ``BackupManagerApp`` (clicking while ``_backup_running`` queues instead of rejecting, re-click does not stack, a running profile is not re-queued, ``_launch_in_progress`` blocks an immediate start, idle click launches the first profile and queues the rest, the ``_launch_in_progress`` lifecycle, and the dequeue drain).
+- Full suite after the change: **2532 passed, 0 failed, 28 skipped, 92% coverage**.
+
 ## [3.7.44] - 2026-05-28
 
 ### Added

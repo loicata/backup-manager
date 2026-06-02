@@ -5,6 +5,18 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.48] - 2026-06-02
+
+### Fixed
+- **A scheduled profile could silently skip its daily backup if a previous trigger died in flight.** User report (02/06/2026): three profiles shared ``daily at 10:00``. At 13:05 the app launched and the startup catch-up triggered ``crypter`` (first in the list), which advanced its ``last_trigger`` to 13:05 *before* the run; the PC was then powered off before the engine executed a single line. At the 18:26 relaunch ``crypter`` was no longer ``_is_due`` (last_trigger 13:05 ≥ today's 10:00 slot) and its ``last_backup_completed`` was still True (the engine never armed its own crash flag), so the startup catch-up skipped it — while the two other profiles, whose ``last_trigger`` was still the previous day, ran normally.
+- **Root cause**: the schedule slot is consumed (``last_trigger`` advanced in ``_trigger_backup``) *before* the backup runs, while the only safety net (``last_backup_completed = False`` + ``incomplete_backup_name``) is armed *later*, by the engine, after its first ``save_profile``. A process death in that gap burns the daily slot with no recovery signal: ``_is_due`` sees the slot consumed and ``crash_recovery_due`` needs a flag that was never written.
+- **Fix**: ``InAppScheduler`` now writes a persistent *in-flight marker* (``SchedulerState.set_inflight``, key ``inflight_<id>`` in ``scheduler_state.json``) the moment ``_trigger_backup`` owns the run slot, and clears it only in its ``finally`` — which runs only if the process survives (success or handled failure). A marker that outlives a restart therefore proves a die-in-flight, so ``_check_startup_missed`` forces a catch-up (``orphan_trigger_due``), bounded by the existing crash-recovery circuit breaker. This distinguishes a hard process death (marker orphaned → recover) from a clean handled failure (marker cleared → wait for the next slot, no boot-loop). Scope: scheduler path only; the manual/tray path (which also advances ``last_trigger`` before running via ``mark_triggered_now``) is left as known tech-debt.
+
+### Tests
+- +19 tests in ``tests/unit/test_scheduler_inflight_recovery.py``: the ``SchedulerState`` in-flight marker contract (roundtrip, persistence across instances, independence from ``last_trigger``, defensive empty-id and corrupt-value handling); the ``_trigger_backup`` lifecycle (marker present during the run, cleared after success and after a handled exception, never written when the slot is already held); ``_check_startup_missed`` orphan recovery (forces a trigger when the slot is consumed, increments the circuit breaker, clears the marker after a successful relaunch, is blocked when the breaker is maxed, is skipped when a run is already in progress, and stays quiet with no marker); plus a full reproduction of the 02/06/2026 incident (one burned-slot profile recovered alongside two genuinely-due ones) and its inverse contract (without the marker the bug reproduces — guarding against a revert).
+- Also removed a pre-existing unused ``import os`` in ``src/core/scheduler.py``.
+- Full suite: 2568 passed, 0 failed, 28 skipped, 92% coverage.
+
 ## [3.7.47] - 2026-05-30
 
 ### Fixed

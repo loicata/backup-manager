@@ -6,7 +6,6 @@ Detects system sleep/hibernation and triggers missed backups.
 
 import json
 import logging
-import os
 import threading
 import time
 from collections.abc import Callable
@@ -253,6 +252,71 @@ class SchedulerState:
             self._state[f"verify_{profile_id}"] = dt.isoformat()
             self._save()
 
+    def get_inflight(self, profile_id: str) -> datetime | None:
+        """Get the start time of an unfinished trigger (thread-safe).
+
+        An "in-flight" marker is written when a backup is triggered and
+        cleared only once the run reaches a terminal outcome (success or
+        a handled failure). A marker that is still present after a
+        restart therefore means the previous run died before it could
+        clean up — the process was killed (PC powered off, OS sleep,
+        hard crash) somewhere between the trigger and the engine's own
+        ``last_backup_completed`` bookkeeping.
+
+        ``_check_startup_missed`` reads this to force a catch-up that
+        neither ``_is_due`` (the schedule slot was already consumed via
+        ``last_trigger``) nor ``crash_recovery_due`` (which needs
+        ``last_backup_completed=False``, set only once the engine starts
+        writing) would otherwise detect.
+
+        Args:
+            profile_id: Profile to look up.
+
+        Returns:
+            The datetime the trigger started, or None if no marker is
+            set (or the stored value is unparseable).
+        """
+        if not profile_id:
+            return None
+        with self._lock:
+            ts = self._state.get(f"inflight_{profile_id}")
+            if ts:
+                try:
+                    return datetime.fromisoformat(ts)
+                except ValueError:
+                    return None
+            return None
+
+    def set_inflight(self, profile_id: str, dt: datetime) -> None:
+        """Mark a trigger as in-flight (thread-safe).
+
+        Args:
+            profile_id: Profile whose backup run is starting.
+            dt: Timestamp of the trigger.
+        """
+        if not profile_id:
+            return
+        with self._lock:
+            self._state[f"inflight_{profile_id}"] = dt.isoformat()
+            self._save()
+
+    def clear_inflight(self, profile_id: str) -> None:
+        """Clear a profile's in-flight marker (thread-safe).
+
+        Idempotent: clearing an absent marker is a silent no-op so the
+        ``finally`` block in ``_trigger_backup`` can call it
+        unconditionally on every exit path.
+
+        Args:
+            profile_id: Profile whose run reached a terminal outcome.
+        """
+        if not profile_id:
+            return
+        with self._lock:
+            if f"inflight_{profile_id}" in self._state:
+                del self._state[f"inflight_{profile_id}"]
+                self._save()
+
 
 class InAppScheduler:
     """Daemon thread that checks for due backups."""
@@ -415,9 +479,30 @@ class InAppScheduler:
                 last_str,
             )
 
+            # A scheduler-level in-flight marker that survived this
+            # restart means the previous trigger died before it could
+            # finish or clean up (see ``SchedulerState.get_inflight``).
+            inflight = self._state.get_inflight(profile.id)
+
             # Force a catch-up when the previous run did not complete
             # (process crash, hard power-off mid-backup) even if the
-            # current schedule window would normally suppress it.
+            # current schedule window would normally suppress it. Two
+            # independent die-in-flight signals are honoured:
+            #
+            #   * crash_recovery_due — the ENGINE armed its own flag
+            #     (last_backup_completed=False + incomplete_backup_name),
+            #     so the process died AFTER the engine's first save.
+            #   * orphan_trigger_due — only the scheduler's in-flight
+            #     marker survived, so the process died BEFORE the engine
+            #     ran (or before its first save). Here last_backup_completed
+            #     is still True (crash_recovery_due cannot see it) yet
+            #     last_trigger was already advanced, so the schedule slot
+            #     is burned and _is_due returns False. This is the
+            #     02/06/2026 incident: a 13:05 startup trigger for
+            #     'crypter' advanced last_trigger, the PC went off before
+            #     the engine ran, and the 18:26 relaunch silently skipped
+            #     it while the two other profiles ran.
+            #
             # Circuit breaker: after MAX_CRASH_RECOVERY_ATTEMPTS
             # consecutive failures we stop auto-retrying to avoid a
             # boot-loop on broken storage. The user can always re-run
@@ -427,10 +512,13 @@ class InAppScheduler:
                 and bool(profile.incomplete_backup_name)
                 and profile.crash_recovery_attempts < MAX_CRASH_RECOVERY_ATTEMPTS
             )
-            if (
-                not profile.last_backup_completed
-                and profile.crash_recovery_attempts >= MAX_CRASH_RECOVERY_ATTEMPTS
-            ):
+            orphan_trigger_due = (
+                inflight is not None
+                and profile.crash_recovery_attempts < MAX_CRASH_RECOVERY_ATTEMPTS
+            )
+            recovery_pending = (not profile.last_backup_completed) or (inflight is not None)
+            breaker_tripped = profile.crash_recovery_attempts >= MAX_CRASH_RECOVERY_ATTEMPTS
+            if recovery_pending and breaker_tripped:
                 logger.warning(
                     "Crash recovery circuit breaker TRIPPED for '%s' "
                     "after %d attempts — manual intervention required",
@@ -438,14 +526,20 @@ class InAppScheduler:
                     profile.crash_recovery_attempts,
                 )
 
-            if crash_recovery_due or self._is_due(profile, now):
-                reason = "crash recovery" if crash_recovery_due else "missed schedule"
+            forced_recovery = crash_recovery_due or orphan_trigger_due
+            if forced_recovery or self._is_due(profile, now):
+                if crash_recovery_due:
+                    reason = "crash recovery"
+                elif orphan_trigger_due:
+                    reason = "orphaned trigger (previous run died in flight)"
+                else:
+                    reason = "missed schedule"
                 logger.info(
                     "Missed backup detected on startup for '%s' (%s) — triggering",
                     profile.name,
                     reason,
                 )
-                if crash_recovery_due:
+                if forced_recovery:
                     # Increment BEFORE the trigger so a crash during
                     # the trigger still bumps the counter on disk.
                     profile.crash_recovery_attempts += 1
@@ -595,6 +689,17 @@ class InAppScheduler:
 
         # Callback runs OUTSIDE the lock (can take minutes)
         try:
+            # Persist an in-flight marker now that we own the run slot,
+            # so a process death ANYWHERE in the callback (PC powered
+            # off, OS sleep, hard crash) leaves on-disk evidence that
+            # this trigger never finished. ``last_trigger`` was already
+            # advanced above, which makes the schedule slot look
+            # consumed; without this marker a death before the engine's
+            # first save (the only moment ``last_backup_completed`` flips
+            # to False) leaves no signal for the startup catch-up. That
+            # gap is the 02/06/2026 incident. Cleared in the finally
+            # block, which only runs if the process survives.
+            self._state.set_inflight(profile.id, now)
             self._backup_callback(profile)
             with self._op_lock:
                 self._journal.update_last(
@@ -650,6 +755,11 @@ class InAppScheduler:
         finally:
             with self._in_progress_lock:
                 self._profile_in_progress.discard(profile.id)
+            # Reaching this finally proves the process survived the run,
+            # whatever its outcome (success or handled failure). Clear
+            # the in-flight marker so the next startup does NOT mistake a
+            # cleanly-finished run for a die-in-flight and re-trigger it.
+            self._state.clear_inflight(profile.id)
 
     def _retry_backup(self, profile: BackupProfile, trigger: str) -> None:
         """Retry a failed backup using configured delay intervals.

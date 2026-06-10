@@ -50,6 +50,21 @@ def is_backup_sidecar(name: str) -> bool:
     return name.endswith(BACKUP_SIDECAR_SUFFIXES)
 
 
+def backup_base_name(name: str) -> str:
+    """Return the base backup name that a ``.wbcommit`` marker binds to.
+
+    The commit marker for a backup is uploaded as ``<base>.wbcommit`` — a
+    sibling of the backup. For an encrypted single-file backup the artefact
+    is ``<base>.tar.wbenc``, so the encrypted suffix is stripped to recover
+    the base the marker is named after; a plain directory backup is its own
+    base. Used by the remote backends' ``list_backups`` to match a backup
+    against its commit marker.
+    """
+    if name.endswith(".tar.wbenc"):
+        return name[: -len(".tar.wbenc")]
+    return name
+
+
 def long_path_str(path: Path) -> str:
     """Return a Windows extended-length path string if needed.
 

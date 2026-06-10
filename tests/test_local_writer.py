@@ -809,3 +809,43 @@ class TestWriteFlatVanishedSource:
         # No skipped_out passed — must still tolerate the vanished source.
         backup_dir = write_flat([present, gone], tmp_path / "dest2", "Bk_FULL_y")
         assert (backup_dir / "a.txt").exists()
+
+
+class TestBackupBelongsToProfile:
+    """Strict name-boundary ownership — a sibling profile whose sanitized
+    name extends this one must NOT be matched (M05: prevents one profile's
+    rotation from deleting another's backups on a shared destination)."""
+
+    def test_own_full_backup_matches(self):
+        from src.core.phases.local_writer import backup_belongs_to_profile
+
+        assert backup_belongs_to_profile("My_Backup_FULL_2026-01-01_120000", "My Backup")
+
+    def test_own_diff_backup_matches(self):
+        from src.core.phases.local_writer import backup_belongs_to_profile
+
+        assert backup_belongs_to_profile("My_Backup_DIFF_2026-01-01_120000", "My Backup")
+
+    def test_encrypted_archive_matches(self):
+        from src.core.phases.local_writer import backup_belongs_to_profile
+
+        assert backup_belongs_to_profile(
+            "My_Backup_FULL_2026-01-01_120000.tar.wbenc", "My Backup"
+        )
+
+    def test_sibling_extending_name_does_not_match(self):
+        from src.core.phases.local_writer import backup_belongs_to_profile
+
+        # "My Backup" (prefix "My_Backup_") must NOT own "My Backup v2"'s backup.
+        assert not backup_belongs_to_profile("My_Backup_v2_FULL_2026-01-01_120000", "My Backup")
+
+    def test_unrelated_name_does_not_match(self):
+        from src.core.phases.local_writer import backup_belongs_to_profile
+
+        assert not backup_belongs_to_profile("Other_FULL_2026-01-01_120000", "My Backup")
+
+    def test_prefix_without_type_marker_does_not_match(self):
+        from src.core.phases.local_writer import backup_belongs_to_profile
+
+        # Bare prefix with no FULL/DIFF+timestamp is not a backup of ours.
+        assert not backup_belongs_to_profile("My_Backup_something_else", "My Backup")

@@ -27,6 +27,7 @@ from typing import BinaryIO
 from src.storage._fs_utils import safe_remove_tree
 from src.storage.base import (
     StorageBackend,
+    backup_base_name,
     is_backup_sidecar,
     long_path_mkdir,
     long_path_str,
@@ -1052,6 +1053,18 @@ class SFTPStorage(StorageBackend):
             sftp = self._get_sftp(transport)
             try:
                 entries = sftp.listdir_attr(self._remote_path)
+                # Collect the commit markers present so partial / uncommitted
+                # backups can be excluded (mirrors LocalStorage, which only
+                # lists backups with a valid .wbcommit). Without this an
+                # interrupted upload was listed as restorable, rotated, and
+                # "verified". The filter is applied ONLY when the directory
+                # actually uses markers — a legacy directory with none shows
+                # every entry unchanged, so no genuine backup is ever hidden.
+                committed_bases = {
+                    e.filename[: -len(".wbcommit")]
+                    for e in entries
+                    if e.filename.endswith(".wbcommit")
+                }
                 backups = []
                 for entry in entries:
                     if entry.filename.startswith("."):
@@ -1059,6 +1072,9 @@ class SFTPStorage(StorageBackend):
                     # Skip every known sidecar (manifest, commit marker,
                     # server-hashes sidecar, partial upload trail).
                     if is_backup_sidecar(entry.filename):
+                        continue
+                    if committed_bases and backup_base_name(entry.filename) not in committed_bases:
+                        # Uncommitted / partial — not a real backup.
                         continue
                     is_dir = stat.S_ISDIR(entry.st_mode) if entry.st_mode else False
                     size = entry.st_size or 0

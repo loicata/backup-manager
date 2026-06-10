@@ -685,3 +685,60 @@ class TestBuildBackupHtml:
                 break
         assert "Statistics" in html_body
         assert "1,234" in html_body
+
+
+class TestSMTPFailuresAreLogged:
+    """SMTP auth/connect failures must be logged, not silent (M38).
+
+    The auth and connect branches used to return a (False, msg) tuple
+    that callers routinely discarded — with no log line, an expired
+    app-password killed every notification invisibly."""
+
+    def _config(self):
+        from src.core.config import EmailConfig
+
+        return EmailConfig(
+            enabled=True,
+            smtp_host="smtp.example.com",
+            smtp_port=587,
+            use_tls=True,
+            username="user@example.com",
+            password="app-pw",
+            from_address="user@example.com",
+            to_address="dest@example.com",
+        )
+
+    def test_auth_error_is_logged(self, caplog):
+        import logging
+        import smtplib
+        from unittest.mock import patch
+
+        from src.notifications.email_notifier import _send_email
+
+        with patch("src.notifications.email_notifier.smtplib.SMTP") as mock_smtp:
+            server = mock_smtp.return_value.__enter__.return_value
+            server.login.side_effect = smtplib.SMTPAuthenticationError(535, b"Bad credentials")
+            with caplog.at_level(logging.ERROR, logger="src.notifications.email_notifier"):
+                ok, msg = _send_email(self._config(), "subj", "<p>x</p>")
+
+        assert ok is False
+        assert "authentication" in msg.lower()
+        assert any("authentication failed" in r.getMessage().lower() for r in caplog.records)
+
+    def test_connect_error_is_logged(self, caplog):
+        import logging
+        import smtplib
+        from unittest.mock import patch
+
+        from src.notifications.email_notifier import _send_email
+
+        with patch(
+            "src.notifications.email_notifier.smtplib.SMTP",
+            side_effect=smtplib.SMTPConnectError(421, "cannot connect"),
+        ):
+            with caplog.at_level(logging.ERROR, logger="src.notifications.email_notifier"):
+                ok, msg = _send_email(self._config(), "subj", "<p>x</p>")
+
+        assert ok is False
+        assert "connect" in msg.lower()
+        assert any("connect failed" in r.getMessage().lower() for r in caplog.records)

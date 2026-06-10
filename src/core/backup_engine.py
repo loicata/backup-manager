@@ -43,7 +43,11 @@ from src.core.phases.filter import (
     load_manifest,
     save_manifest,
 )
-from src.core.phases.local_writer import generate_backup_name, sanitize_profile_name
+from src.core.phases.local_writer import (
+    backup_belongs_to_profile,
+    generate_backup_name,
+    sanitize_profile_name,
+)
 from src.core.phases.manifest import (
     build_integrity_manifest,
     save_integrity_manifest,
@@ -152,14 +156,14 @@ def _count_profile_backups(backups: list[dict], profile_name: str) -> int:
             for transient states where the engine has no profile yet.
 
     Returns:
-        Number of entries whose ``name`` starts with the sanitised
-        profile prefix (``sanitize_profile_name(profile_name) + "_"``).
-        Entries missing a ``name`` key are silently ignored.
+        Number of entries that belong to ``profile_name`` per the strict
+        name-boundary match in ``backup_belongs_to_profile`` (so a sibling
+        profile whose name extends this one is not counted). Entries
+        missing a ``name`` key are silently ignored.
     """
     if not profile_name:
         return len(backups)
-    prefix = sanitize_profile_name(profile_name) + "_"
-    return sum(1 for b in backups if b.get("name", "").startswith(prefix))
+    return sum(1 for b in backups if backup_belongs_to_profile(b.get("name", ""), profile_name))
 
 
 def _resolve_local_destination(storage: StorageConfig) -> str:
@@ -1428,13 +1432,40 @@ class BackupEngine:
                 raise RuntimeError(msg)
 
         elif is_local_encrypted:
-            # Reference hash already registered above. Just emit the
-            # post-backup OK log for parity with the pre-3.7.43 user
-            # experience when ``auto_verify=True``.
+            # auto_verify is ON → ACTUALLY authenticate the archive
+            # (decrypt-stream, per-chunk AES-256-GCM + trailing HMAC) rather
+            # than just stat-ing its size. The old code logged
+            # "GCM-authenticated" while decrypting nothing — verification
+            # was theatre and a corrupt archive passed. The reference hash
+            # for periodic checks was already registered above.
+            self._phase("Verifying encrypted archive (decrypting)...")
+            self._check_cancel()
             size = ctx.backup_path.stat().st_size
-            self._log(
-                f"Verification OK: {ctx.backup_path.name} ({size:,} bytes, GCM-authenticated)"
-            )
+            stored_pw = ctx.profile.encryption.stored_password
+            if stored_pw:
+                from src.security.encryption import verify_encrypted_archive
+
+                secure_pw = SecurePassword(stored_pw)
+                try:
+                    verify_encrypted_archive(
+                        ctx.backup_path,
+                        secure_pw.get(),
+                        cancel_check=self._check_cancel,
+                    )
+                finally:
+                    secure_pw.clear()
+                self._log(
+                    f"Verification OK: {ctx.backup_path.name} "
+                    f"({size:,} bytes, decrypted + GCM/HMAC authenticated)"
+                )
+            else:
+                # No password available to authenticate with — be honest
+                # instead of claiming "GCM-authenticated" on a size check.
+                self._log(
+                    f"Verification limited: {ctx.backup_path.name} "
+                    f"({size:,} bytes present; encryption password unavailable, "
+                    f"content NOT authenticated)"
+                )
 
         elif ctx.backup_remote_name and ctx.backend is not None:
             self._phase("Verifying remote backup (file count + sizes)...")
@@ -1883,8 +1914,25 @@ class BackupEngine:
         is_full = ctx.profile.backup_type == BackupType.FULL or getattr(ctx, "forced_full", False)
         if is_full:
             self._phase("Updating manifest...")
+            # Exclude files that vanished during the run from the delta
+            # manifest. ``ctx.file_hashes`` still carries the hash of a file
+            # that was hashed in the integrity phase and then vanished
+            # before the copy (pruned from ctx.integrity_manifest in
+            # _phase_write), so without this filter build_updated_manifest
+            # would record it as backed up — and a later identical
+            # re-creation would be skipped by EVERY future differential,
+            # silently dropping the file from all incremental backups.
+            skipped_paths = {
+                entry.get("path")
+                for entry in ctx.integrity_manifest.get("skipped_files", [])
+            }
+            delta_files = (
+                [f for f in ctx.all_files if f.relative_path not in skipped_paths]
+                if skipped_paths
+                else ctx.all_files
+            )
             full_manifest = build_updated_manifest(
-                ctx.all_files, ctx.file_hashes, cancel_check=self._check_cancel
+                delta_files, ctx.file_hashes, cancel_check=self._check_cancel
             )
             full_manifest["__metadata__"] = {
                 "backup_name": ctx.backup_name,
@@ -1934,6 +1982,9 @@ class BackupEngine:
                     integrity_manifest=ctx.integrity_manifest,
                     apply_throttle=lambda backend, label: (
                         self._apply_bandwidth_throttle(backend, ctx.profile, label)
+                    ),
+                    apply_object_lock=lambda backend, config: (
+                        self._apply_object_lock_to_mirror(backend, config, ctx)
                     ),
                     allow_partial=ctx.profile.object_lock_enabled,
                 )
@@ -2492,6 +2543,36 @@ class BackupEngine:
                 f"Object Lock: {tag} backup locked for {lock_days} days "
                 f"(until {retain_until.strftime('%Y-%m-%d')})"
             )
+
+    def _apply_object_lock_to_mirror(self, backend, config, ctx: PipelineContext) -> None:
+        """Apply per-object Object Lock retention to a mirror backend.
+
+        The primary path (:meth:`_apply_object_lock_retention`) only ever set
+        retain-until on ``ctx.backend``, so an S3 mirror configured as an
+        Object Lock bucket received NO per-object retention — its archive
+        was uploaded with only the bucket default (or none), silently
+        breaking the anti-ransomware guarantee the user configured. This
+        sets retention per-mirror, computed from THAT mirror's own lock
+        settings, and only when the mirror is actually an Object Lock S3
+        bucket (so a plain mirror bucket is never sent a retain-until that
+        S3 would reject). Called before each upload attempt, since the retry
+        loop rebuilds the backend.
+        """
+        from datetime import timedelta
+
+        from src.core.config import StorageType
+
+        is_object_lock_mirror = (
+            config.storage_type == StorageType.S3 and getattr(config, "s3_object_lock", False)
+        )
+        if not is_object_lock_mirror or not hasattr(backend, "set_retain_until"):
+            return
+
+        lock_days = config.s3_object_lock_days
+        is_full = ctx.profile.backup_type == BackupType.FULL or getattr(ctx, "forced_full", False)
+        if is_full:
+            lock_days += config.s3_object_lock_full_extra_days
+        backend.set_retain_until(datetime.now(UTC) + timedelta(days=lock_days))
 
     def _get_backend(self, storage: StorageConfig) -> StorageBackend:
         """Create a storage backend from config.

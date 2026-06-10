@@ -83,6 +83,7 @@ def mirror_backup(
     cancel_check: Callable[[], None] | None = None,
     integrity_manifest: dict | None = None,
     apply_throttle: Callable | None = None,
+    apply_object_lock: Callable | None = None,
     allow_partial: bool = False,
 ) -> list[tuple[str, bool, str]]:
     """Upload backup to mirror destinations.
@@ -161,6 +162,13 @@ def mirror_backup(
                 # Enable responsive cancel during uploads
                 if cancel_check is not None:
                     backend.set_cancel_check(cancel_check)
+
+                # Apply per-object Object Lock retention BEFORE the upload so
+                # the mirror archive carries the same anti-ransomware lock the
+                # primary does. Done on every attempt because the retry above
+                # rebuilds the backend (a fresh instance has no retain-until).
+                if apply_object_lock is not None:
+                    apply_object_lock(backend, config)
 
                 # Apply bandwidth throttle if configured. Only on the
                 # first attempt: re-measuring on retry would burn ~30 s

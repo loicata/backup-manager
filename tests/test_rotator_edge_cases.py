@@ -794,3 +794,27 @@ class TestPartialDeleteHandling:
             PhaseLogger("rotator", events=None),
         )
         assert deleted == 0
+
+
+class TestRotationProfileBoundary:
+    """A profile's rotation must never touch a sibling profile whose
+    sanitized name extends this one (M05 — shared-destination data loss)."""
+
+    def test_sibling_profile_backups_never_deleted(self):
+        # "My Backup" (prefix "My_Backup_") and "My Backup v2" share a dest.
+        # Aggressive retention (keep 1) would delete all-but-newest of the
+        # OWNED set — it must not reach into the sibling's backups at all.
+        backups = [
+            _backup("My_Backup_FULL_2026-01-01_120000", datetime(2026, 1, 1, 12, 0)),
+            _backup("My_Backup_FULL_2026-02-01_120000", datetime(2026, 2, 1, 12, 0)),
+            _backup("My_Backup_v2_FULL_2026-01-01_120000", datetime(2026, 1, 1, 12, 0)),
+            _backup("My_Backup_v2_FULL_2026-02-01_120000", datetime(2026, 2, 1, 12, 0)),
+        ]
+        backend = _make_backend(backups)
+        retention = RetentionConfig(gfs_daily=1, gfs_weekly=0, gfs_monthly=0)
+
+        rotate_backups(backend, retention, profile_name="My Backup")
+
+        deleted = {c.args[0] for c in backend.delete_backup.call_args_list}
+        # Whatever was rotated, NOTHING belonging to "My Backup v2" may be deleted.
+        assert not any(n.startswith("My_Backup_v2_") for n in deleted)

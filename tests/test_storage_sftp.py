@@ -234,3 +234,82 @@ class TestSFTPStorageWithMock:
             assert storage._join_remote("backup1") == "/home/testuser/backups/backup1"
         finally:
             self._cleanup_paramiko()
+
+
+class TestSFTPListBackupsCommitFilter:
+    """list_backups must hide uncommitted/partial backups when the remote
+    directory uses commit markers (mirrors LocalStorage) — but show all
+    entries in a legacy directory that has no markers at all."""
+
+    def _setup_mock_paramiko(self):
+        mp = MagicMock()
+        for n in ("Ed25519Key", "ECDSAKey", "RSAKey"):
+            setattr(mp, n, MagicMock())
+            getattr(mp, n).__name__ = n
+        mp.Transport = MagicMock()
+        mp.SFTPClient = MagicMock()
+        mp.HostKeys = MagicMock
+        sys.modules["paramiko"] = mp
+        sys.modules["paramiko.hostkeys"] = MagicMock()
+        return mp
+
+    def _cleanup(self):
+        sys.modules.pop("paramiko", None)
+        sys.modules.pop("paramiko.hostkeys", None)
+
+    def _storage(self):
+        from src.storage.sftp import SFTPStorage
+
+        s = SFTPStorage(
+            host="h", port=22, username="u", password="p", remote_path="/backups"
+        )
+        s._verify_host_key = lambda transport: None
+        s._persistent_transport = None
+        return s
+
+    @staticmethod
+    def _entry(name, is_dir):
+        import stat as stat_mod
+
+        e = MagicMock()
+        e.filename = name
+        e.st_mode = (stat_mod.S_IFDIR | 0o755) if is_dir else (stat_mod.S_IFREG | 0o644)
+        e.st_size = 100
+        e.st_mtime = 1000
+        return e
+
+    def _run(self, entries):
+        storage = self._storage()
+        sftp = MagicMock()
+        sftp.listdir_attr.return_value = entries
+        storage._get_transport = MagicMock(return_value=MagicMock())
+        storage._get_sftp = MagicMock(return_value=sftp)
+        storage._remote_dir_size = MagicMock(return_value=12345)
+        return {b["name"] for b in storage.list_backups()}
+
+    def test_uncommitted_dir_hidden(self):
+        self._setup_mock_paramiko()
+        try:
+            names = self._run(
+                [
+                    self._entry("Good_FULL_2026-01-01_000000", True),
+                    self._entry("Good_FULL_2026-01-01_000000.wbcommit", False),
+                    self._entry("Partial_FULL_2026-01-02_000000", True),  # no marker
+                ]
+            )
+            assert names == {"Good_FULL_2026-01-01_000000"}
+        finally:
+            self._cleanup()
+
+    def test_legacy_dir_without_markers_shows_all(self):
+        self._setup_mock_paramiko()
+        try:
+            names = self._run(
+                [
+                    self._entry("A_FULL_2026-01-01_000000", True),
+                    self._entry("B_FULL_2026-01-02_000000", True),
+                ]
+            )
+            assert names == {"A_FULL_2026-01-01_000000", "B_FULL_2026-01-02_000000"}
+        finally:
+            self._cleanup()

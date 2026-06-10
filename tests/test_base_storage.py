@@ -272,3 +272,25 @@ class TestWithRetry:
 
         assert call_count[0] == 1, "FileNotFoundError must not retry"
         assert elapsed < 1.0, "FileNotFoundError must surface immediately"
+
+
+class TestBackupBaseName:
+    """backup_base_name maps a backup artefact to the base its .wbcommit
+    marker is named after."""
+
+    def test_plain_dir_is_its_own_base(self):
+        from src.storage.base import backup_base_name
+
+        assert backup_base_name("My_Backup_FULL_2026-01-01_000000") == "My_Backup_FULL_2026-01-01_000000"
+
+    def test_encrypted_archive_strips_suffix(self):
+        from src.storage.base import backup_base_name
+
+        assert backup_base_name("My_Backup_FULL_2026-01-01_000000.tar.wbenc") == "My_Backup_FULL_2026-01-01_000000"
+
+    def test_wbcommit_marker_matches_both(self):
+        from src.storage.base import backup_base_name
+
+        base = "Bk_FULL_2026-01-01_000000"
+        assert backup_base_name(base) == base
+        assert backup_base_name(base + ".tar.wbenc") == base

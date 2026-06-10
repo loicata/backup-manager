@@ -742,3 +742,65 @@ class TestWizardProProfile:
 
         loaded = mgr.get_all_profiles()[0]
         assert loaded.storage.s3_speedtest_bucket == "main-bucket-speedtest"
+
+
+class TestMirrorObjectLockRetention:
+    """Per-object Object Lock retention must be applied to S3 Object-Lock
+    MIRRORS too, not just the primary (M32)."""
+
+    def _engine(self):
+        from src.core.backup_engine import BackupEngine
+
+        return BackupEngine.__new__(BackupEngine)
+
+    def _ctx(self, *, is_full=True):
+        from unittest.mock import MagicMock
+
+        from src.core.config import BackupType
+
+        ctx = MagicMock()
+        ctx.profile.backup_type = BackupType.FULL if is_full else BackupType.DIFFERENTIAL
+        ctx.forced_full = False
+        return ctx
+
+    def test_retention_applied_to_object_lock_mirror(self):
+        from unittest.mock import MagicMock
+
+        from src.core.config import StorageConfig, StorageType
+
+        engine = self._engine()
+        backend = MagicMock()
+        config = StorageConfig(
+            storage_type=StorageType.S3,
+            s3_bucket="mirror-bkt",
+            s3_object_lock=True,
+            s3_object_lock_days=120,
+            s3_object_lock_full_extra_days=30,
+        )
+        engine._apply_object_lock_to_mirror(backend, config, self._ctx(is_full=True))
+        backend.set_retain_until.assert_called_once()
+
+    def test_no_retention_on_plain_s3_mirror(self):
+        from unittest.mock import MagicMock
+
+        from src.core.config import StorageConfig, StorageType
+
+        engine = self._engine()
+        backend = MagicMock()
+        config = StorageConfig(
+            storage_type=StorageType.S3, s3_bucket="mirror-bkt", s3_object_lock=False
+        )
+        engine._apply_object_lock_to_mirror(backend, config, self._ctx())
+        # A non-Object-Lock bucket must NOT be sent a retain-until (S3 would reject).
+        backend.set_retain_until.assert_not_called()
+
+    def test_no_retention_on_local_mirror(self):
+        from unittest.mock import MagicMock
+
+        from src.core.config import StorageConfig, StorageType
+
+        engine = self._engine()
+        backend = MagicMock()
+        config = StorageConfig(storage_type=StorageType.LOCAL, destination_path="/x")
+        engine._apply_object_lock_to_mirror(backend, config, self._ctx())
+        backend.set_retain_until.assert_not_called()

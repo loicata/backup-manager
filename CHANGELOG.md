@@ -5,6 +5,41 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.51] - 2026-06-10
+
+Batch fix of 13 medium-severity findings from the 2026-06-10 deep audit — the data-compromise
+subset plus the scheduling-reliability and security twins of earlier fixes. Full suite:
+2681 passed, 28 skipped, 93% coverage.
+
+### Fixed — backup integrity
+- **"Verification OK (GCM-authenticated)" for local encrypted backups authenticated nothing.** When post-backup verification is enabled, the ``.tar.wbenc`` archive is now actually streamed through the decryptor (per-chunk AES-256-GCM tags + trailing HMAC, new ``encryption.verify_encrypted_archive``) — a corrupt, truncated, or tampered archive now fails verification instead of passing on a size ``stat``. When no password is available, the log is honest about what was checked.
+- **The differential reference manifest recorded vanished files as backed up.** A file that vanished mid-write was pruned from the backup (3.7.50) but still entered the delta manifest via ``ctx.file_hashes`` — an identical re-creation was then skipped by every future differential, silently never backed up. ``_phase_update_delta`` now excludes ``skipped_files`` entries.
+- **Remote backends ignored ``.wbcommit`` entirely.** SFTP and S3 ``list_backups`` now hide uncommitted/partial backups when the remote directory uses commit markers (matching ``LocalStorage``), so an interrupted upload can no longer be listed as restorable, rotated, or "verified". Legacy directories without any marker still list everything (no genuine backup is hidden). New shared helper ``base.backup_base_name``.
+- **Periodic remote verification said "ok" for an empty or missing backup** (inode-size fallback). Already hardened in 3.7.50; this release extends the same emptiness rules to the encrypted-archive branch (zero-byte archive → ``missing``).
+
+### Fixed — secrets / profiles
+- **A transient DPAPI failure destroyed stored secrets on the next save.** ``_unprotect_secrets`` now returns the original encrypted blobs of fields that failed to decrypt; ``save_profile`` writes those blobs back verbatim instead of re-encrypting the empty placeholder. When DPAPI recovers, the secret decrypts again — nothing is lost.
+- **A NETWORK profile vanished permanently after a DPAPI failure.** ``StorageConfig.validate()`` no longer requires the *decrypted* ``network_password`` (a runtime secret): a decryption failure no longer classifies the profile as "corrupted" (which also defeated the ``.bak`` fallback, identically encrypted). Structural fields (destination, username) are still validated; password presence is enforced at UI-input time.
+
+### Fixed — rotation
+- **One profile's rotation could delete another profile's backups on a shared destination.** The rotation/count filter was a bare name prefix, so "My Backup" (prefix ``My_Backup_``) matched "My Backup v2" backups. Replaced with a strict ``<name>_(FULL|DIFF)_<timestamp>`` name-boundary match (new ``local_writer.backup_belongs_to_profile``), used by both the rotator and the post-backup "backups available" count.
+
+### Fixed — scheduling reliability
+- **Missed WEEKLY/MONTHLY slots were never caught up.** ``_is_due`` hard-gated on the exact scheduled day, so a slot missed because the PC was off that day was skipped for the whole week/month. It now compares the last trigger to the most recent scheduled occurrence (new ``_most_recent_weekly`` / ``_most_recent_monthly``), catching up a missed slot on the next launch without suppressing the next on-schedule run.
+- **A torn scheduler-state write reset all state and mass-retriggered every profile.** ``scheduler_state.json`` / ``schedule_journal.json`` were written non-atomically and reset to empty on any parse error, losing every ``last_trigger`` (so ``_is_due`` then saw ``last=None`` and fired every profile). Writes are now atomic (``.bak`` + fsync'd ``.tmp`` + ``os.replace``) and load falls back to ``.bak`` before resetting.
+- **A clean app exit during a retry wait permanently abandoned the failed backup.** The in-flight marker was always cleared in ``_trigger_backup``'s finally. ``_retry_backup`` now reports whether retries were aborted by shutdown, and the marker is preserved in that case so the next startup catch-up re-runs the backup.
+
+### Fixed — security
+- **Path traversal on S3 directory restore.** ``download_backup`` wrote each object by key with no containment check; a malicious key (``../``, absolute) escaped the restore directory. Added the same resolved-path containment guard as the SFTP tar-slip fix (3.7.50).
+- **Object Lock retention was never applied to S3 mirrors.** Retain-until was set only on the primary backend, so an Object-Lock mirror bucket got no per-object retention. A per-mirror ``apply_object_lock`` callback now applies it — only on Object-Lock mirror buckets, so a plain mirror bucket is never sent a retain-until S3 would reject.
+
+### Fixed — notifications
+- **SMTP authentication and connection failures were completely silent.** Those two branches returned a tuple callers routinely discarded, with no log line, so an expired app-password killed every notification invisibly. Both now log at ERROR.
+
+### Tests
+- +69 tests across encrypted-archive authentication, delta-manifest pruning, remote commit-marker filtering, secret-decryption resilience, rotation name boundaries, retry-abort marker preservation, S3 restore traversal, mirror Object-Lock, weekly/monthly catch-up, atomic scheduler state, and SMTP failure logging.
+- Full suite: 2681 passed, 0 failed, 28 skipped, 92.96% coverage.
+
 ## [3.7.50] - 2026-06-10
 
 Batch fix of the 13 highest-priority "high" findings from the 2026-06-10 deep audit

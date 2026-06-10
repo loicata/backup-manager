@@ -1007,3 +1007,61 @@ class TestRecordSkippedFiles:
         engine._record_skipped_files(ctx)
         assert ctx.result.warnings == 0
         assert ctx.result.files_processed == 7  # untouched
+
+
+# ---------------------------------------------------------------------------
+# _phase_update_delta — vanished files excluded from the delta manifest (M01)
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaManifestExcludesVanished:
+    """A file that vanished mid-write must NOT be recorded as backed up in
+    the differential reference manifest — otherwise an identical re-creation
+    is skipped by every future differential and silently never backed up."""
+
+    def test_skipped_files_excluded_from_delta_manifest(self, tmp_path) -> None:
+        import json
+
+        from src.core.config import BackupType
+        from src.core.phases.collector import FileInfo
+
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "keep.txt").write_text("keep", encoding="utf-8")
+        (src / "vanished.txt").write_text("was here", encoding="utf-8")
+
+        def fi(name: str) -> FileInfo:
+            p = src / name
+            return FileInfo(
+                source_path=p,
+                relative_path=name,
+                size=p.stat().st_size,
+                mtime=0.0,
+                source_root=str(src),
+            )
+
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        engine._check_cancel = MagicMock()
+
+        manifest_path = tmp_path / "manifest.json"
+        ctx = _make_ctx()
+        ctx.config_manager.get_manifest_path = MagicMock(return_value=manifest_path)
+        ctx.profile.backup_type = BackupType.FULL
+        ctx.forced_full = False
+        ctx.all_files = [fi("keep.txt"), fi("vanished.txt")]
+        # file_hashes still carries the vanished file (it was hashed in the
+        # integrity phase, then vanished before the copy).
+        ctx.file_hashes = {"keep.txt": "h_keep", "vanished.txt": "h_gone"}
+        ctx.integrity_manifest = {
+            "files": {"keep.txt": {"hash": "h_keep", "size": 4}},
+            "total_checksum": "x",
+            "skipped_files": [{"path": "vanished.txt", "reason": "vanished_during_write"}],
+        }
+
+        engine._phase_update_delta(ctx)
+
+        saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+        files = saved.get("files", saved)  # tolerate either shape
+        assert "keep.txt" in files
+        assert "vanished.txt" not in files

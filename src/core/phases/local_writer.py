@@ -26,6 +26,7 @@ pool4 — 4 is the empirical sweet spot for the HDD spindle head.
 
 import logging
 import os
+import re
 import shutil
 import tarfile
 import threading
@@ -446,6 +447,25 @@ def sanitize_profile_name(profile_name: str) -> str:
     if not safe:
         raise ValueError(f"Profile name produces empty sanitized result: {profile_name!r}")
     return safe
+
+
+def backup_belongs_to_profile(backup_name: str, profile_name: str) -> bool:
+    """True if ``backup_name`` is a backup produced for ``profile_name``.
+
+    Anchors on ``<sanitized>_<FULL|DIFF>_<YYYY-MM-DD>_<HHMMSS>`` at the START
+    of the name (the shape ``generate_backup_name`` produces), so a sibling
+    profile whose sanitized name merely EXTENDS this one is NOT matched:
+    profile "My Backup" (prefix ``My_Backup_``) must not own
+    ``My_Backup_v2_FULL_...``. A plain ``startswith(prefix)`` check matched
+    it, so one profile's rotation deleted another profile's backups on a
+    shared destination, and the post-backup "backups available" count was
+    inflated. An empty ``profile_name`` disables the filter (returns True).
+    """
+    if not profile_name:
+        return True
+    sanitized = sanitize_profile_name(profile_name)
+    pattern = rf"^{re.escape(sanitized)}_(?:FULL|DIFF)_\d{{4}}-\d{{2}}-\d{{2}}_\d{{6}}"
+    return re.match(pattern, backup_name) is not None
 
 
 def generate_backup_name(profile_name: str, backup_type: str = "FULL") -> str:

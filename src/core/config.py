@@ -168,8 +168,14 @@ class StorageConfig:
                 raise ValueError("destination_path is required for network storage")
             if not self.network_username or not self.network_username.strip():
                 raise ValueError("network_username is required for network storage")
-            if not self.network_password or not self.network_password.strip():
-                raise ValueError("network_password is required for network storage")
+            # NOTE: ``network_password`` is intentionally NOT validated here.
+            # It is a DPAPI-protected secret decrypted at load time; a
+            # transient DPAPI failure empties it (see _unprotect_secrets),
+            # and requiring it would then classify the whole profile as
+            # "corrupted", defeat the .bak fallback (which fails identically),
+            # and make the profile VANISH permanently. The password's
+            # presence is enforced at UI-input time, not by this validator
+            # that also runs on every load. Structural fields only here.
 
         elif st == StorageType.SFTP:
             if not self.sftp_host or not self.sftp_host.strip():
@@ -523,7 +529,8 @@ class ConfigManager:
             mirror.validate_unless_placeholder()
 
         data = self._profile_to_dict(profile)
-        self._protect_secrets(data)
+        preserve = getattr(profile, "_undecryptable_secrets", None) or {}
+        self._protect_secrets(data, preserve=preserve)
 
         filepath = self.profiles_dir / f"{profile.id}.json"
         self._atomic_write(filepath, data)
@@ -688,8 +695,16 @@ class ConfigManager:
     def _load_profile_file(self, path: Path) -> BackupProfile:
         """Load and deserialize a single profile file."""
         data = json.loads(path.read_text(encoding="utf-8"))
-        self._unprotect_secrets(data)
-        return self._dict_to_profile(data)
+        failures = self._unprotect_secrets(data)
+        profile = self._dict_to_profile(data)
+        # Carry the original encrypted blobs of any secret that failed to
+        # decrypt so save_profile can write them back rather than persisting
+        # the empty placeholder (transient DPAPI outage must not destroy a
+        # stored secret). Runtime-only attribute — not a dataclass field, so
+        # asdict()/_profile_to_dict never serialises it.
+        if failures:
+            profile._undecryptable_secrets = failures
+        return profile
 
     def _profile_to_dict(self, profile: BackupProfile) -> dict:
         """Serialize a BackupProfile to a plain dict."""
@@ -758,8 +773,16 @@ class ConfigManager:
 
         return self._safe_construct(BackupProfile, data)
 
-    def _protect_secrets(self, data: dict) -> None:
+    def _protect_secrets(self, data: dict, preserve: dict[str, str] | None = None) -> None:
         """Encrypt sensitive fields in profile dict before save.
+
+        Args:
+            data: The profile dict to mutate in place.
+            preserve: Optional mapping of ``<path>`` → original encrypted
+                blob for secrets that failed to decrypt at load. For such a
+                field, if the in-memory value is empty, the original blob is
+                written back verbatim (NOT re-encrypted) so a transient DPAPI
+                outage does not destroy the stored secret on save.
 
         Raises:
             SecretsProtectionError: If any secret cannot be encrypted.
@@ -767,16 +790,22 @@ class ConfigManager:
                 the plaintext to disk would defeat the whole point of
                 the encrypted-at-rest profile format.
         """
+        preserve = preserve or {}
 
-        def _encrypt(container: dict, key: str, field_label: str) -> None:
+        def _encrypt(container: dict, key: str, path: str) -> None:
+            # Restore a preserved blob rather than re-encrypting an empty
+            # placeholder left by a failed decrypt at load.
+            if path in preserve and not container.get(key):
+                container[key] = preserve[path]
+                return
             value = container.get(key)
             if not value:
                 return
             try:
                 container[key] = store_password(value)
             except Exception as exc:
-                logger.error("Failed to encrypt secret field %s: %s", field_label, exc)
-                raise SecretsProtectionError(field_label, exc) from exc
+                logger.error("Failed to encrypt secret field %s: %s", path, exc)
+                raise SecretsProtectionError(path, exc) from exc
 
         storage = data.get("storage", {})
         for key in _STORAGE_SECRET_FIELDS:
@@ -784,7 +813,7 @@ class ConfigManager:
 
         for idx, mirror in enumerate(data.get("mirror_destinations", [])):
             for key in _STORAGE_SECRET_FIELDS:
-                _encrypt(mirror, key, f"mirror_destinations[{idx}].{key}")
+                _encrypt(mirror, key, f"mirror.{idx}.{key}")
 
         email = data.get("email", {})
         for key in _EMAIL_SECRET_FIELDS:
@@ -793,42 +822,55 @@ class ConfigManager:
         enc = data.get("encryption", {})
         _encrypt(enc, "stored_password", "encryption.stored_password")
 
-    def _unprotect_secrets(self, data: dict) -> None:
-        """Decrypt sensitive fields in profile dict after load."""
+    def _unprotect_secrets(self, data: dict) -> dict[str, str]:
+        """Decrypt sensitive fields in a profile dict after load.
+
+        A field that fails to decrypt (typically a transient DPAPI outage)
+        is emptied for runtime use, but its ORIGINAL encrypted blob is
+        recorded and returned keyed by path. ``save_profile`` writes that
+        blob back instead of persisting the empty value, so a DPAPI blip
+        can no longer permanently destroy a stored secret on the next save
+        (the field would otherwise be re-encrypted as empty into both
+        ``.json`` and ``.bak``). When DPAPI recovers, the next load decrypts
+        the preserved blob normally.
+
+        Returns:
+            Mapping of ``<path>`` → original encrypted blob for every field
+            whose decryption failed (empty if all secrets decrypted).
+        """
+        failures: dict[str, str] = {}
+
+        def _decrypt(container: dict, key: str, path: str) -> None:
+            blob = container.get(key)
+            if not blob:
+                return
+            try:
+                container[key] = retrieve_password(blob)
+            except Exception:
+                logger.warning(
+                    "Failed to decrypt %s — keeping the on-disk value so it "
+                    "is not lost on the next save",
+                    path,
+                )
+                container[key] = ""
+                failures[path] = blob
+
         storage = data.get("storage", {})
         for key in _STORAGE_SECRET_FIELDS:
-            if storage.get(key):
-                try:
-                    storage[key] = retrieve_password(storage[key])
-                except Exception:
-                    logger.warning("Failed to decrypt storage field %s", key)
-                    storage[key] = ""
+            _decrypt(storage, key, f"storage.{key}")
 
-        for mirror in data.get("mirror_destinations", []):
+        for idx, mirror in enumerate(data.get("mirror_destinations", [])):
             for key in _STORAGE_SECRET_FIELDS:
-                if mirror.get(key):
-                    try:
-                        mirror[key] = retrieve_password(mirror[key])
-                    except Exception:
-                        logger.warning("Failed to decrypt mirror field %s", key)
-                        mirror[key] = ""
+                _decrypt(mirror, key, f"mirror.{idx}.{key}")
 
         email = data.get("email", {})
         for key in _EMAIL_SECRET_FIELDS:
-            if email.get(key):
-                try:
-                    email[key] = retrieve_password(email[key])
-                except Exception:
-                    logger.warning("Failed to decrypt email field %s", key)
-                    email[key] = ""
+            _decrypt(email, key, f"email.{key}")
 
         enc = data.get("encryption", {})
-        if enc.get("stored_password"):
-            try:
-                enc["stored_password"] = retrieve_password(enc["stored_password"])
-            except Exception:
-                logger.warning("Failed to decrypt backup password")
-                enc["stored_password"] = ""
+        _decrypt(enc, "stored_password", "encryption.stored_password")
+
+        return failures
 
     def _atomic_write(self, filepath: Path, data: dict) -> None:
         """Crash-safe write: backup existing → fsync .tmp → os.replace.

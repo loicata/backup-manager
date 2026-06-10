@@ -207,8 +207,22 @@ def _send_email(
         return True, "Email sent successfully"
 
     except smtplib.SMTPAuthenticationError:
+        # Was completely silent (no log, tuple often discarded by the
+        # caller) — an expired app-password then killed every notification
+        # invisibly. Log at ERROR so the failure is diagnosable.
+        logger.error(
+            "SMTP authentication failed for %s on %s — notifications are NOT "
+            "being delivered; check the username / app-password.",
+            config.username,
+            config.smtp_host,
+        )
         return False, "SMTP authentication failed — check username/password"
     except smtplib.SMTPConnectError:
+        logger.error(
+            "SMTP connect failed to %s:%s — notifications are NOT being delivered.",
+            config.smtp_host,
+            config.smtp_port,
+        )
         return False, f"Could not connect to {config.smtp_host}:{config.smtp_port}"
     except smtplib.SMTPRecipientsRefused as e:
         # The recipient (user's notification inbox) was rejected by

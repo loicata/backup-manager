@@ -574,3 +574,61 @@ class TestSaveProfileValidation:
         profile.mirror_destinations = [self._bypass_validation_config(StorageType.SFTP)]
         with pytest.raises(ValueError, match="sftp_host is required"):
             mgr.save_profile(profile)
+
+
+class TestSecretDecryptionFailureResilience:
+    """A transient DPAPI/decryption failure must neither destroy a stored
+    secret on the next save (M11) nor make a NETWORK profile vanish (M12)."""
+
+    def test_failed_decrypt_preserves_secret_across_save(self, tmp_config_dir):
+        from unittest.mock import patch
+
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="S3P")
+        profile.storage = StorageConfig(
+            storage_type=StorageType.S3, s3_bucket="bkt", s3_secret_key="super-secret-key"
+        )
+        mgr.save_profile(profile)
+
+        main = tmp_config_dir / "profiles" / f"{profile.id}.json"
+        original_blob = json.loads(main.read_text(encoding="utf-8"))["storage"]["s3_secret_key"]
+        assert original_blob and original_blob != "super-secret-key"  # stored encrypted
+
+        # Simulate a transient DPAPI outage at load time.
+        with patch("src.core.config.retrieve_password", side_effect=OSError("DPAPI down")):
+            loaded = next(p for p in mgr.get_all_profiles() if p.id == profile.id)
+            # Runtime value is empty (can't decrypt), but the failure is tracked.
+            assert loaded.storage.s3_secret_key == ""
+            assert getattr(loaded, "_undecryptable_secrets", {})
+            # A save while DPAPI is still down must NOT blank the on-disk secret.
+            mgr.save_profile(loaded)
+
+        on_disk = json.loads(main.read_text(encoding="utf-8"))["storage"]["s3_secret_key"]
+        assert on_disk == original_blob  # preserved verbatim, not emptied
+
+        # DPAPI recovers → the secret decrypts again (nothing was lost).
+        recovered = next(p for p in mgr.get_all_profiles() if p.id == profile.id)
+        assert recovered.storage.s3_secret_key == "super-secret-key"
+
+    def test_network_profile_survives_decrypt_failure(self, tmp_config_dir):
+        from unittest.mock import patch
+
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="NetP")
+        profile.storage = StorageConfig(
+            storage_type=StorageType.NETWORK,
+            destination_path="//server/share",
+            network_username="user",
+            network_password="netpass",
+        )
+        mgr.save_profile(profile)
+
+        # DPAPI fails for BOTH the main file and the .bak → before the fix
+        # the profile was classified "corrupted" and vanished entirely.
+        with patch("src.core.config.retrieve_password", side_effect=OSError("DPAPI down")):
+            profiles = mgr.get_all_profiles()
+
+        assert len(profiles) == 1
+        survived = profiles[0]
+        assert survived.storage.storage_type == StorageType.NETWORK
+        assert survived.storage.network_username == "user"  # structural fields intact

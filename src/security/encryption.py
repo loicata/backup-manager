@@ -690,6 +690,50 @@ class DecryptingReader(io.RawIOBase):
         return False
 
 
+def verify_encrypted_archive(path, password: str, cancel_check=None) -> None:
+    """Authenticate a ``.tar.wbenc`` archive end-to-end without extracting.
+
+    Streams the whole file through :class:`DecryptingReader`, discarding the
+    plaintext, then forces the trailing-HMAC check. This validates every
+    chunk's AES-256-GCM tag AND the final HMAC, so a truncated, bit-rotted,
+    tampered, or wrong-password archive raises instead of being silently
+    accepted. Memory use is bounded to one chunk, so it is safe on multi-GB
+    archives.
+
+    This is the real authentication behind the post-backup "Verification OK"
+    for encrypted local backups: the previous code only ``stat``-ed the file
+    size and logged "GCM-authenticated" without decrypting anything.
+
+    Args:
+        path: Path to the ``.tar.wbenc`` file.
+        password: The archive's encryption password.
+        cancel_check: Optional callable that raises to abort the read.
+
+    Raises:
+        ValueError: If decryption or the trailing HMAC fails (corruption,
+            truncation, tamper, or wrong password).
+        OSError: If the file cannot be read.
+    """
+    import contextlib
+    from pathlib import Path
+
+    with open(Path(path), "rb") as source:
+        reader = DecryptingReader(source, password)
+        try:
+            while True:
+                if cancel_check is not None:
+                    cancel_check()
+                chunk = reader.read(1024 * 1024)
+                if not chunk:
+                    break
+            # Belt-and-suspenders: reading to EOF already verified the HMAC,
+            # but call explicitly so a truncated archive surfaces here.
+            reader.verify_complete()
+        finally:
+            with contextlib.suppress(Exception):
+                reader.close()
+
+
 # --- Password storage (DPAPI / AES fallback) ---
 
 

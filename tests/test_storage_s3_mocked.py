@@ -187,3 +187,90 @@ class TestS3TestConnectionProbesWrite:
             backend._probe_write(fake_client, "")
 
         fake_client.delete_object.assert_called_once()
+
+
+class TestS3ListBackupsCommitFilter:
+    """S3 list_backups must hide uncommitted/partial backups when the
+    prefix uses commit markers, and show all in a legacy prefix."""
+
+    def _backend(self):
+        return S3Storage(bucket="b", prefix="", region="us-east-1", access_key="k", secret_key="s")
+
+    def _run(self, page):
+        backend = self._backend()
+        fake_client = MagicMock()
+        fake_paginator = MagicMock()
+        fake_paginator.paginate.return_value = [page]
+        fake_client.get_paginator.return_value = fake_paginator
+        with (
+            patch.object(backend, "_get_client", return_value=fake_client),
+            patch.object(backend, "_get_prefix_stats", return_value=(123, 0.0, False)),
+        ):
+            return {b["name"] for b in backend.list_backups()}
+
+    def test_uncommitted_object_hidden(self):
+        names = self._run(
+            {
+                "Contents": [
+                    {"Key": "Good_FULL.tar.wbenc", "Size": 100, "LastModified": 0},
+                    {"Key": "Good_FULL.wbcommit", "Size": 10, "LastModified": 0},
+                    {"Key": "Partial_FULL.tar.wbenc", "Size": 50, "LastModified": 0},
+                ],
+                "CommonPrefixes": [],
+            }
+        )
+        assert names == {"Good_FULL.tar.wbenc"}
+
+    def test_uncommitted_dir_hidden(self):
+        names = self._run(
+            {
+                "CommonPrefixes": [{"Prefix": "GoodDir/"}, {"Prefix": "PartialDir/"}],
+                "Contents": [{"Key": "GoodDir.wbcommit", "Size": 10, "LastModified": 0}],
+            }
+        )
+        assert names == {"GoodDir"}
+
+    def test_legacy_prefix_without_markers_shows_all(self):
+        names = self._run(
+            {
+                "Contents": [
+                    {"Key": "A.tar.wbenc", "Size": 100, "LastModified": 0},
+                    {"Key": "B.tar.wbenc", "Size": 50, "LastModified": 0},
+                ],
+                "CommonPrefixes": [],
+            }
+        )
+        assert names == {"A.tar.wbenc", "B.tar.wbenc"}
+
+
+class TestS3DownloadPathTraversal:
+    """download_backup must never write an object outside the restore dir,
+    even if a (compromised/rogue) bucket holds '../' or absolute keys (M00,
+    the S3 twin of the SFTP tar-slip fix)."""
+
+    def test_traversal_object_key_is_skipped(self, tmp_path):
+        backend = S3Storage(bucket="b", prefix="", region="us-east-1", access_key="k", secret_key="s")
+        restore = tmp_path / "restore"
+
+        fake_client = MagicMock()
+        # MaxKeys=1 probe → non-empty → treated as a directory backup.
+        fake_client.list_objects_v2.return_value = {"Contents": [{"Key": "bk/good.txt"}]}
+        fake_paginator = MagicMock()
+        fake_paginator.paginate.return_value = [
+            {
+                "Contents": [
+                    {"Key": "bk/good.txt", "Size": 4},
+                    {"Key": "bk/../escape.txt", "Size": 4},  # escapes restore dir
+                ]
+            }
+        ]
+        fake_client.get_paginator.return_value = fake_paginator
+
+        with patch.object(backend, "_get_client", return_value=fake_client):
+            backend.download_backup("bk", restore)
+
+        downloaded = [c.kwargs.get("Filename", "") for c in fake_client.download_file.call_args_list]
+        # The safe object was downloaded; the traversal object was skipped.
+        assert any(f.endswith("good.txt") for f in downloaded)
+        assert not any("escape.txt" in f for f in downloaded)
+        assert not (tmp_path / "escape.txt").exists()

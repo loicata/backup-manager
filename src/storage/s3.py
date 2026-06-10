@@ -12,6 +12,7 @@ from typing import BinaryIO
 
 from src.storage.base import (
     StorageBackend,
+    backup_base_name,
     is_backup_sidecar,
     long_path_mkdir,
     long_path_str,
@@ -235,7 +236,23 @@ class S3Storage(StorageBackend):
 
         # Use delimiter to get top-level "folders" and files
         paginator = client.get_paginator("list_objects_v2")
-        pages = paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/")
+        pages = list(paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"))
+
+        # First pass: collect the commit markers present so partial /
+        # uncommitted backups can be excluded (mirrors LocalStorage). The
+        # filter is applied ONLY when the prefix actually uses markers — a
+        # legacy prefix with none lists every entry unchanged, so no genuine
+        # backup is hidden. Without this, an interrupted upload was listed
+        # as restorable, rotated, and "verified".
+        committed_bases = set()
+        for page in pages:
+            for obj in page.get("Contents", []):
+                name = obj["Key"].rsplit("/", 1)[-1]
+                if name.endswith(".wbcommit"):
+                    committed_bases.add(name[: -len(".wbcommit")])
+
+        def _is_committed(entry_name: str) -> bool:
+            return (not committed_bases) or backup_base_name(entry_name) in committed_bases
 
         for page in pages:
             # Common prefixes (directories) — no Size or LastModified
@@ -243,6 +260,8 @@ class S3Storage(StorageBackend):
             for cp in page.get("CommonPrefixes", []):
                 dir_prefix = cp["Prefix"]
                 name = dir_prefix.rstrip("/").rsplit("/", 1)[-1]
+                if not _is_committed(name):
+                    continue
                 total_size, mtime, has_wbenc = self._get_prefix_stats(client, dir_prefix)
                 backups.append(
                     {
@@ -259,11 +278,7 @@ class S3Storage(StorageBackend):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 name = key.rsplit("/", 1)[-1]
-                if (
-                    name
-                    and key != prefix
-                    and not is_backup_sidecar(name)
-                ):
+                if name and key != prefix and not is_backup_sidecar(name) and _is_committed(name):
                     last_mod = obj.get("LastModified", 0)
                     if hasattr(last_mod, "timestamp"):
                         last_mod = last_mod.timestamp()
@@ -564,8 +579,23 @@ class S3Storage(StorageBackend):
 
             # Second pass: download with progress
             dl_progress_cb = self._make_progress_cb(total_size)
+            dst_root = dst.resolve()
             for key, rel, _obj_size in objects_to_download:
                 local_file = dst / rel
+                # Path-traversal guard (the S3 twin of the SFTP tar-slip
+                # fix): an object key is untrusted (a compromised/rogue
+                # bucket could hold '../..' or absolute keys), and on Windows
+                # ``dst / '/abs'`` re-anchors to the drive root. Reject any
+                # object whose resolved target escapes the restore directory.
+                try:
+                    resolved = local_file.resolve()
+                    resolved.relative_to(dst_root)
+                except (ValueError, OSError):
+                    logger.warning(
+                        "Skipping S3 object with unsafe key (escapes restore dir): %s",
+                        key,
+                    )
+                    continue
                 long_path_mkdir(local_file.parent)
                 dl_kwargs: dict = {
                     "Bucket": self._bucket,

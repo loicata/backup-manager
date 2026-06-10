@@ -47,13 +47,19 @@ class TestStorageConfigNetworkFields:
                 network_password="secret",
             )
 
-    def test_missing_password_raises(self):
-        with pytest.raises(ValueError, match="network_password"):
-            StorageConfig(
-                storage_type=StorageType.NETWORK,
-                destination_path=r"\\server\share",
-                network_username="admin",
-            )
+    def test_missing_password_does_not_raise(self):
+        # Changed in the M12 fix: network_password is a DPAPI-protected
+        # runtime secret, NOT a structural requirement. validate() no longer
+        # requires it — a transient DPAPI failure empties it at load, and
+        # requiring it there made the whole profile "corrupted" and vanish.
+        # Structural fields (destination_path, network_username) are still
+        # validated; password presence is enforced at UI-input time.
+        config = StorageConfig(
+            storage_type=StorageType.NETWORK,
+            destination_path=r"\\server\share",
+            network_username="admin",
+        )
+        assert config.network_password == ""
 
     def test_network_type_validates_destination(self):
         with pytest.raises(ValueError):

@@ -12,7 +12,7 @@ from src.core.config import RetentionConfig
 from src.core.events import EventBus
 from src.core.exceptions import StorageDeleteError
 from src.core.phase_logger import PhaseLogger
-from src.core.phases.local_writer import sanitize_profile_name
+from src.core.phases.local_writer import backup_belongs_to_profile
 from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,10 @@ def rotate_backups(
         return 0
 
     if profile_name:
-        prefix = sanitize_profile_name(profile_name) + "_"
-        backups = [b for b in backups if b["name"].startswith(prefix)]
+        # Strict name-boundary match (not a bare prefix) so a sibling
+        # profile whose name extends this one — "My Backup" vs "My Backup
+        # v2" — is never swept into THIS profile's rotation and deleted.
+        backups = [b for b in backups if backup_belongs_to_profile(b["name"], profile_name)]
         if not backups:
             return 0
 

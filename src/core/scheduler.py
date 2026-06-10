@@ -4,13 +4,16 @@ Runs a daemon thread that checks every 30s if a backup is due.
 Detects system sleep/hibernation and triggers missed backups.
 """
 
+import contextlib
 import json
 import logging
+import os
+import shutil
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.core.config import BackupProfile, ScheduleFrequency
@@ -18,6 +21,47 @@ from src.core.config import BackupProfile, ScheduleFrequency
 logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL = 30  # seconds
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    """Crash-safe JSON write for scheduler state/journal files.
+
+    Keeps a ``.bak`` of the last good file, writes to a ``.tmp`` (fsync'd),
+    then ``os.replace`` (atomic rename). A process death mid-write can
+    therefore never leave the live file truncated — the bug behind a torn
+    ``scheduler_state.json`` that, on the next load, reset to ``{}`` and
+    mass-retriggered every profile (last_trigger lost → all "due").
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        with contextlib.suppress(OSError):
+            shutil.copy2(path, path.with_name(path.name + ".bak"))
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(data, indent=2, ensure_ascii=False))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _load_json_with_bak(path: Path, default):
+    """Load JSON, falling back to the ``.bak`` if the main file is corrupt.
+
+    Only returns ``default`` (a fresh/empty state) when BOTH the main file
+    and its backup are unusable. This prevents a single torn/corrupt read
+    from silently wiping scheduler state and re-triggering every profile.
+    """
+    for candidate in (path, path.with_name(path.name + ".bak")):
+        if candidate.exists():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning(
+                    "Scheduler state file %s is corrupt (%s) — trying fallback",
+                    candidate,
+                    exc,
+                )
+    return default
 MAX_JOURNAL_ENTRIES = 500
 # Stop auto-triggering "crash recovery" after this many consecutive
 # failures. Beyond that the user must explicitly run the profile to
@@ -59,21 +103,15 @@ class ScheduleJournal:
         self._load()
 
     def _load(self) -> None:
-        if self._path.exists():
-            try:
-                self._entries = json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self._entries = []
+        loaded = _load_json_with_bak(self._path, [])
+        # Guard against a structurally-wrong file decoding to a non-list.
+        self._entries = loaded if isinstance(loaded, list) else []
 
     def _save(self) -> None:
         # Trim to max entries
         if len(self._entries) > MAX_JOURNAL_ENTRIES:
             self._entries = self._entries[-MAX_JOURNAL_ENTRIES:]
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(self._entries, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _atomic_write_json(self._path, self._entries)
 
     def add(self, entry: ScheduleLogEntry) -> None:
         """Add a new journal entry (thread-safe).
@@ -184,15 +222,12 @@ class SchedulerState:
         self._load()
 
     def _load(self) -> None:
-        if self._path.exists():
-            try:
-                self._state = json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self._state = {}
+        loaded = _load_json_with_bak(self._path, {})
+        # Guard against a structurally-wrong file decoding to a non-dict.
+        self._state = loaded if isinstance(loaded, dict) else {}
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
+        _atomic_write_json(self._path, self._state)
 
     def get_last_trigger(self, profile_id: str) -> datetime | None:
         """Get the last trigger time for a profile (thread-safe).
@@ -637,20 +672,52 @@ class InAppScheduler:
             return now >= target_today and last < target_today
 
         elif sched.frequency == ScheduleFrequency.WEEKLY:
-            if now.weekday() != sched.day_of_week:
-                return False
-            return now >= target_today and last < target_today
+            # Due if the last trigger predates the most recent scheduled
+            # weekly occurrence. Comparing against the occurrence (not
+            # ``now.weekday() == day_of_week``) lets a slot MISSED because
+            # the PC was off on the scheduled day be caught up on the next
+            # launch, instead of being silently skipped for the whole week.
+            occurrence = self._most_recent_weekly(
+                now, sched.day_of_week, target_hour, target_minute
+            )
+            return last < occurrence
 
         elif sched.frequency == ScheduleFrequency.MONTHLY:
-            import calendar
-
-            max_day = calendar.monthrange(now.year, now.month)[1]
-            day = min(sched.day_of_month, max_day)
-            if now.day != day:
-                return False
-            return now >= target_today and last < target_today
+            # Same catch-up semantics for the monthly slot.
+            occurrence = self._most_recent_monthly(
+                now, sched.day_of_month, target_hour, target_minute
+            )
+            return last < occurrence
 
         return False
+
+    @staticmethod
+    def _most_recent_weekly(now: datetime, day_of_week: int, hour: int, minute: int) -> datetime:
+        """Latest datetime <= now falling on ``day_of_week`` at ``hour:minute``."""
+        days_back = (now.weekday() - day_of_week) % 7
+        occ = (now - timedelta(days=days_back)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if occ > now:
+            occ -= timedelta(days=7)
+        return occ
+
+    @staticmethod
+    def _most_recent_monthly(now: datetime, day_of_month: int, hour: int, minute: int) -> datetime:
+        """Latest datetime <= now on ``day_of_month`` (capped to month length)."""
+        import calendar
+
+        max_day = calendar.monthrange(now.year, now.month)[1]
+        occ = now.replace(
+            day=min(day_of_month, max_day), hour=hour, minute=minute, second=0, microsecond=0
+        )
+        if occ > now:
+            # This month's slot has not arrived yet — use the previous month.
+            year = now.year - 1 if now.month == 1 else now.year
+            month = 12 if now.month == 1 else now.month - 1
+            max_day_prev = calendar.monthrange(year, month)[1]
+            occ = occ.replace(year=year, month=month, day=min(day_of_month, max_day_prev))
+        return occ
 
     def _trigger_backup(
         self,
@@ -699,6 +766,9 @@ class InAppScheduler:
                 )
             return
 
+        # Set True only if retries are abandoned by a mid-retry shutdown,
+        # in which case the in-flight marker is preserved for startup catch-up.
+        retry_aborted_by_stop = False
         # Callback runs OUTSIDE the lock (can take minutes)
         try:
             # Persist an in-flight marker now that we own the run slot,
@@ -776,17 +846,32 @@ class InAppScheduler:
 
             # Retry logic — bypassed for skip-class exceptions
             if profile.schedule.retry_enabled and not is_skip:
-                self._retry_backup(profile, trigger)
+                # _retry_backup returns False ONLY when it aborted because
+                # the scheduler is shutting down with the backup still
+                # un-succeeded. In that case the run reached no definitive
+                # outcome, so the in-flight marker must survive (see below).
+                retry_aborted_by_stop = not self._retry_backup(profile, trigger)
         finally:
             with self._in_progress_lock:
                 self._profile_in_progress.discard(profile.id)
-            # Reaching this finally proves the process survived the run,
-            # whatever its outcome (success or handled failure). Clear
-            # the in-flight marker so the next startup does NOT mistake a
-            # cleanly-finished run for a die-in-flight and re-trigger it.
-            self._state.clear_inflight(profile.id)
+            if retry_aborted_by_stop:
+                # Clean app exit mid-retry: keep the in-flight marker so the
+                # next startup catch-up re-runs this failed backup instead
+                # of silently abandoning it (bounded by the crash-recovery
+                # circuit breaker). Clearing it here was the bug — the
+                # backup's retry budget was cut short AND nothing recovered.
+                logger.info(
+                    "Scheduler stopped mid-retry for '%s' — keeping in-flight "
+                    "marker so the next startup catches it up",
+                    profile.name,
+                )
+            else:
+                # Definitive outcome (success, a skip, or genuinely-exhausted
+                # retries): clear the marker so the next startup does NOT
+                # mistake a cleanly-finished run for a die-in-flight.
+                self._state.clear_inflight(profile.id)
 
-    def _retry_backup(self, profile: BackupProfile, trigger: str) -> None:
+    def _retry_backup(self, profile: BackupProfile, trigger: str) -> bool:
         """Retry a failed backup using configured delay intervals.
 
         Sleeps between attempts in the scheduler daemon thread.
@@ -795,10 +880,18 @@ class InAppScheduler:
         Args:
             profile: Backup profile to retry.
             trigger: Original trigger source for journal logging.
+
+        Returns:
+            True if the run reached a DEFINITIVE outcome (a retry succeeded,
+            no delays were configured, or all retries were exhausted) — the
+            caller should clear the in-flight marker. False if retrying was
+            aborted because the scheduler is shutting down with the backup
+            still un-succeeded — the caller must PRESERVE the marker so the
+            next startup catch-up re-runs the backup instead of abandoning it.
         """
         delays = profile.schedule.retry_delay_minutes
         if not delays:
-            return
+            return True
 
         for attempt, delay_minutes in enumerate(delays, start=1):
             total_attempts = len(delays)
@@ -832,7 +925,7 @@ class InAppScheduler:
 
             if not self._running:
                 logger.info("Scheduler stopped — aborting retry for '%s'", profile.name)
-                return
+                return False  # un-succeeded + shutting down → preserve marker
 
             # Attempt the backup again
             logger.info(
@@ -859,7 +952,7 @@ class InAppScheduler:
                     total_attempts,
                     profile.name,
                 )
-                return  # Success — stop retrying
+                return True  # Success — definitive, stop retrying
             except Exception as e:
                 logger.exception(
                     "Retry %d/%d failed for '%s'",
@@ -880,6 +973,10 @@ class InAppScheduler:
             len(delays),
             profile.name,
         )
+        # Genuinely exhausted (every attempt ran and failed) — a definitive
+        # failure. Clear the marker so the next startup does not boot-loop
+        # this backup; the user re-runs manually or waits for the next slot.
+        return True
 
     def _check_verify_due(self, profile: BackupProfile, now: datetime) -> None:
         """Check if periodic integrity verification is due for a profile.

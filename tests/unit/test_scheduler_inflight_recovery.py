@@ -337,3 +337,101 @@ class TestCrypterIncidentRegression:
 
         fired = {call.args[0].id for call in scheduler._test_callback.call_args_list}
         assert fired == {"aws"}
+
+
+# ---------------------------------------------------------------------------
+# M20 — a clean app exit mid-retry must NOT abandon the failed backup
+# ---------------------------------------------------------------------------
+
+
+class TestRetryAbortPreservesMarker:
+    def test_retry_backup_returns_false_when_stopped(self, scheduler) -> None:
+        # Scheduler already stopping → the retry loop aborts on the first
+        # iteration (no sleep) and reports "not resolved" so the caller
+        # keeps the in-flight marker.
+        profile = _make_profile()
+        profile.schedule.retry_delay_minutes = [2, 10]
+        scheduler._running = False
+        scheduler._stop_event.set()
+        assert scheduler._retry_backup(profile, "in_app") is False
+        scheduler._test_callback.assert_not_called()  # never slept, never retried
+
+    def test_retry_backup_returns_true_when_no_delays(self, scheduler) -> None:
+        profile = _make_profile()
+        profile.schedule.retry_delay_minutes = []
+        assert scheduler._retry_backup(profile, "in_app") is True
+
+    def test_marker_preserved_when_stopped_mid_retry(self, scheduler) -> None:
+        # The headline M20 case: first attempt fails, retries are enabled,
+        # and the app is closing → the in-flight marker MUST survive so the
+        # next startup catch-up re-runs the backup.
+        profile = _make_profile(retry_enabled=True)
+        profile.schedule.retry_delay_minutes = [2, 10]
+        scheduler._test_profiles.append(profile)
+        scheduler._test_callback.side_effect = RuntimeError("boom")
+        scheduler._running = False
+        scheduler._stop_event.set()
+
+        scheduler._trigger_backup(profile, datetime.now())
+
+        # Marker preserved (NOT cleared) — the backup is recoverable at next start.
+        assert scheduler._state.get_inflight(profile.id) is not None
+
+    def test_marker_cleared_when_no_retry_configured(self, scheduler) -> None:
+        # Contrast: a handled failure with no pending retries is definitive
+        # → marker cleared (no boot-loop). Guards against over-preserving.
+        profile = _make_profile(retry_enabled=False)
+        scheduler._test_profiles.append(profile)
+        scheduler._test_callback.side_effect = RuntimeError("boom")
+        scheduler._trigger_backup(profile, datetime.now())
+        assert scheduler._state.get_inflight(profile.id) is None
+
+
+# ---------------------------------------------------------------------------
+# M22 — atomic state writes + corrupt-file resilience (no mass re-trigger)
+# ---------------------------------------------------------------------------
+
+
+class TestSchedulerStateAtomicAndResilient:
+    def test_save_leaves_no_tmp_and_valid_json(self, tmp_path: Path) -> None:
+        import json as _json
+
+        state = SchedulerState(tmp_path)
+        state.set_last_trigger("p1", datetime(2026, 6, 1, 2, 0))
+        main = tmp_path / "scheduler_state.json"
+        assert main.exists()
+        assert not (tmp_path / "scheduler_state.json.tmp").exists()
+        # File is complete, parseable JSON.
+        _json.loads(main.read_text(encoding="utf-8"))
+
+    def test_corrupt_main_falls_back_to_bak(self, tmp_path: Path) -> None:
+        state = SchedulerState(tmp_path)
+        state.set_last_trigger("p1", datetime(2026, 6, 1, 2, 0))  # writes main (no .bak yet)
+        state.set_last_trigger("p1", datetime(2026, 6, 2, 2, 0))  # copies main->.bak, writes main
+        main = tmp_path / "scheduler_state.json"
+        # A torn/garbled main file must NOT wipe state on reload.
+        main.write_text("{ this is not json", encoding="utf-8")
+
+        reloaded = SchedulerState(tmp_path)
+        # last_trigger recovered from .bak (the 06-01 value) — NOT lost,
+        # so _is_due does not see last=None and re-trigger every profile.
+        assert reloaded.get_last_trigger("p1") is not None
+
+    def test_corrupt_main_and_no_bak_resets_cleanly(self, tmp_path: Path) -> None:
+        main = tmp_path / "scheduler_state.json"
+        main.write_text("garbage", encoding="utf-8")  # corrupt, no .bak
+        state = SchedulerState(tmp_path)  # must not raise
+        assert state.get_last_trigger("p1") is None
+
+    def test_journal_save_atomic_and_resilient(self, tmp_path: Path) -> None:
+        from src.core.scheduler import ScheduleJournal, ScheduleLogEntry
+
+        journal = ScheduleJournal(tmp_path)
+        journal.add(ScheduleLogEntry(profile_id="p1", profile_name="P", trigger="t", status="started"))
+        journal.add(ScheduleLogEntry(profile_id="p1", profile_name="P", trigger="t", status="success"))
+        jpath = tmp_path / "schedule_journal.json"
+        assert not (tmp_path / "schedule_journal.json.tmp").exists()
+        jpath.write_text("not json [[", encoding="utf-8")
+        reloaded = ScheduleJournal(tmp_path)
+        # Falls back to .bak rather than losing the whole history.
+        assert len(reloaded.get_entries()) >= 1

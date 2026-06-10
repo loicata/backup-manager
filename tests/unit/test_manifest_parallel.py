@@ -168,16 +168,31 @@ class TestCancellation:
 
 
 class TestErrorPropagation:
-    """Worker errors must surface to the caller (fail-fast contract)."""
+    """Vanished files are skipped (#9); genuine I/O errors still fail-fast."""
 
-    def test_oserror_in_worker_propagates(self, tmp_path: Path) -> None:
-        """A file disappearing mid-build must raise, not silently skip."""
+    def test_vanished_file_is_skipped_not_fatal(self, tmp_path: Path) -> None:
+        """A file disappearing mid-build is skipped + recorded, not fatal —
+        changed in the #9 fix (the 06/05/2026 .ico that aborted a 256k-file
+        run). The other four files still hash and the run continues."""
         files = _make_files(tmp_path, count=5)
-        # Delete one file so the worker hits FileNotFoundError.
-        files[2].source_path.unlink()
+        files[2].source_path.unlink()  # vanish before hashing
 
-        with pytest.raises((FileNotFoundError, OSError)):
-            build_integrity_manifest(files)
+        manifest = build_integrity_manifest(files)
+
+        assert len(manifest["files"]) == 4
+        skipped = {e["path"] for e in manifest.get("skipped_files", [])}
+        assert files[2].relative_path in skipped
+
+    def test_genuine_oserror_still_propagates(self, tmp_path: Path) -> None:
+        """A non-FileNotFoundError (locked file, disk error) must still
+        abort the manifest — only a vanished source is tolerated."""
+        files = _make_files(tmp_path, count=3)
+        with patch(
+            "src.core.phases.manifest.compute_sha256",
+            side_effect=PermissionError("locked by antivirus"),
+        ):
+            with pytest.raises(PermissionError):
+                build_integrity_manifest(files)
 
 
 # ---------------------------------------------------------------------------

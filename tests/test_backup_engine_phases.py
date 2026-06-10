@@ -55,6 +55,9 @@ def _make_ctx(**overrides) -> MagicMock:
     the new phases read."""
     ctx = MagicMock()
     ctx.profile.mirror_destinations = []
+    # Real profile name so sanitize_profile_name() works; chosen to match
+    # the "Bk_..." backup_name below (orphan scan now filters by prefix).
+    ctx.profile.name = "Bk"
     ctx.profile.storage.storage_type = StorageType.LOCAL
     ctx.profile.storage.s3_object_lock = False
     ctx.backup_name = "Bk_FULL_2026-05-08_120000"
@@ -271,24 +274,43 @@ class TestPhaseOrphanScan:
         engine = _bare_engine()
         engine._log = MagicMock()
         backend = self._make_backend_with_orphans(
-            [{"name": "orphan_FULL_2026-01-01_000000", "size": 1234}]
+            [{"name": "Bk_FULL_2026-01-01_000000", "size": 1234}]
         )
         ctx = _make_ctx()
         ctx.backend = backend
         engine._phase_orphan_scan(ctx)
-        backend.delete_backup.assert_called_once_with("orphan_FULL_2026-01-01_000000")
+        backend.delete_backup.assert_called_once_with("Bk_FULL_2026-01-01_000000")
         # Logger is called via ``self._log`` for visibility.
         engine._log.assert_called_once()
 
     def test_multiple_orphans_deleted(self) -> None:
         engine = _bare_engine()
         engine._log = MagicMock()
-        orphans = [{"name": f"orph_{i}", "size": 0} for i in range(5)]
+        orphans = [{"name": f"Bk_orph_{i}", "size": 0} for i in range(5)]
         backend = self._make_backend_with_orphans(orphans)
         ctx = _make_ctx()
         ctx.backend = backend
         engine._phase_orphan_scan(ctx)
         assert backend.delete_backup.call_count == 5
+
+    def test_other_profiles_orphans_are_never_deleted(self) -> None:
+        # Regression for the 18/05/2026 cross-profile deletion: an orphan
+        # belonging to a DIFFERENT profile (different name prefix) — which
+        # may be that profile's in-flight backup — must never be touched.
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        backend = self._make_backend_with_orphans(
+            [
+                {"name": "Bk_FULL_2026-01-01_000000", "size": 1},  # ours
+                {"name": "OtherProfile_FULL_2026-01-01_000000", "size": 999},  # theirs
+                {"name": "TestLoic_FULL_2026-05-18_205449", "size": 2_355_185_577},
+            ]
+        )
+        ctx = _make_ctx()  # profile name "Bk"
+        ctx.backend = backend
+        engine._phase_orphan_scan(ctx)
+        deleted = [c.args[0] for c in backend.delete_backup.call_args_list]
+        assert deleted == ["Bk_FULL_2026-01-01_000000"]
 
     def test_legacy_backend_without_list_orphan_backups_skipped(self) -> None:
         # Use ``spec`` to make ``hasattr/getattr`` honest: the mock has
@@ -321,7 +343,7 @@ class TestPhaseOrphanScan:
         # Primary blows up listing; mirror still gets processed.
         primary = MagicMock()
         primary.list_orphan_backups = MagicMock(side_effect=OSError("S3 down"))
-        mirror_backend = self._make_backend_with_orphans([{"name": "mirror_orphan", "size": 0}])
+        mirror_backend = self._make_backend_with_orphans([{"name": "Bk_mirror_orphan", "size": 0}])
         engine._get_backend = MagicMock(return_value=mirror_backend)
 
         mirror_cfg = MagicMock()
@@ -332,7 +354,7 @@ class TestPhaseOrphanScan:
         ctx.profile.mirror_destinations = [mirror_cfg]
         engine._phase_orphan_scan(ctx)
         primary.delete_backup.assert_not_called()
-        mirror_backend.delete_backup.assert_called_once_with("mirror_orphan")
+        mirror_backend.delete_backup.assert_called_once_with("Bk_mirror_orphan")
 
     def test_mirror_backend_construction_failure_skipped(self) -> None:
         engine = _bare_engine()
@@ -353,7 +375,7 @@ class TestPhaseOrphanScan:
     def test_concurrent_removal_is_swallowed(self) -> None:
         engine = _bare_engine()
         engine._log = MagicMock()
-        backend = self._make_backend_with_orphans([{"name": "racy", "size": 0}])
+        backend = self._make_backend_with_orphans([{"name": "Bk_racy", "size": 0}])
         backend.delete_backup.side_effect = FileNotFoundError("gone")
         ctx = _make_ctx()
         ctx.backend = backend
@@ -366,7 +388,7 @@ class TestPhaseOrphanScan:
         engine = _bare_engine()
         engine._log = MagicMock()
         backend = self._make_backend_with_orphans(
-            [{"name": "a", "size": 0}, {"name": "b", "size": 0}, {"name": "c", "size": 0}]
+            [{"name": "Bk_a", "size": 0}, {"name": "Bk_b", "size": 0}, {"name": "Bk_c", "size": 0}]
         )
         # Middle one fails; the others must still be deleted.
         backend.delete_backup.side_effect = [None, OSError("locked"), None]
@@ -878,3 +900,110 @@ class TestVerifyRemote:
         ctx.backend.list_backup_files.return_value = [("a.txt", 10), ("b.txt", 20)]
         engine._verify_remote(ctx)
         engine._verify_remote_sizes.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _phase_verify_mirrors — commit decoupled from verify
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyMirrorsCommitDecoupled:
+    """A mirror must get its .wbcommit after a successful upload regardless
+    of auto_verify — otherwise the next run's orphan scan deletes it."""
+
+    def _ctx_one_mirror(self, *, auto_verify: bool, upload_ok: bool = True):
+        ctx = _make_ctx()
+        cfg = MagicMock()
+        cfg.is_remote = MagicMock(return_value=False)
+        ctx.profile.mirror_destinations = [cfg]
+        ctx.profile.verification.auto_verify = auto_verify
+        ctx.profile.encryption.enabled = False
+        ctx.profile.encrypt_mirror1 = False
+        ctx.profile.encrypt_mirror2 = False
+        ctx.result.mirror_results = [("Mirror 1", upload_ok, "OK", "desc")]
+        return ctx
+
+    def _engine(self):
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        engine._phase = MagicMock()
+        engine._check_cancel = MagicMock()
+        engine._get_backend = MagicMock(return_value=MagicMock())
+        engine._commit_mirror = MagicMock()
+        engine._verify_encrypted_archive = MagicMock()
+        engine._verify_mirror_checksums = MagicMock()
+        return engine
+
+    def test_commit_happens_when_auto_verify_false(self) -> None:
+        engine = self._engine()
+        ctx = self._ctx_one_mirror(auto_verify=False)
+        engine._phase_verify_mirrors(ctx)
+        # The crown-jewel regression: marker written even with verify off.
+        engine._commit_mirror.assert_called_once()
+        # And no verification work ran.
+        engine._verify_encrypted_archive.assert_not_called()
+        engine._verify_mirror_checksums.assert_not_called()
+
+    def test_failed_upload_not_committed(self) -> None:
+        engine = self._engine()
+        ctx = self._ctx_one_mirror(auto_verify=False, upload_ok=False)
+        engine._phase_verify_mirrors(ctx)
+        engine._commit_mirror.assert_not_called()
+
+    def test_commit_happens_when_auto_verify_true_remote(self) -> None:
+        engine = self._engine()
+        ctx = self._ctx_one_mirror(auto_verify=True)
+        ctx.profile.mirror_destinations[0].is_remote = MagicMock(return_value=True)
+        backend = engine._get_backend.return_value
+        backend.verify_backup_files.return_value = [("a.txt", 10, "deadbeef")]
+        engine._phase_verify_mirrors(ctx)
+        engine._verify_mirror_checksums.assert_called_once()
+        engine._commit_mirror.assert_called_once()
+
+    def test_no_mirrors_is_noop(self) -> None:
+        engine = self._engine()
+        ctx = _make_ctx()
+        ctx.profile.mirror_destinations = []
+        engine._phase_verify_mirrors(ctx)
+        engine._commit_mirror.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _record_skipped_files — vanished files surface as warnings, not silence
+# ---------------------------------------------------------------------------
+
+
+class TestRecordSkippedFiles:
+    """Files that vanished during a run must surface as WARNINGS (run still
+    succeeds) and files_processed must reflect what was actually written."""
+
+    def test_surfaces_warnings_and_corrects_count(self) -> None:
+        from src.core.backup_result import BackupResult
+
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        ctx = _make_ctx()
+        ctx.result = BackupResult()
+        ctx.result.files_processed = 5  # set pre-write to len(ctx.files)
+        ctx.integrity_manifest = {
+            "files": {"a": {}, "b": {}},
+            "skipped_files": [{"path": "c"}, {"path": "d"}, {"path": "e"}],
+        }
+        engine._record_skipped_files(ctx)
+        assert ctx.result.warnings == 3
+        # Corrected to the count actually written (manifest files).
+        assert ctx.result.files_processed == 2
+        # Warnings do NOT fail the run.
+        assert ctx.result.success is True
+
+    def test_noop_when_nothing_skipped(self) -> None:
+        from src.core.backup_result import BackupResult
+
+        engine = _bare_engine()
+        ctx = _make_ctx()
+        ctx.result = BackupResult()
+        ctx.result.files_processed = 7
+        ctx.integrity_manifest = {"files": {"a": {}}}
+        engine._record_skipped_files(ctx)
+        assert ctx.result.warnings == 0
+        assert ctx.result.files_processed == 7  # untouched

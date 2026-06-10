@@ -1210,13 +1210,31 @@ class SFTPStorage(StorageBackend):
         import os
 
         base = long_path_str(local_dir)
+        restore_root = Path(local_dir).resolve()
         while True:
             member = tar.next()
             if member is None:
                 break
+            rel = member.name.replace("/", os.sep)
+            # Path-traversal guard (tar-slip): the members come from a
+            # server-produced ``tar cf -`` stream and are otherwise trusted
+            # verbatim. A compromised/rogue server could send an absolute
+            # name (on Windows ``C:\\...`` makes os.path.join drop ``base``
+            # entirely) or ``..`` segments that escape local_dir — an
+            # arbitrary-file-write → code-execution primitive. Reject any
+            # member whose resolved target leaves the restore directory.
+            try:
+                resolved = (restore_root / rel).resolve()
+                resolved.relative_to(restore_root)
+            except (ValueError, OSError):
+                logger.warning(
+                    "Skipping unsafe tar member (escapes restore dir): %s",
+                    member.name,
+                )
+                continue
             # Build the target using OS join so trailing separators and
             # relative components stay consistent between platforms.
-            target = os.path.join(base, member.name.replace("/", os.sep))
+            target = os.path.join(base, rel)
             if member.isdir():
                 long_path_mkdir(Path(target))
                 continue

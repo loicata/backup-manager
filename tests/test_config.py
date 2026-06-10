@@ -491,3 +491,86 @@ class TestBandwidthPercent:
         """Default bandwidth_percent is 75."""
         p = BackupProfile()
         assert p.bandwidth_percent == 75
+
+
+class TestStorageConfigPlaceholder:
+    """is_placeholder / validate_unless_placeholder — the shared guard used
+    by both load (__post_init__) and save (save_profile)."""
+
+    def test_default_is_placeholder(self):
+        assert StorageConfig().is_placeholder() is True
+
+    def test_configured_local_is_not_placeholder(self):
+        cfg = StorageConfig(storage_type=StorageType.LOCAL, destination_path="/x")
+        assert cfg.is_placeholder() is False
+
+    def test_validate_unless_placeholder_tolerates_default(self):
+        StorageConfig().validate_unless_placeholder()  # must not raise
+
+    def test_validate_unless_placeholder_raises_on_bad_remote(self):
+        # Build the way the storage tab does: default, then set type by
+        # direct attribute assignment (bypasses __post_init__).
+        cfg = StorageConfig()
+        cfg.storage_type = StorageType.SFTP
+        with pytest.raises(ValueError, match="sftp_host is required"):
+            cfg.validate_unless_placeholder()
+
+
+class TestSaveProfileValidation:
+    """save_profile must reject a half-configured remote profile instead of
+    writing a file the next load rejects as 'corrupted' — the silent .bak
+    rollback that discarded edits on 12/05 and 28/05/2026."""
+
+    @staticmethod
+    def _bypass_validation_config(stype: StorageType) -> StorageConfig:
+        # Mirror StorageTab._build_storage_config: default LOCAL, then set
+        # storage_type by direct attribute assignment (skips __post_init__).
+        cfg = StorageConfig()
+        cfg.storage_type = stype
+        return cfg
+
+    def test_sftp_without_host_raises_and_writes_nothing(self, tmp_config_dir):
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="BadSFTP")
+        profile.storage = self._bypass_validation_config(StorageType.SFTP)
+        with pytest.raises(ValueError, match="sftp_host is required"):
+            mgr.save_profile(profile)
+        assert not (tmp_config_dir / "profiles" / f"{profile.id}.json").exists()
+
+    def test_s3_without_bucket_raises(self, tmp_config_dir):
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="BadS3")
+        profile.storage = self._bypass_validation_config(StorageType.S3)
+        with pytest.raises(ValueError, match="s3_bucket is required"):
+            mgr.save_profile(profile)
+
+    def test_bad_save_keeps_previous_good_file(self, tmp_config_dir):
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="Good")
+        profile.storage = StorageConfig(storage_type=StorageType.SFTP, sftp_host="example.com")
+        mgr.save_profile(profile)
+        # A mid-edit save turns the host empty (bypassing __post_init__).
+        profile.storage = self._bypass_validation_config(StorageType.SFTP)
+        with pytest.raises(ValueError):
+            mgr.save_profile(profile)
+        # The previously-saved good profile is intact and still loads.
+        profiles = mgr.get_all_profiles()
+        assert len(profiles) == 1
+        assert profiles[0].storage.sftp_host == "example.com"
+
+    def test_placeholder_local_profile_still_saves(self, tmp_config_dir):
+        # A brand-new unconfigured profile (default LOCAL) must still persist.
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="Fresh")
+        mgr.save_profile(profile)
+        assert len(mgr.get_all_profiles()) == 1
+
+    def test_invalid_mirror_raises(self, tmp_config_dir):
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="BadMirror")
+        profile.storage = StorageConfig(
+            storage_type=StorageType.LOCAL, destination_path="/tmp/b"
+        )
+        profile.mirror_destinations = [self._bypass_validation_config(StorageType.SFTP)]
+        with pytest.raises(ValueError, match="sftp_host is required"):
+            mgr.save_profile(profile)

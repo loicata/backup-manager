@@ -86,16 +86,42 @@ def _engine(env):
 
 class TestCollectionFailures:
 
-    def test_source_directory_does_not_exist(self, env, profile):
-        """Collector should return zero files when source is missing."""
+    def test_all_sources_missing_raises(self, env, profile):
+        """Every source unreachable must FAIL loudly, not report a green
+        0-file success — a dead source drive would otherwise produce
+        'successful' empty runs forever, masking total data loss."""
         profile.source_paths = [str(env["dest"] / "nonexistent")]
+        engine = _engine(env)
+        with pytest.raises(RuntimeError, match="No backup source is available"):
+            engine.run_backup(profile)
+
+    def test_empty_existing_source_succeeds(self, env, profile):
+        """A source that EXISTS but is genuinely empty is a legitimate
+        no-op success (distinct from an unreachable source)."""
+        empty = env["dest"].parent / "empty_src"
+        empty.mkdir()
+        profile.source_paths = [str(empty)]
         engine = _engine(env)
         result = engine.run_backup(profile)
         assert result.files_found == 0
-        assert result.files_processed == 0
+        assert result.success is True
+
+    def test_partial_missing_source_warns_but_succeeds(self, env, profile):
+        """One missing source among several present ones: the run backs up
+        what it can and surfaces a warning for the missing one."""
+        profile.source_paths = [str(env["source"]), str(env["dest"] / "ghost")]
+        engine = _engine(env)
+        result = engine.run_backup(profile)
+        assert result.files_found == 2  # a.txt + b.txt from the present source
+        assert result.success is True
+        assert result.warnings >= 1
 
     def test_permission_denied_on_source(self, env, profile):
-        """Collector should skip unreadable directories gracefully."""
+        """Collector should skip unreadable directories gracefully.
+
+        The source path EXISTS (only scandir fails), so this is not the
+        all-sources-missing case — the run completes with zero files
+        rather than raising."""
         with patch("os.scandir", side_effect=PermissionError("denied")):
             engine = _engine(env)
             result = engine.run_backup(profile)

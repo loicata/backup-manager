@@ -59,6 +59,7 @@ def write_flat(
     backup_name: str,
     events: EventBus | None = None,
     cancel_check=None,
+    skipped_out: set[str] | None = None,
 ) -> Path:
     """Write files as a flat directory copy via parallel ``shutil.copy2``.
 
@@ -150,6 +151,27 @@ def write_flat(
                 long_path_str(file_info.source_path),
                 long_path_str(target),
             )
+        except FileNotFoundError as e:
+            # A vanished SOURCE is tolerated (skip + record), matching the
+            # encrypted writer's policy — a single file deleted between
+            # collection and copy (caches, build artefacts) must not abort
+            # a whole multi-hundred-thousand-file run (the 18/05/2026
+            # WinError 2 incident). A destination-side FileNotFoundError is
+            # still fatal: re-raise it as a WriteError below.
+            if not os.path.exists(long_path_str(file_info.source_path)):
+                logger.warning(
+                    "Source file vanished before copy, skipping: %s",
+                    file_info.relative_path,
+                )
+                if skipped_out is not None:
+                    with error_lock:
+                        skipped_out.add(file_info.relative_path)
+                return
+            err = WriteError(file_info.relative_path, e)
+            with error_lock:
+                if first_error[0] is None:
+                    first_error[0] = err
+            raise err from e
         except (OSError, PermissionError) as e:
             err = WriteError(file_info.relative_path, e)
             with error_lock:

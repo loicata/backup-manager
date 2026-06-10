@@ -318,13 +318,23 @@ class TestScheduledBackupNotifications:
 
         instance = self._make_instance(app)
 
-        with patch("src.ui.app.BackupEngine", return_value=mock_engine):
+        # The scheduled cancel path now RE-RAISES (so _trigger_backup
+        # classifies it as a user cancel instead of journalling success —
+        # the 14/05/2026 fix), after sending the tray notification.
+        with (
+            patch("src.ui.app.BackupEngine", return_value=mock_engine),
+            pytest.raises(CancelledError),
+        ):
             instance._scheduled_backup(profile)
 
         app.tray.notify.assert_called_once()
         call_args = app.tray.notify.call_args
         assert "cancelled" in call_args[0][0].lower()
         assert "TestProfile" in call_args[0][1]
+        # The cancellation must be journalled (not left to fall through to
+        # the scheduler's success path).
+        app.scheduler.journal.update_last.assert_called_once()
+        assert app.scheduler.journal.update_last.call_args.kwargs.get("status") == "cancelled"
 
 
 class TestManualBackupNotifications:

@@ -116,17 +116,36 @@ class StorageConfig:
             ValueError: If a required field for an explicitly configured
                 storage type is empty or missing.
         """
-        # Allow default construction: StorageConfig() creates LOCAL
-        # with empty destination_path, used as placeholder in
-        # BackupProfile before user configuration.
-        if (
+        self.validate_unless_placeholder()
+
+    def is_placeholder(self) -> bool:
+        """True for the default, unconfigured LOCAL state.
+
+        ``StorageConfig()`` (LOCAL, every field empty) is used as a
+        placeholder by ``BackupProfile`` before the user has set up
+        storage. Both load (``__post_init__``) and save tolerate it so a
+        brand-new profile can be persisted before configuration.
+        """
+        return (
             self.storage_type == StorageType.LOCAL
             and self.destination_path == ""
             and self.sftp_host == ""
             and self.s3_bucket == ""
-        ):
-            return
-        self.validate()
+        )
+
+    def validate_unless_placeholder(self) -> None:
+        """Run :meth:`validate` unless this is the default placeholder.
+
+        Shared by ``__post_init__`` (load path) and ``save_profile``
+        (write path). The storage tab builds its config by assigning
+        ``storage_type`` via direct attribute set, which bypasses
+        ``__post_init__`` — so without a save-time call here an SFTP
+        profile with an empty host (or an S3 profile with an empty
+        bucket) reached disk and was only rejected on the *next* load,
+        silently rolling back to ``.bak`` and discarding the edit.
+        """
+        if not self.is_placeholder():
+            self.validate()
 
     def validate(self) -> None:
         """Check that required fields are set for the current storage_type.
@@ -491,6 +510,18 @@ class ConfigManager:
         Encrypts sensitive fields before writing.
         Creates .bak backup of previous version.
         """
+        # Validate storage (primary + mirrors) BEFORE writing. The storage
+        # tab assigns storage_type by direct attribute set, bypassing
+        # StorageConfig.__post_init__, so a half-configured remote profile
+        # (SFTP without host, S3 without bucket) would otherwise be written
+        # and then classified "corrupted" on the next load — triggering a
+        # silent .bak rollback that discards the user's edit. Fail loudly
+        # here instead; the atomic write below never runs on a bad config,
+        # so the previous good file stays intact.
+        profile.storage.validate_unless_placeholder()
+        for mirror in profile.mirror_destinations:
+            mirror.validate_unless_placeholder()
+
         data = self._profile_to_dict(profile)
         self._protect_secrets(data)
 

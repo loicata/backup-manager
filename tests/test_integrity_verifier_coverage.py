@@ -377,10 +377,10 @@ class TestVerifyRemote:
             {},
         )
         assert result.status == "ok"
-        assert "2 files" in result.message
+        assert "2 file(s)" in result.message
 
     def test_remote_flat_missing(self, tmp_path):
-        """Remote flat backup fallback — missing backup."""
+        """Remote flat backup — verify fails AND listing empty → missing."""
         profile = BackupProfile(
             name="Test",
             storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="test-bucket"),
@@ -389,7 +389,10 @@ class TestVerifyRemote:
 
         mock_backend = MagicMock()
         mock_backend.verify_backup_files.side_effect = Exception("not supported")
-        mock_backend.get_file_size.return_value = None
+        mock_backend.list_backup_files.return_value = []
+        # get_file_size on a directory used to return a non-zero inode size
+        # and make this report "ok" — it must now be ignored.
+        mock_backend.get_file_size.return_value = 4096
 
         verifier = IntegrityVerifier(profile, mgr)
         result = verifier._verify_remote(
@@ -402,8 +405,10 @@ class TestVerifyRemote:
         )
         assert result.status == "missing"
 
-    def test_remote_flat_exists_fallback(self, tmp_path):
-        """Remote flat backup fallback — exists check."""
+    def test_remote_flat_exists_via_listing(self, tmp_path):
+        """Existence is now established via a NON-EMPTY listing, not via a
+        bare get_file_size on the backup directory (which returned the
+        inode size and made an empty/missing backup report 'ok')."""
         profile = BackupProfile(
             name="Test",
             storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="test-bucket"),
@@ -412,7 +417,7 @@ class TestVerifyRemote:
 
         mock_backend = MagicMock()
         mock_backend.verify_backup_files.return_value = []
-        mock_backend.get_file_size.return_value = 5000
+        mock_backend.list_backup_files.return_value = [("a.txt", 100), ("b.txt", 200)]
 
         verifier = IntegrityVerifier(profile, mgr)
         result = verifier._verify_remote(
@@ -424,7 +429,7 @@ class TestVerifyRemote:
             {},
         )
         assert result.status == "ok"
-        assert "exists" in result.message.lower()
+        assert "2 file(s)" in result.message
 
 
 # ---------------------------------------------------------------------------

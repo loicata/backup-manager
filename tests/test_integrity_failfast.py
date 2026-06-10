@@ -117,3 +117,38 @@ class TestVerifyBackupFailFast:
         ok, msg = verify_backup(backup, manifest_path)
         assert ok is False
         assert "Missing" in msg
+
+
+class TestBuildIntegrityManifestVanishedFile:
+    """A source that vanished before hashing is SKIPPED (recorded), not
+    fatal — the 06/05/2026 incident where one deleted .ico aborted a
+    256k-file run. Genuine I/O errors (OSError/PermissionError) still
+    abort, as the fail-fast tests above assert."""
+
+    def test_vanished_file_skipped_not_raised(self, tmp_path):
+        good = _make_file(tmp_path, "good.txt")
+        gone = FileInfo(
+            source_path=tmp_path / "source" / "gone.txt",  # never created
+            relative_path="gone.txt",
+            size=4,
+            mtime=0.0,
+            source_root=str(tmp_path / "source"),
+        )
+        manifest = build_integrity_manifest([good, gone])
+        assert "good.txt" in manifest["files"]
+        assert "gone.txt" not in manifest["files"]
+        skipped = {e["path"] for e in manifest.get("skipped_files", [])}
+        assert "gone.txt" in skipped
+
+    def test_all_files_vanished_yields_empty_files_with_skipped(self, tmp_path):
+        gone = FileInfo(
+            source_path=tmp_path / "nope.txt",
+            relative_path="nope.txt",
+            size=1,
+            mtime=0.0,
+            source_root=str(tmp_path),
+        )
+        manifest = build_integrity_manifest([gone])
+        assert manifest["files"] == {}
+        assert manifest.get("skipped_files")
+        assert manifest["total_checksum"]  # still a valid checksum

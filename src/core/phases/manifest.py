@@ -96,6 +96,7 @@ def build_integrity_manifest(
     phase_log = PhaseLogger("manifest", events)
     cache = cached_hashes or {}
     file_hashes: dict = {}
+    vanished: list[str] = []
     total = len(files)
     cache_hits = 0
     completed = 0
@@ -151,13 +152,24 @@ def build_integrity_manifest(
                     if cancel_check is not None:
                         cancel_check()
                     file_info = futures[fut]
-                    # Fail-fast: if we cannot hash a file at this stage
-                    # the resulting manifest would be unverifiable. The
-                    # filter phase drops unreadable files from
-                    # ``changed`` so we should never end up here for
-                    # such a file. ``fut.result()`` re-raises the
-                    # worker's exception.
-                    file_hash = fut.result()
+                    # A source file that vanished between collection and
+                    # hashing (caches, build artefacts on a live tree —
+                    # the 06/05/2026 .ico that aborted a 256k-file run) is
+                    # skipped rather than aborting the whole backup. It is
+                    # recorded under ``skipped_files`` so the loss is
+                    # surfaced, never hidden behind a recomputed checksum.
+                    # Other errors (locked file, permission, network) still
+                    # propagate — those are not "the file is simply gone".
+                    try:
+                        file_hash = fut.result()
+                    except FileNotFoundError:
+                        vanished.append(file_info.relative_path)
+                        logger.warning(
+                            "Source file vanished before hashing, skipping: %s",
+                            file_info.relative_path,
+                        )
+                        completed += 1
+                        continue
                     file_hashes[file_info.relative_path] = {
                         "hash": file_hash,
                         "size": file_info.size,
@@ -193,18 +205,29 @@ def build_integrity_manifest(
     # exchanged without changing the global checksum.
     # Including the path (and size as a second witness) defeats
     # that swap attack.
-    total_checksum = _compute_total_checksum(file_hashes)
+    skipped_files = (
+        [{"path": p, "reason": "vanished_before_hash"} for p in vanished] if vanished else None
+    )
+    total_checksum = _compute_total_checksum(file_hashes, skipped_files=skipped_files)
 
+    if vanished:
+        phase_log.warning(
+            f"Manifest: {len(vanished)} source file(s) vanished before hashing "
+            f"and were excluded from the backup"
+        )
     phase_log.info(
         f"Manifest created: {len(file_hashes)} files, checksum: {total_checksum[:16]}..."
     )
 
-    return {
+    manifest = {
         "version": 1,
         "algorithm": "sha256",
         "files": file_hashes,
         "total_checksum": total_checksum,
     }
+    if skipped_files:
+        manifest["skipped_files"] = skipped_files
+    return manifest
 
 
 def _compute_total_checksum(file_hashes: dict, skipped_files: list | None = None) -> str:

@@ -9,6 +9,7 @@ import ctypes
 import logging
 import os
 import sys
+import threading
 import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -358,6 +359,51 @@ def _setup_logging():
     return logging.getLogger(__name__)
 
 
+def _install_exception_hooks(root, logger: logging.Logger) -> None:
+    """Route otherwise-silent background exceptions to the log file.
+
+    Two blind spots existed in the packaged windowed build (no console,
+    so ``sys.stderr`` is null):
+
+    1. Exceptions raised inside Tk callbacks — every ``after()`` handler
+       (progress pump, log dispatch, queue drain, health dashboard,
+       alert panel) and every button command — are caught by Tkinter and
+       routed to ``Tk.report_callback_exception``, whose default prints
+       the traceback to stderr. In the windowed build that traceback was
+       lost entirely and the UI continued in a half-mutated state.
+    2. Uncaught exceptions in non-main threads (the backup engine runs on
+       a worker thread) hit ``threading.excepthook``, whose default also
+       writes to stderr.
+
+    Both are redirected to ``logger.error`` with full traceback so a
+    crash leaves a diagnosable trail in ``backup_manager.log`` instead of
+    vanishing. The top-level ``mainloop()`` try/except only catches
+    exceptions that *escape* the loop, which Tk callback exceptions never
+    do — hence this dedicated wiring.
+    """
+
+    def _on_tk_callback_exception(exc_type, exc_value, exc_tb):
+        logger.error(
+            "Unhandled exception in a Tk callback",
+            exc_info=(exc_type, exc_value, exc_tb),
+        )
+
+    root.report_callback_exception = _on_tk_callback_exception
+
+    def _on_thread_exception(args):
+        # SystemExit from a thread is intentional shutdown — stay quiet.
+        if issubclass(args.exc_type, SystemExit):
+            return
+        thread_name = args.thread.name if args.thread is not None else "unknown"
+        logger.error(
+            "Unhandled exception in thread %s",
+            thread_name,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+
+    threading.excepthook = _on_thread_exception
+
+
 def _crash_log(error_msg: str):
     """Write crash info to a file."""
     appdata = os.environ.get("APPDATA", "")
@@ -500,6 +546,7 @@ def main():
         logger.info("Creating root window...")
         root = tk.Tk()
         root.withdraw()
+        _install_exception_hooks(root, logger)
 
         # Apply the theme early — named-font overrides and DPI scaling
         # must be in place BEFORE any Toplevel (including the wizard) is

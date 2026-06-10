@@ -187,3 +187,67 @@ class TestPrimaryIsEncrypted:
 
         prof = self._profile(primary=True, enabled=True, password="")
         assert primary_is_encrypted(prof) is False
+
+
+class TestWriteBackupPrunesVanishedFiles:
+    """write_backup must prune the integrity manifest for any source that
+    vanished mid-write, so the manifest matches what actually landed
+    (otherwise a partial backup verifies 'OK' against files it lacks)."""
+
+    def _file_info(self, src_dir: Path, name: str, content: str = "data") -> FileInfo:
+        p = src_dir / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+        return FileInfo(
+            source_path=p,
+            relative_path=name,
+            size=p.stat().st_size,
+            mtime=p.stat().st_mtime,
+            source_root=str(src_dir),
+        )
+
+    def _ctx(self, tmp_path: Path, files, *, encrypt: bool) -> PipelineContext:
+        from src.core.config import EncryptionConfig
+        from src.core.phases.manifest import build_integrity_manifest
+
+        dest = tmp_path / "dest"
+        dest.mkdir(exist_ok=True)
+        storage = StorageConfig(storage_type=StorageType.LOCAL, destination_path=str(dest))
+        profile = BackupProfile(storage=storage)
+        if encrypt:
+            profile.encrypt_primary = True
+            profile.encryption = EncryptionConfig(enabled=True, stored_password="password12345678")
+        ctx = PipelineContext(
+            profile=profile,
+            config_manager=None,
+            events=EventBus(),
+            result=BackupResult(),
+        )
+        ctx.files = files
+        ctx.backup_name = "Bk_FULL_2026-01-01_000000"
+        ctx.integrity_manifest = build_integrity_manifest(files)
+        return ctx
+
+    def test_plain_prunes_manifest_for_vanished_file(self, tmp_path: Path) -> None:
+        src = tmp_path / "source"
+        files = [self._file_info(src, "a.txt"), self._file_info(src, "b.txt")]
+        ctx = self._ctx(tmp_path, files, encrypt=False)
+        # b vanishes AFTER the manifest is built, BEFORE the copy.
+        (src / "b.txt").unlink()
+        write_backup(ctx)
+        assert "a.txt" in ctx.integrity_manifest["files"]
+        assert "b.txt" not in ctx.integrity_manifest["files"]
+        skipped = {e["path"] for e in ctx.integrity_manifest.get("skipped_files", [])}
+        assert "b.txt" in skipped
+
+    def test_encrypted_prunes_manifest_for_vanished_file(self, tmp_path: Path) -> None:
+        src = tmp_path / "source"
+        files = [self._file_info(src, "a.txt"), self._file_info(src, "b.txt")]
+        ctx = self._ctx(tmp_path, files, encrypt=True)
+        (src / "b.txt").unlink()
+        write_backup(ctx)
+        # The encrypted archive contains only a.txt; the manifest must match.
+        assert "a.txt" in ctx.integrity_manifest["files"]
+        assert "b.txt" not in ctx.integrity_manifest["files"]
+        skipped = {e["path"] for e in ctx.integrity_manifest.get("skipped_files", [])}
+        assert "b.txt" in skipped

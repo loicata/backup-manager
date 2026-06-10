@@ -5,6 +5,35 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.50] - 2026-06-10
+
+Batch fix of the 13 highest-priority "high" findings from the 2026-06-10 deep audit
+(the 5 criticals shipped in 3.7.49). Full suite: 2636 passed, 28 skipped, 92.7% coverage.
+
+### Fixed — data loss
+- **Orphan scan deleted other profiles' in-flight backups on a shared destination.** `_phase_orphan_scan` now only deletes orphans whose name carries this profile's `sanitize_profile_name(...) + "_"` prefix (mirrors the rotator). Foreign / other-profile artefacts are never touched. Fixes the 18/05/2026 incident where a concurrent run wiped TestLoic's 2.36 GB in-flight backup mid-write.
+- **Mirror backups were never committed when `auto_verify=False` (the default).** `_commit_mirror` was only reachable inside `_phase_verify_mirrors`, which returned early when verification was off — so mirror uploads got no `.wbcommit` and the next run's orphan scan deleted them all. Commit is now decoupled from verify: every successfully-uploaded mirror gets its marker regardless of `auto_verify`; a mirror that fails verification still gets none.
+- **A profile-switch auto-save overwrote engine-written run-state with a stale cached value.** `_save_profile` now refreshes engine-owned fields (`last_backup`, `last_full_backup`, recovery flags, `profile_hash`, ...) from disk before writing (`_preserve_engine_owned_state`), so a UI save can no longer regress what the scheduler just persisted (10/06/2026: crypter's `last_backup` written back two days stale).
+- **`save_profile` persisted an unvalidated StorageConfig.** The storage tab builds its config by assigning `storage_type` via direct attribute set, bypassing `__post_init__` — so a half-configured remote profile (SFTP without host, S3 without bucket) reached disk and was rejected as "corrupted" on the next load, silently rolling back to `.bak` and discarding the edit (12/05 + 28/05 incidents). `save_profile` now validates (tolerating the default placeholder), and the UI surfaces the error inline on the Storage tab.
+
+### Fixed — false "success"
+- **A scheduled backup the user cancelled was journalled `success`.** The cancel branch now records `status="cancelled"`, saves the per-run log, and re-raises; the scheduler classifies `CancelledError` as a skip (no retry storm, terminal "cancelled" status) instead of falling through to its success path (14/05/2026).
+- **A backup whose every source was unreachable reported a green 0-file success.** All configured sources missing now raises `RuntimeError` (a dead source drive must fail, not produce "successful" empty runs forever). One missing source among several present ones surfaces a warning and backs up the rest. A genuinely-empty existing source still succeeds.
+- **A partial encrypted backup reported unqualified success.** The encrypted-write path now compares the written-file hashes to the input set, prunes the integrity manifest for any vanished file, surfaces a warning, and corrects the reported file count.
+- **Periodic remote verification reported `ok` for an empty or missing backup.** It fell back to `get_file_size()` on a backup directory, which returns the inode size (~4096 B). It now requires a non-empty `list_backup_files()` listing; an empty/zero-byte remote backup is reported `missing`.
+
+### Fixed — robustness
+- **A single source file vanishing mid-run aborted the whole backup.** `build_integrity_manifest` and `write_flat` now skip a source that vanished (recording it under `skipped_files` and pruning the manifest) instead of raising — the 06/05/2026 (.ico, 256k-file run) and 18/05/2026 (vi.msg, WinError 2) incidents. Genuine I/O errors (permission, disk) still fail fast.
+- **Tk-callback and worker-thread exceptions vanished in the windowed build.** `main()` now installs `root.report_callback_exception` and `threading.excepthook`, both routing to the logger, so a crash leaves a diagnosable trail in `backup_manager.log` instead of being written to a null stderr.
+- **The scheduler thread could be pinned for the full 30-minute precheck-prompt timeout, including across app exit.** The prompt wait is now stop-aware (`InAppScheduler.is_stopping()`) and releases promptly on shutdown. (Sequential one-at-a-time backups remain by design.)
+
+### Fixed — security
+- **Tar-slip / path traversal on SFTP directory restore.** `_extract_tar_members` now rejects any member whose resolved path escapes the restore directory (absolute paths, `..` segments) before writing it.
+- **Object Lock retention was bypassed on encrypted S3 uploads.** The encrypted-tempfile upload path went through a raw boto3 client with no `ExtraArgs`, so the archive received only the bucket default retention. It now forwards `_build_lock_extra_args()`, restoring the per-object retention guarantee (a full outlives the differentials referencing it).
+
+### Tests
+- +50 regression tests across orphan-scan prefix filtering, mirror commit decoupling, run-state preservation, save validation, cancel classification, missing-source failure, encrypted partial pruning, periodic-verify emptiness, vanished-file skip, exception hooks, scheduler stop-awareness, tar-slip containment, and Object-Lock ExtraArgs.
+
 ## [3.7.49] - 2026-06-10
 
 ### Fixed

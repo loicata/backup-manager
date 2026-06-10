@@ -1487,6 +1487,46 @@ class BackupManagerApp:
         result = _check_destination(config, label, lightweight=lightweight)
         self._on_health_result(index, result)
 
+    # Run-state fields written by the engine/scheduler, never by a UI tab.
+    # A UI save must preserve whatever is on disk for these, or it regresses
+    # the scheduler's work (10/06/2026: crypter's last_backup written back
+    # two days stale by a profile-switch auto-save).
+    _ENGINE_OWNED_PROFILE_FIELDS = (
+        "last_backup",
+        "last_full_backup",
+        "last_full_files_count",
+        "last_backup_completed",
+        "incomplete_backup_name",
+        "incomplete_backup_was_full",
+        "crash_recovery_attempts",
+        "profile_hash",
+    )
+
+    def _preserve_engine_owned_state(self, profile: BackupProfile) -> None:
+        """Copy engine-owned run-state from the on-disk profile onto ``profile``.
+
+        ``_save_profile`` builds ``profile`` from user-editable tab values
+        only; the scheduler updates run-state (last_backup, recovery flags,
+        profile_hash, ...) on a separately-loaded instance and on disk, and
+        the UI cache is not refreshed after a scheduled run. Without this
+        merge a profile-switch auto-save overwrites those fields with stale
+        cached values. The merge is intentionally NOT done inside
+        ``ConfigManager.save_profile`` — the engine's own saves legitimately
+        advance these fields and must not be reverted to the on-disk value.
+        """
+        try:
+            on_disk = next(
+                (p for p in self.config_manager.get_all_profiles() if p.id == profile.id),
+                None,
+            )
+        except Exception as exc:
+            logger.warning("Could not reload profile %r to preserve run-state: %s", profile.id, exc)
+            return
+        if on_disk is None:
+            return  # brand-new profile — nothing persisted to preserve yet
+        for fld in self._ENGINE_OWNED_PROFILE_FIELDS:
+            setattr(profile, fld, getattr(on_disk, fld))
+
     def _save_profile(self, silent: bool = False) -> bool:
         """Collect config from all tabs and save.
 
@@ -1571,6 +1611,25 @@ class BackupManagerApp:
             if m is not None:
                 mirrors.append(m)
         profile.mirror_destinations = mirrors
+
+        # Validate storage + mirrors before any persistence. The storage
+        # tab builds its config by assigning storage_type via direct
+        # attribute set (bypassing __post_init__), so a remote type with a
+        # missing required field (SFTP host, S3 bucket) would reach disk and
+        # be rejected as "corrupted" on the next load — silently rolling
+        # back to .bak and losing this edit. Surface it inline instead.
+        try:
+            profile.storage.validate_unless_placeholder()
+            for m in mirrors:
+                m.validate_unless_placeholder()
+        except ValueError as exc:
+            self._notify(
+                title="Storage settings incomplete",
+                body=str(exc),
+                level="warning",
+                select_tab=self.tab_storage,
+            )
+            return False
 
         # Check for duplicate destinations
         dup_error = self._check_duplicate_destinations(storage["storage"], mirrors)
@@ -1662,6 +1721,11 @@ class BackupManagerApp:
                 [p.name for p in propagated],
             )
 
+        # Refresh engine-owned run-state from disk before persisting so this
+        # UI save (which only collected user-editable tab values into a
+        # possibly stale cached instance) cannot regress fields the
+        # scheduler wrote on its own instance after the last UI refresh.
+        self._preserve_engine_owned_state(profile)
         self.config_manager.save_profile(profile)
 
         # Immediate user feedback BEFORE the secondary work (registry
@@ -3408,8 +3472,18 @@ class BackupManagerApp:
                 "Scheduled backup cancelled",
                 f"[{profile.name}] Cancelled by user",
             )
+            result = engine._current_result
+            # Record the cancellation and save the per-run log BEFORE
+            # re-raising. Pre-fix this branch did neither and did NOT
+            # re-raise, so _trigger_backup fell through to its success
+            # path and journalled status="success" for a backup the user
+            # aborted (14/05/2026: "Backup cancelled by user" immediately
+            # followed by "Scheduled backup succeeded").
+            with self.scheduler.op_lock:
+                self.scheduler.journal.update_last(profile_id=profile.id, status="cancelled")
+            if result:
+                self._save_backup_log(profile, result)
             if profile.email.enabled:
-                result = engine._current_result
                 self._send_backup_email(
                     profile,
                     False,
@@ -3417,6 +3491,9 @@ class BackupManagerApp:
                     "Backup cancelled by user",
                     cancelled=True,
                 )
+            # Re-raise so _trigger_backup classifies this as a user cancel
+            # (skip-class: no retry storm), not a silent success.
+            raise
 
         except Exception as e:
             scheduled_failed = True
@@ -3503,8 +3580,23 @@ class BackupManagerApp:
 
             # Show alert on main thread
             self.root.after(0, _show_alert)
-            remaining = max(1.0, deadline - time.monotonic())
-            clicked = event.wait(timeout=remaining)
+            # Wait for the user's click OR the deadline, but in short chunks
+            # so a scheduler stop (app exit) releases this thread promptly
+            # instead of pinning it for the full prompt timeout. Mirrors the
+            # chunked stop-aware wait the retry loop uses.
+            clicked = False
+            while time.monotonic() < deadline:
+                if self.scheduler is not None and self.scheduler.is_stopping():
+                    logger.info(
+                        "Scheduler stopping — releasing precheck prompt for '%s'",
+                        profile.name,
+                    )
+                    self.root.after(0, self._hide_target_alert)
+                    return "timeout"
+                chunk = min(1.0, max(0.0, deadline - time.monotonic()))
+                if event.wait(timeout=chunk):
+                    clicked = True
+                    break
 
             if not clicked:
                 # No response within budget — return "timeout" so the

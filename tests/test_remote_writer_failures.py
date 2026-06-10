@@ -162,3 +162,47 @@ def test_disconnect_called_even_on_failure(tmp_path):
         write_remote(files, backend, "backup_01")
 
     backend.disconnect.assert_called_once()
+
+
+# -- Encrypted S3 upload: Object Lock retention --
+
+
+def test_encrypted_s3_upload_applies_object_lock_extra_args(tmp_path):
+    """The encrypted-tempfile S3 path must forward per-object Object Lock
+    retention via ExtraArgs (regression: it bypassed _build_lock_extra_args
+    and the archive got only the bucket default retention)."""
+    files = _make_files(tmp_path, count=2)
+    backend = MagicMock()
+    backend.supports_tar_stream = False  # force the seekable (S3) tempfile path
+    backend._bandwidth_limit_kbps = 0
+    lock_args = {
+        "ObjectLockMode": "COMPLIANCE",
+        "ObjectLockRetainUntilDate": "2026-10-01T00:00:00Z",
+    }
+    backend._build_lock_extra_args.return_value = lock_args
+    backend._s3_key.side_effect = lambda p: p
+    client = backend._get_client.return_value
+
+    write_remote(files, backend, "backup_01", encrypt_password="password12345678")
+
+    client.upload_file.assert_called_once()
+    _, kwargs = client.upload_file.call_args
+    assert kwargs["ExtraArgs"] == lock_args
+
+
+def test_encrypted_s3_upload_without_lock_omits_extra_args(tmp_path):
+    """When no retention is configured, no ExtraArgs is passed (unchanged
+    behaviour for non-Object-Lock buckets)."""
+    files = _make_files(tmp_path, count=1)
+    backend = MagicMock()
+    backend.supports_tar_stream = False
+    backend._bandwidth_limit_kbps = 0
+    backend._build_lock_extra_args.return_value = {}
+    backend._s3_key.side_effect = lambda p: p
+    client = backend._get_client.return_value
+
+    write_remote(files, backend, "backup_01", encrypt_password="password12345678")
+
+    client.upload_file.assert_called_once()
+    _, kwargs = client.upload_file.call_args
+    assert "ExtraArgs" not in kwargs

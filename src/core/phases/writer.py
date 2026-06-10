@@ -70,13 +70,15 @@ def write_backup(
         dest = Path(ctx.profile.storage.destination_path)
 
         if encrypt_pw:
-            # Encrypted tar still streams source files through a
-            # hashing wrapper for the embedded ``.wbverify`` inside
-            # the archive. The hashes it computes happen to match
-            # ``ctx.integrity_manifest`` (both come from the same
-            # source bytes); kept for backward compatibility with
-            # the in-archive layout.
-            archive_path, _ = write_encrypted_tar_with_hashes(
+            # Encrypted tar streams source files through a hashing
+            # wrapper for the embedded ``.wbverify``. The returned
+            # ``file_hashes`` is the set of files ACTUALLY written: the
+            # encrypted writer skips a source that vanished mid-write
+            # (logs "File vanished, skipping"). Compare it to ``ctx.files``
+            # and prune the manifest for any missing entry, otherwise a
+            # partial archive would carry a manifest claiming files it
+            # does not contain and still report "Verification OK".
+            archive_path, file_hashes = write_encrypted_tar_with_hashes(
                 ctx.files,
                 dest,
                 ctx.backup_name,
@@ -85,18 +87,32 @@ def write_backup(
                 cancel_check=cancel_check,
             )
             ctx.backup_path = archive_path
+            written = set(file_hashes)
+            skipped = {f.relative_path for f in ctx.files if f.relative_path not in written}
+            if skipped:
+                from src.core.phases.manifest import prune_manifest_entries
+
+                prune_manifest_entries(ctx.integrity_manifest, skipped)
             return
 
         # Plain local mode: pure kernel ``shutil.copy2`` per file.
         # The manifest was already built by ``_phase_integrity``;
-        # the writer just moves bytes.
+        # the writer just moves bytes. A vanished source is skipped (not
+        # fatal) and recorded in ``skipped`` so the manifest is pruned to
+        # match what actually landed on disk.
+        skipped_flat: set[str] = set()
         ctx.backup_path = write_flat(
             ctx.files,
             dest,
             ctx.backup_name,
             ctx.events,
             cancel_check=cancel_check,
+            skipped_out=skipped_flat,
         )
+        if skipped_flat:
+            from src.core.phases.manifest import prune_manifest_entries
+
+            prune_manifest_entries(ctx.integrity_manifest, skipped_flat)
     finally:
         if secure_pw:
             secure_pw.clear()

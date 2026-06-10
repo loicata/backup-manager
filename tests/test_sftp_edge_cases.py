@@ -388,3 +388,74 @@ class TestDeleteBackup:
                 storage.delete_backup("ghost")
         finally:
             _cleanup_paramiko()
+
+
+# ---------------------------------------------------------------------------
+# _extract_tar_members — tar-slip / path-traversal guard
+# ---------------------------------------------------------------------------
+
+
+def _make_tar_bytes(members: list[tuple[str, bytes]]) -> bytes:
+    """Build an uncompressed tar holding the given (name, data) members."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, data in members:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+class TestExtractTarMembersPathTraversal:
+    """The streaming extractor must never write outside the restore dir,
+    even when the (untrusted) server sends ``..`` or absolute members."""
+
+    def _extract(self, members, restore_dir):
+        import io
+        import tarfile
+
+        from src.storage.sftp import SFTPStorage
+
+        data = _make_tar_bytes(members)
+        # ``r|`` mirrors the real streaming download path (tar.next()).
+        tar = tarfile.open(fileobj=io.BytesIO(data), mode="r|")
+        try:
+            SFTPStorage._extract_tar_members(tar, restore_dir)
+        finally:
+            tar.close()
+
+    def test_benign_members_extracted(self, tmp_path):
+        restore = tmp_path / "restore"
+        restore.mkdir()
+        self._extract([("dir/good.txt", b"safe")], restore)
+        assert (restore / "dir" / "good.txt").read_bytes() == b"safe"
+
+    def test_parent_traversal_member_skipped(self, tmp_path):
+        restore = tmp_path / "restore"
+        restore.mkdir()
+        self._extract(
+            [("good.txt", b"safe"), ("../escape.txt", b"evil")],
+            restore,
+        )
+        assert (restore / "good.txt").read_bytes() == b"safe"
+        # The traversal member must NOT have escaped the restore dir.
+        assert not (tmp_path / "escape.txt").exists()
+
+    def test_deep_traversal_member_skipped(self, tmp_path):
+        restore = tmp_path / "a" / "b" / "restore"
+        restore.mkdir(parents=True)
+        self._extract([("../../../pwned.txt", b"evil")], restore)
+        assert not (tmp_path / "pwned.txt").exists()
+        assert not (tmp_path / "a" / "pwned.txt").exists()
+
+    def test_absolute_member_skipped(self, tmp_path):
+        # A leading separator re-anchors to the drive root on Windows /
+        # filesystem root on POSIX — must be rejected, not written there.
+        restore = tmp_path / "restore"
+        restore.mkdir()
+        self._extract([("good.txt", b"safe"), ("/abs_escape.txt", b"evil")], restore)
+        assert (restore / "good.txt").read_bytes() == b"safe"
+        assert not (restore / "abs_escape.txt").exists()

@@ -109,8 +109,13 @@ class TestWriteFlat:
         assert progress_data[0]["current"] == 1
         assert progress_data[1]["current"] == 2
 
-    def test_source_file_missing_raises_write_error(self, tmp_path: Path) -> None:
-        """WriteError is raised when a source file does not exist."""
+    def test_source_file_missing_is_skipped_not_fatal(self, tmp_path: Path) -> None:
+        """A vanished source file is SKIPPED (recorded), not fatal.
+
+        Changed in the #9 fix: a single file deleted between collection and
+        copy must not abort the whole run (the 18/05/2026 WinError 2
+        incident). Destination errors and unreadable sources stay fatal —
+        see test_source_permission_error_raises_write_error below."""
         missing = tmp_path / "source" / "gone.txt"
         fi = FileInfo(
             source_path=missing,
@@ -122,8 +127,10 @@ class TestWriteFlat:
 
         dest = tmp_path / "dest"
         dest.mkdir()
-        with pytest.raises(WriteError):
-            write_flat([fi], dest, "Backup")
+        skipped: set[str] = set()
+        backup_dir = write_flat([fi], dest, "Backup", skipped_out=skipped)  # must not raise
+        assert skipped == {"gone.txt"}
+        assert backup_dir.exists()
 
     def test_source_permission_error_raises_write_error(self, tmp_path: Path) -> None:
         """WriteError when source file cannot be read.
@@ -755,3 +762,50 @@ class TestGenerateBackupName:
         name = generate_backup_name("X", "FULL")
         # Pattern: _FULL_YYYY-MM-DD_HHMMSS
         assert re.search(r"_FULL_\d{4}-\d{2}-\d{2}_\d{6}$", name)
+
+
+class TestWriteFlatVanishedSource:
+    """A source file that disappears between collection and copy is
+    skipped (recorded in skipped_out), not fatal — the 18/05/2026
+    WinError 2 incident. Destination errors stay fatal."""
+
+    def test_vanished_source_skipped_and_recorded(self, tmp_path: Path) -> None:
+        src = tmp_path / "source"
+        _make_file(src / "present.txt", "here")
+        present = _make_file_info(src / "present.txt", "present.txt")
+        # FileInfo for a file that never existed → copy raises FNF on source.
+        gone = FileInfo(
+            source_path=src / "gone.txt",
+            relative_path="gone.txt",
+            size=4,
+            mtime=0.0,
+            source_root=str(src),
+        )
+        skipped: set[str] = set()
+        backup_dir = write_flat(
+            [present, gone],
+            tmp_path / "dest",
+            "Bk_FULL_x",
+            skipped_out=skipped,
+        )
+        # The present file landed; the vanished one was skipped, not fatal.
+        assert (backup_dir / "present.txt").read_text(encoding="utf-8") == "here"
+        assert not (backup_dir / "gone.txt").exists()
+        assert skipped == {"gone.txt"}
+
+    def test_vanished_source_without_skipped_out_still_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
+        src = tmp_path / "source"
+        _make_file(src / "a.txt", "a")
+        present = _make_file_info(src / "a.txt", "a.txt")
+        gone = FileInfo(
+            source_path=src / "missing.txt",
+            relative_path="missing.txt",
+            size=1,
+            mtime=0.0,
+            source_root=str(src),
+        )
+        # No skipped_out passed — must still tolerate the vanished source.
+        backup_dir = write_flat([present, gone], tmp_path / "dest2", "Bk_FULL_y")
+        assert (backup_dir / "a.txt").exists()

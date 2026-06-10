@@ -426,15 +426,17 @@ class IntegrityVerifier:
             Verification result.
         """
         if is_encrypted:
-            # Check file exists
+            # Check the archive exists AND is non-empty. A zero-byte object
+            # (truncated/failed upload) must not pass as present — get_file_size
+            # returns 0, not None, for an empty object.
             remote_size = backend.get_file_size(backup_name)
-            if remote_size is None:
+            if not remote_size:
                 return BackupVerifyResult(
                     backup_name=backup_name,
                     destination=role,
                     storage_type=storage_type,
                     status="missing",
-                    message="Archive not found on remote",
+                    message="Archive not found or empty on remote",
                 )
 
             stored = verify_hashes.get(backup_name)
@@ -489,35 +491,63 @@ class IntegrityVerifier:
                 message=msg,
             )
         else:
-            # Flat backup — use backend.verify_backup_files() if available
+            # Flat backup — confirm the files actually exist on the remote.
+            # verify_backup_files() returns server-side (path, size,
+            # checksum) tuples; a non-empty result proves the backup's files
+            # are present (and, on SFTP, that the server could hash them).
+            file_results = None
             if hasattr(backend, "verify_backup_files"):
                 try:
                     file_results = backend.verify_backup_files(backup_name)
-                    if file_results:
-                        msg = f"Remote verification OK: {len(file_results)} files"
-                        self._log.info(f"{role}/{backup_name}: {msg}")
-                        return BackupVerifyResult(
-                            backup_name=backup_name,
-                            destination=role,
-                            storage_type=storage_type,
-                            status="ok",
-                            message=msg,
-                        )
                 except Exception as e:
-                    logger.debug("verify_backup_files failed: %s", e)
+                    # Do NOT swallow at DEBUG and then fall through to a
+                    # size check that calls a missing backup "ok" — that
+                    # masked total loss (the stage-5 failure mode).
+                    logger.warning(
+                        "verify_backup_files failed for %s/%s: %s",
+                        role,
+                        backup_name,
+                        e,
+                    )
+                    file_results = None
 
-            # Fallback: check file count via list
-            remote_size = backend.get_file_size(backup_name)
-            if remote_size is None:
+            if file_results:
+                msg = f"Remote backup present: {len(file_results)} file(s) verified (count + size)"
+                self._log.info(f"{role}/{backup_name}: {msg}")
+                return BackupVerifyResult(
+                    backup_name=backup_name,
+                    destination=role,
+                    storage_type=storage_type,
+                    status="ok",
+                    message=msg,
+                )
+
+            # No per-file info available. Require a NON-EMPTY listing before
+            # declaring the backup present: a bare get_file_size() on a
+            # backup DIRECTORY returns the inode size (~4096 B on SFTP),
+            # which previously made an empty or missing remote backup report
+            # "ok" forever — silent total data loss.
+            listing = []
+            if hasattr(backend, "list_backup_files"):
+                try:
+                    listing = backend.list_backup_files(backup_name)
+                except Exception as e:
+                    logger.warning(
+                        "list_backup_files failed for %s/%s: %s", role, backup_name, e
+                    )
+                    listing = []
+
+            if not listing:
+                self._log.error(f"{role}/{backup_name}: remote backup empty or missing")
                 return BackupVerifyResult(
                     backup_name=backup_name,
                     destination=role,
                     storage_type=storage_type,
                     status="missing",
-                    message="Backup not found on remote",
+                    message="Remote backup is empty or missing (no files found)",
                 )
 
-            msg = f"Remote backup exists ({remote_size:,} bytes)"
+            msg = f"Remote backup present: {len(listing)} file(s) (existence only)"
             self._log.info(f"{role}/{backup_name}: {msg}")
             return BackupVerifyResult(
                 backup_name=backup_name,

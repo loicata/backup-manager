@@ -322,11 +322,22 @@ def _upload_encrypted_tar_tempfile(
 
             client = backend._get_client()
             key = backend._s3_key(remote_path)
+            upload_kwargs: dict = {"Config": transfer_config}
+            # Apply S3 Object Lock per-object retention. This raw-client
+            # path bypassed S3Storage._upload_one, so without ExtraArgs the
+            # encrypted archive received only the bucket DEFAULT retention
+            # (shorter than the engine's explicit per-object value),
+            # silently voiding the guarantee that a full outlives every
+            # differential that references it.
+            if hasattr(backend, "_build_lock_extra_args"):
+                lock_args = backend._build_lock_extra_args()
+                if lock_args:
+                    upload_kwargs["ExtraArgs"] = lock_args
             client.upload_file(
                 tmp_path,
                 backend._bucket,
                 key,
-                Config=transfer_config,
+                **upload_kwargs,
             )
         else:
             with open(tmp_path, "rb") as f:

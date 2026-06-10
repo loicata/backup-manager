@@ -409,6 +409,18 @@ class InAppScheduler:
             self._thread.join(timeout=2)
         logger.info("Scheduler stopped")
 
+    def is_stopping(self) -> bool:
+        """True once :meth:`stop` has been requested.
+
+        Based solely on the stop event (set only by :meth:`stop`), so it
+        stays False for a not-yet-started scheduler. Lets long blocking
+        waits that run ON the scheduler thread (e.g. the destinations-
+        unavailable precheck prompt, which can otherwise hold the thread
+        for the full 30-minute prompt timeout) bail out promptly on app
+        exit instead of delaying shutdown.
+        """
+        return self._stop_event.is_set()
+
     def _run(self) -> None:
         # On startup, check for missed backups (cold boot scenario)
         if self.skip_startup_check:
@@ -726,25 +738,38 @@ class InAppScheduler:
             #   re-prompting in 2 minutes when the user is asleep is
             #   pure noise (18/05/2026 incident: three such timeouts
             #   in a row tripped the circuit breaker for TestNP).
-            from src.core.exceptions import PrecheckUserTimeoutError
+            from src.core.exceptions import CancelledError, PrecheckUserTimeoutError
             from src.core.profile_lock import ProfileLockError
 
             is_concurrent = isinstance(e, ProfileLockError)
             is_user_timeout = isinstance(e, PrecheckUserTimeoutError)
-            is_skip = is_concurrent or is_user_timeout
+            # A user who explicitly cancelled does not want the scheduler
+            # to silently re-run 2 minutes later — classify it as a skip
+            # (no retry) and journal "cancelled" (a terminal status), not
+            # the bogus "success" the fall-through used to write.
+            is_cancelled = isinstance(e, CancelledError)
+            is_skip = is_concurrent or is_user_timeout or is_cancelled
 
             level = logger.info if is_skip else logger.exception
             if is_concurrent:
                 outcome_label = "skipped (concurrent)"
             elif is_user_timeout:
                 outcome_label = "skipped (precheck user timeout)"
+            elif is_cancelled:
+                outcome_label = "cancelled (by user)"
             else:
                 outcome_label = "failed"
             level("Scheduled backup %s: %s", outcome_label, profile.name)
+            if is_cancelled:
+                status = "cancelled"
+            elif is_skip:
+                status = "skipped"
+            else:
+                status = "failed"
             with self._op_lock:
                 self._journal.update_last(
                     profile_id=profile.id,
-                    status="skipped" if is_skip else "failed",
+                    status=status,
                     detail=f"{type(e).__name__}: {e}",
                     timestamp=datetime.now().isoformat(),
                 )

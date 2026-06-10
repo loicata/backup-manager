@@ -673,6 +673,22 @@ class BackupEngine:
         # Phase 1: Collect
         self._phase_collect(ctx)
         if not ctx.files:
+            existing, missing = self._check_sources_available(ctx)
+            if missing and not existing:
+                # Every configured source is unreachable (unmounted drive,
+                # renamed/deleted folder, dead network path). This is a
+                # failure to SEE the data, NOT an empty backup — a backup
+                # tool must never report green here, or a dead source drive
+                # produces "successful" 0-file runs forever, masking total
+                # data-protection loss. Raising lets the scheduler retry
+                # and the failure reach the user.
+                raise RuntimeError(
+                    "No backup source is available — all configured source "
+                    f"path(s) are missing: {', '.join(missing)}. Backup "
+                    "aborted (sources could not be read, not genuinely empty)."
+                )
+            # Sources exist but yielded nothing (genuinely empty, or every
+            # file matched an exclude pattern) — a legitimate no-op success.
             self._mark_completed(ctx)
             self._emit_status("success")
             return
@@ -836,8 +852,37 @@ class BackupEngine:
         ctx.all_files = list(ctx.files)  # Preserve full list for manifest
         ctx.result.files_found = len(ctx.files)
         ctx.result.bytes_source = sum(f.size for f in ctx.files)
+        # Surface any configured source that was unreachable at run time
+        # (unmounted drive, renamed folder, dead network path). collect_files
+        # only logs these at INFO and moves on, so a partially-missing backup
+        # (one dead drive among several) would otherwise look fully green.
+        _, missing = self._check_sources_available(ctx)
+        for src in missing:
+            ctx.result.add_warning(
+                phase="collect",
+                file_path=src,
+                message=f"Configured source not found and was not backed up: {src}",
+            )
         if not ctx.files:
             self._log("No files to back up")
+
+    @staticmethod
+    def _check_sources_available(ctx: PipelineContext) -> tuple[list[str], list[str]]:
+        """Split the profile's source paths into (existing, missing).
+
+        Re-stats the configured paths so the engine can tell "nothing to
+        back up" (sources present, genuinely empty) apart from "could not
+        see the data" (sources unreachable). A small TOCTOU vs the collect
+        phase is acceptable — it only errs toward caution.
+        """
+        existing: list[str] = []
+        missing: list[str] = []
+        for source in ctx.profile.source_paths:
+            if Path(source).exists():
+                existing.append(source)
+            else:
+                missing.append(source)
+        return existing, missing
 
     def _phase_filter(self, ctx: PipelineContext) -> None:
         """Phase 2: Filter changed files for differential backup.
@@ -1035,6 +1080,37 @@ class BackupEngine:
         else:
             self._phase(f"Copying to Storage — {target}...")
         write_backup(ctx, cancel_check=self._check_cancel)
+        self._record_skipped_files(ctx)
+
+    def _record_skipped_files(self, ctx: PipelineContext) -> None:
+        """Surface files that vanished during the run as result warnings.
+
+        ``build_integrity_manifest`` (pre-hash) and the writers (mid-copy)
+        record vanished source files under ``ctx.integrity_manifest
+        ['skipped_files']``. Without surfacing them the run would report a
+        plain green success while silently having backed up fewer files
+        than collected. Each becomes a WARNING (not an error — the run
+        still succeeds), and ``files_processed`` is corrected to the count
+        actually written so the summary and the commit marker agree.
+        """
+        skipped = ctx.integrity_manifest.get("skipped_files", [])
+        if not skipped:
+            return
+        for entry in skipped:
+            path = entry.get("path", "")
+            ctx.result.add_warning(
+                phase="write",
+                file_path=path,
+                message=(
+                    f"Source file vanished during backup and was excluded "
+                    f"from this backup: {path}"
+                ),
+            )
+        ctx.result.files_processed = len(ctx.integrity_manifest.get("files", {}))
+        self._log(
+            f"{len(skipped)} file(s) vanished during backup and were skipped "
+            f"(backup still completed; see warnings)"
+        )
 
     def _phase_save_manifest(self, ctx: PipelineContext) -> None:
         """Phase 5: Save integrity manifest alongside backup.
@@ -1124,6 +1200,17 @@ class BackupEngine:
         """
         from src.core.config import StorageType
 
+        # Only ever delete orphans that belong to THIS profile. On a
+        # destination shared by several profiles (typical for SFTP/NAS),
+        # another profile's backup directory exists under its final name
+        # from the first second of its write and only gains a .wbcommit at
+        # the end — so for its entire multi-hour write window it is
+        # indistinguishable from a dead orphan. Without this prefix filter,
+        # profile A's start-of-run scan deleted profile B's in-flight
+        # backup (18/05/2026: 2.36 GB wiped mid-write, B then rejected for
+        # 3.5 h). Mirrors the prefix filter the rotator already applies.
+        profile_prefix = sanitize_profile_name(ctx.profile.name) + "_"
+
         destinations: list[tuple[str, object, object]] = [
             ("Storage", ctx.profile.storage, ctx.backend),
         ]
@@ -1163,6 +1250,12 @@ class BackupEngine:
 
             for orphan in orphans:
                 name = orphan["name"]
+                if not name.startswith(profile_prefix):
+                    # Belongs to another profile (or is a foreign artefact)
+                    # — never delete it. Leaking an unknown orphan is far
+                    # cheaper than destroying another profile's running
+                    # backup.
+                    continue
                 try:
                     backend.delete_backup(name)
                     self._log(
@@ -1849,91 +1942,111 @@ class BackupEngine:
                     secure_pw.clear()
 
     def _phase_verify_mirrors(self, ctx: PipelineContext) -> None:
-        """Phase 10: Verify mirror uploads.
+        """Phase 10: Verify (when enabled) and commit mirror uploads.
 
-        Runs the same verification as _verify_remote for each
-        mirror destination that was successfully uploaded.
+        Each successfully-uploaded mirror is verified only when the
+        profile's ``auto_verify`` toggle is on, but its ``.wbcommit``
+        marker is written REGARDLESS of that toggle.
+
+        Decoupling commit from verify fixes a data-loss bug: with the
+        default ``auto_verify=False`` this whole phase used to return
+        early, so mirror uploads never received a commit marker — and the
+        NEXT run's orphan scan then deleted every (uncommitted) mirror
+        backup, so the mirror destination retained nothing. A mirror that
+        fails verification still gets no marker (the verify raises before
+        the commit), and a mirror that failed to upload (possible only
+        under ``allow_partial`` / Object Lock) is skipped entirely.
 
         Raises:
             RuntimeError: If any mirror file fails verification.
         """
         if not ctx.profile.mirror_destinations:
             return
-        if not ctx.profile.verification.auto_verify:
-            return
+
+        verify_enabled = ctx.profile.verification.auto_verify
+        mirror_results = ctx.result.mirror_results or []
 
         encrypt_flags = [
             ctx.profile.encrypt_mirror1,
             ctx.profile.encrypt_mirror2,
         ]
         for i, config in enumerate(ctx.profile.mirror_destinations):
+            # Never commit a mirror that did not upload successfully. Only
+            # reachable under allow_partial (Object Lock) — otherwise
+            # mirror_backup would have raised before this phase.
+            if i < len(mirror_results) and mirror_results[i][1] is False:
+                continue
+
             mirror_name = f"Mirror {i + 1}"
             self._check_cancel()
             mirror_encrypted = (
                 ctx.profile.encryption.enabled and i < len(encrypt_flags) and encrypt_flags[i]
             )
             logger.info(
-                "Verify %s: encrypted=%s (enc_enabled=%s, flag=%s)",
+                "Verify %s: encrypted=%s (enc_enabled=%s, flag=%s, verify=%s)",
                 mirror_name,
                 mirror_encrypted,
                 ctx.profile.encryption.enabled,
                 encrypt_flags[i] if i < len(encrypt_flags) else "N/A",
+                verify_enabled,
             )
 
             try:
-                backend = self._get_backend(config)
+                if verify_enabled:
+                    backend = self._get_backend(config)
 
-                if mirror_encrypted:
-                    # Encrypted mirrors produce a single .tar.wbenc file.
-                    # Verify it exists with plausible size. GCM tags
-                    # guarantee integrity at decryption time.
-                    self._phase(f"Verifying {mirror_name} (encrypted)...")
-                    self._verify_encrypted_archive(
-                        backend,
-                        config,
-                        ctx.backup_name,
-                        mirror_name,
-                    )
-                elif config.is_remote():
-                    self._phase(f"Verifying {mirror_name}...")
-                    verified = backend.verify_backup_files(ctx.backup_name)
-                    has_checksums = verified and any(c for _, _, c in verified)
-
-                    if has_checksums:
-                        self._verify_mirror_checksums(
-                            ctx,
-                            verified,
+                    if mirror_encrypted:
+                        # Encrypted mirrors produce a single .tar.wbenc
+                        # file. Verify it exists with plausible size. GCM
+                        # tags guarantee integrity at decryption time.
+                        self._phase(f"Verifying {mirror_name} (encrypted)...")
+                        self._verify_encrypted_archive(
+                            backend,
+                            config,
+                            ctx.backup_name,
                             mirror_name,
                         )
-                    else:
-                        remote_files = backend.list_backup_files(ctx.backup_name)
-                        if remote_files:
-                            self._verify_mirror_sizes(
+                    elif config.is_remote():
+                        self._phase(f"Verifying {mirror_name}...")
+                        verified = backend.verify_backup_files(ctx.backup_name)
+                        has_checksums = verified and any(c for _, _, c in verified)
+
+                        if has_checksums:
+                            self._verify_mirror_checksums(
                                 ctx,
-                                remote_files,
+                                verified,
                                 mirror_name,
                             )
                         else:
-                            self._log(
-                                f"{mirror_name}: verification skipped "
-                                f"(file listing not supported)"
-                            )
-                else:
-                    # Local unencrypted mirror — hash verification.
-                    mirror_path = Path(config.destination_path) / ctx.backup_name
-                    if mirror_path.exists() and mirror_path.is_dir():
-                        self._phase(f"Verifying {mirror_name} (hash)...")
-                        manifest_file = mirror_path.parent / f"{mirror_path.name}.wbverify"
-                        if manifest_file.exists():
-                            ok, msg = verify_backup(mirror_path, manifest_file, self._events)
-                            if not ok:
-                                raise RuntimeError(f"{mirror_name}: {msg}")
+                            remote_files = backend.list_backup_files(ctx.backup_name)
+                            if remote_files:
+                                self._verify_mirror_sizes(
+                                    ctx,
+                                    remote_files,
+                                    mirror_name,
+                                )
+                            else:
+                                self._log(
+                                    f"{mirror_name}: verification skipped "
+                                    f"(file listing not supported)"
+                                )
+                    else:
+                        # Local unencrypted mirror — hash verification.
+                        mirror_path = Path(config.destination_path) / ctx.backup_name
+                        if mirror_path.exists() and mirror_path.is_dir():
+                            self._phase(f"Verifying {mirror_name} (hash)...")
+                            manifest_file = mirror_path.parent / f"{mirror_path.name}.wbverify"
+                            if manifest_file.exists():
+                                ok, msg = verify_backup(mirror_path, manifest_file, self._events)
+                                if not ok:
+                                    raise RuntimeError(f"{mirror_name}: {msg}")
 
-                # Mirror passed verification — write its commit marker
-                # so list_backups / restore on this mirror's destination
-                # recognise the artefact as committed. Each mirror has
-                # its own marker so a failure on mirror 2 does not
-                # invalidate mirror 1.
+                # Write the commit marker so list_backups / restore / the
+                # orphan scan on this mirror's destination recognise the
+                # artefact as committed. ALWAYS runs after a successful
+                # upload (and verify, if it was enabled) — independent of
+                # auto_verify. Each mirror has its own marker so a failure
+                # on mirror 2 does not invalidate mirror 1.
                 self._commit_mirror(ctx, config, i, mirror_name, mirror_encrypted)
 
             except RuntimeError:

@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import shutil
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -435,6 +436,15 @@ class ConfigManager:
         # Anonymous installation ID (generated once, never changes)
         self._install_id_path = self.config_dir / "install_id"
 
+        # Serializes every disk mutation (_atomic_write, .bak restore).
+        # save_profile is reached from three threads (Tk, scheduler
+        # daemon, backup worker) and _atomic_write uses ONE deterministic
+        # .tmp name per profile: unserialized, two concurrent savers can
+        # truncate each other's half-written .tmp, or make os.replace
+        # fail with PermissionError on Windows while the other holds
+        # the fd.
+        self._io_lock = threading.Lock()
+
     def get_install_id(self) -> str:
         """Return the anonymous installation UUID.
 
@@ -489,26 +499,74 @@ class ConfigManager:
                     path,
                     exc_info=True,
                 )
-                bak = path.with_suffix(".json.bak")
-                if bak.exists():
-                    try:
-                        profile = self._load_profile_file(bak)
-                        if profile.id not in seen_ids:
-                            seen_ids.add(profile.id)
-                            profiles.append(profile)
-                            # Restore .bak over corrupted file
-                            shutil.copy2(bak, path)
-                            logger.info("Recovered profile from %s", bak)
-                    except Exception:
-                        logger.error(
-                            "Profile %s unrecoverable from .bak — skipping. "
-                            "User will see the profile disappear from the UI.",
-                            path,
-                            exc_info=True,
-                        )
+                profile = self._recover_profile_from_bak(path)
+                if profile is not None and profile.id not in seen_ids:
+                    seen_ids.add(profile.id)
+                    profiles.append(profile)
 
         profiles.sort(key=lambda p: (p.sort_order, p.name.lower()))
         return profiles
+
+    def _recover_profile_from_bak(self, path: Path) -> BackupProfile | None:
+        """Recover a corrupted profile file from its .bak, atomically.
+
+        Runs under the manager I/O lock and re-parses the live file
+        first: between the caller's failed parse and this restore, a
+        concurrent ``save_profile`` may have published a FIXED version
+        (the exact post-incident user workflow) — clobbering it with
+        the stale .bak would be a lost update. The restore itself goes
+        through .tmp + ``os.replace`` so concurrent readers never see
+        a half-copied file (the previous ``shutil.copy2`` truncated
+        the live file in place while other threads could read it).
+
+        Args:
+            path: Profile ``.json`` file that failed to parse.
+
+        Returns:
+            The recovered profile, or None when no usable .bak exists.
+        """
+        bak = path.with_suffix(".json.bak")
+        if not bak.exists():
+            return None
+
+        with self._io_lock:
+            # TOCTOU guard: prefer a concurrently-published valid file
+            # over the stale .bak.
+            try:
+                fresh = self._load_profile_file(path)
+            except Exception:
+                logger.debug("Profile %s still unparseable — restoring from .bak", path)
+            else:
+                logger.info("Profile %s repaired by a concurrent save — keeping it", path)
+                return fresh
+
+            try:
+                profile = self._load_profile_file(bak)
+            except Exception:
+                logger.error(
+                    "Profile %s unrecoverable from .bak — skipping. "
+                    "User will see the profile disappear from the UI.",
+                    path,
+                    exc_info=True,
+                )
+                return None
+
+            # Atomic restore: .tmp + os.replace (same volume). Reuses
+            # the saver's .tmp name on purpose — a crash leftover is
+            # then recycled by the next save instead of lingering.
+            tmp = path.with_suffix(".json.tmp")
+            try:
+                shutil.copyfile(bak, tmp)
+                os.replace(tmp, path)
+            except OSError:
+                # Disk restore failed but the parsed profile is good:
+                # keep the profile in memory, surface the disk problem.
+                logger.error("Could not restore %s from .bak on disk", path, exc_info=True)
+                with contextlib.suppress(OSError):
+                    tmp.unlink(missing_ok=True)
+            else:
+                logger.info("Recovered profile from %s", bak)
+            return profile
 
     def save_profile(self, profile: BackupProfile) -> None:
         """Save a profile to disk with atomic write.
@@ -894,33 +952,42 @@ class ConfigManager:
         4. The ``.tmp`` is written with restrictive permissions where
            supported (ignored on Windows/FAT) since it may briefly
            contain encrypted-but-still-sensitive payloads.
+
+        5. The whole sequence runs under the manager-wide ``_io_lock``:
+           callers live on the Tk thread, the scheduler daemon and the
+           backup worker, and they all share this one deterministic
+           ``.tmp`` name per target file — unserialized, a concurrent
+           writer can truncate a half-written ``.tmp`` under us, or
+           ``os.replace`` can fail with ``PermissionError`` on Windows
+           while the other writer still holds the fd.
         """
-        tmp = filepath.with_suffix(".json.tmp")
-        bak = filepath.with_suffix(".json.bak")
+        with self._io_lock:
+            tmp = filepath.with_suffix(".json.tmp")
+            bak = filepath.with_suffix(".json.bak")
 
-        # Step 1: backup existing FIRST so we never lose the old copy
-        if filepath.exists():
-            shutil.copy2(filepath, bak)
+            # Step 1: backup existing FIRST so we never lose the old copy
+            if filepath.exists():
+                shutil.copy2(filepath, bak)
 
-        # Step 2: write to .tmp with fsync for durability
-        payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
-        try:
-            fd = os.open(
-                str(tmp),
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
-            )
+            # Step 2: write to .tmp with fsync for durability
+            payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
             try:
-                os.write(fd, payload)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+                fd = os.open(
+                    str(tmp),
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                    0o600,
+                )
+                try:
+                    os.write(fd, payload)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
 
-            # Step 3: atomic rename
-            os.replace(tmp, filepath)
-        except BaseException:
-            # If anything failed, remove the partial .tmp so a secret
-            # payload never lingers on disk with a predictable name.
-            with contextlib.suppress(OSError):
-                tmp.unlink(missing_ok=True)
-            raise
+                # Step 3: atomic rename
+                os.replace(tmp, filepath)
+            except BaseException:
+                # If anything failed, remove the partial .tmp so a secret
+                # payload never lingers on disk with a predictable name.
+                with contextlib.suppress(OSError):
+                    tmp.unlink(missing_ok=True)
+                raise

@@ -243,6 +243,163 @@ class TestS3ListBackupsCommitFilter:
         assert names == {"A.tar.wbenc", "B.tar.wbenc"}
 
 
+class TestS3ObjectLockFlag:
+    """Object Lock bucket flag (audit 2026-06-10): the write-probe and
+    delete guards must key on the bucket FLAG, not on _retain_until
+    (which is only set during a backup run)."""
+
+    def _ol_backend(self):
+        return S3Storage(
+            bucket="b",
+            prefix="",
+            region="us-east-1",
+            access_key="k",
+            secret_key="s",
+            object_lock=True,
+        )
+
+    def test_probe_skipped_on_object_lock_bucket_without_retain_until(self):
+        """A fresh UI/health backend (no _retain_until) on an Object
+        Lock bucket must NOT write a probe object — that probe would be
+        immutable and only delete-marked, accumulating billed versions."""
+        backend = self._ol_backend()
+        fake_client = MagicMock()
+        with (
+            patch.object(backend, "_get_client", return_value=fake_client),
+            patch.object(backend, "_probe_write") as probe,
+        ):
+            ok, _ = backend.test_connection()
+            assert ok is True
+            probe.assert_not_called()
+
+    def test_probe_still_runs_on_normal_bucket(self):
+        backend = S3Storage(
+            bucket="b", prefix="", region="us-east-1", access_key="k", secret_key="s"
+        )
+        fake_client = MagicMock()
+        with (
+            patch.object(backend, "_get_client", return_value=fake_client),
+            patch.object(backend, "_probe_write") as probe,
+        ):
+            backend.test_connection()
+            probe.assert_called_once()
+
+    def test_delete_refused_on_object_lock_bucket(self):
+        """delete_backup must raise on an Object Lock bucket instead of
+        'succeeding' via a delete marker that hides the backup."""
+        from src.core.exceptions import StorageDeleteError
+
+        backend = self._ol_backend()
+        # _get_client must never be reached — the guard fires first.
+        with patch.object(backend, "_get_client", side_effect=AssertionError("should not connect")):
+            with pytest.raises(StorageDeleteError) as excinfo:
+                backend.delete_backup("My_Backup_FULL_2026-06-10")
+        # The reason rides on the residual (StorageDeleteError.__str__
+        # shows only the residual path).
+        assert "Object Lock" in excinfo.value.residuals[0].error
+
+
+class TestS3UploadRewind:
+    """upload_file must rewind the stream so a with_retry re-invocation
+    re-uploads from byte 0, not from a partially-consumed position
+    (which would store a TRUNCATED .wbcommit/.wbverify as success)."""
+
+    def test_retry_reuploads_full_payload_after_partial_failure(self):
+        """First attempt consumes bytes then fails; with_retry must
+        rewind the stream so the retry re-sends the FULL payload, not
+        the truncated tail."""
+        import io
+
+        backend = S3Storage(
+            bucket="b", prefix="", region="us-east-1", access_key="k", secret_key="s"
+        )
+        payload = b"commit-marker-bytes"
+        stream = io.BytesIO(payload)
+
+        seen = []
+
+        def _upload_fileobj(**kwargs):
+            data = kwargs["Fileobj"].read()
+            seen.append(data)
+            if len(seen) == 1:
+                # Simulate s3transfer consuming the stream then failing.
+                raise ConnectionError("reset mid-upload")
+            # success on the retry
+
+        fake_client = MagicMock()
+        fake_client.upload_fileobj.side_effect = _upload_fileobj
+        with (
+            patch.object(backend, "_get_client", return_value=fake_client),
+            patch("src.storage.base.time.sleep"),  # skip retry backoff
+        ):
+            backend.upload_file(stream, "x.wbcommit", size=len(payload))
+
+        assert len(seen) == 2
+        assert seen[0] == payload  # first attempt read the whole thing
+        assert seen[1] == payload  # retry rewound → full payload again, not b""
+
+    def test_non_seekable_stream_raises(self):
+        """A stream lacking seek/tell cannot be retried safely → reject
+        it up front rather than risk a truncated retry upload."""
+        backend = S3Storage(
+            bucket="b", prefix="", region="us-east-1", access_key="k", secret_key="s"
+        )
+
+        class _ReadOnly:
+            def read(self, *a):
+                return b""
+
+        with patch.object(backend, "_get_client", return_value=MagicMock()):
+            with pytest.raises(OSError, match="not seekable"):
+                backend.upload_file(_ReadOnly(), "x.wbcommit", size=10)
+
+
+class TestS3PrefixStatsHonest:
+    """_get_prefix_stats must not fabricate (0, epoch-0) on failure; the
+    backup is skipped from the listing instead of published as a 1970
+    0-byte entry the rotator would delete."""
+
+    def test_stats_failure_skips_entry_not_fabricated(self):
+        backend = S3Storage(
+            bucket="b", prefix="", region="us-east-1", access_key="k", secret_key="s"
+        )
+        fake_client = MagicMock()
+        fake_paginator = MagicMock()
+        fake_paginator.paginate.return_value = [
+            {
+                "CommonPrefixes": [{"Prefix": "GoodDir/"}, {"Prefix": "BadDir/"}],
+                "Contents": [
+                    {"Key": "GoodDir.wbcommit", "Size": 1, "LastModified": 0},
+                    {"Key": "BadDir.wbcommit", "Size": 1, "LastModified": 0},
+                ],
+            }
+        ]
+        fake_client.get_paginator.return_value = fake_paginator
+
+        def _stats(_client, dir_prefix):
+            if dir_prefix == "BadDir/":
+                raise RuntimeError("throttled")
+            return (100, 1234.0, True)
+
+        with (
+            patch.object(backend, "_get_client", return_value=fake_client),
+            patch.object(backend, "_get_prefix_stats", side_effect=_stats),
+        ):
+            names = {b["name"] for b in backend.list_backups()}
+
+        # GoodDir present with real stats; BadDir skipped, NOT a 1970 entry.
+        assert names == {"GoodDir"}
+
+    def test_get_prefix_stats_reraises(self):
+        backend = S3Storage(
+            bucket="b", prefix="", region="us-east-1", access_key="k", secret_key="s"
+        )
+        fake_client = MagicMock()
+        fake_client.get_paginator.side_effect = RuntimeError("network down")
+        with pytest.raises(RuntimeError):
+            backend._get_prefix_stats(fake_client, "Dir/")
+
+
 class TestS3DownloadPathTraversal:
     """download_backup must never write an object outside the restore dir,
     even if a (compromised/rogue) bucket holds '../' or absolute keys (M00,

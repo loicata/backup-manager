@@ -808,7 +808,11 @@ class InAppScheduler:
             #   re-prompting in 2 minutes when the user is asleep is
             #   pure noise (18/05/2026 incident: three such timeouts
             #   in a row tripped the circuit breaker for TestNP).
-            from src.core.exceptions import CancelledError, PrecheckUserTimeoutError
+            from src.core.exceptions import (
+                CancelledError,
+                PrecheckUserCancelledError,
+                PrecheckUserTimeoutError,
+            )
             from src.core.profile_lock import ProfileLockError
 
             is_concurrent = isinstance(e, ProfileLockError)
@@ -817,7 +821,10 @@ class InAppScheduler:
             # to silently re-run 2 minutes later — classify it as a skip
             # (no retry) and journal "cancelled" (a terminal status), not
             # the bogus "success" the fall-through used to write.
-            is_cancelled = isinstance(e, CancelledError)
+            # PrecheckUserCancelledError is the precheck prompt's "Cancel
+            # backup" button — same user-decision semantics as a pipeline
+            # cancel.
+            is_cancelled = isinstance(e, (CancelledError, PrecheckUserCancelledError))
             is_skip = is_concurrent or is_user_timeout or is_cancelled
 
             level = logger.info if is_skip else logger.exception
@@ -954,6 +961,44 @@ class InAppScheduler:
                 )
                 return True  # Success — definitive, stop retrying
             except Exception as e:
+                # Mirror _trigger_backup's classification: a retry that
+                # ends in a user decision or a concurrent run must ABORT
+                # the ladder, not arm the next attempt. Pre-fix, a
+                # destination still offline at retry time re-raised the
+                # 30-min precheck prompt on EVERY rung (~5 × 30 min of
+                # blocked prompts interleaved with the sleeps ≈ 9.5 h of
+                # frozen scheduler), and an explicit user Cancel was
+                # re-prompted up to 5 more times.
+                from src.core.exceptions import (
+                    CancelledError,
+                    PrecheckUserCancelledError,
+                    PrecheckUserTimeoutError,
+                )
+                from src.core.profile_lock import ProfileLockError
+
+                is_skip = isinstance(e, (ProfileLockError, PrecheckUserTimeoutError))
+                is_cancelled = isinstance(e, (CancelledError, PrecheckUserCancelledError))
+                if is_skip or is_cancelled:
+                    status = "cancelled" if is_cancelled else "skipped"
+                    logger.info(
+                        "Retry %d/%d for '%s' ended as %s (%s) — abandoning the retry ladder",
+                        attempt,
+                        total_attempts,
+                        profile.name,
+                        status,
+                        type(e).__name__,
+                    )
+                    with self._op_lock:
+                        self._journal.update_last(
+                            profile_id=profile.id,
+                            status=status,
+                            detail=f"Retry {attempt}/{total_attempts}: {type(e).__name__}: {e}",
+                            timestamp=datetime.now().isoformat(),
+                        )
+                    # A user decision / satisfied-elsewhere outcome is
+                    # definitive: clear the in-flight marker.
+                    return True
+
                 logger.exception(
                     "Retry %d/%d failed for '%s'",
                     attempt,

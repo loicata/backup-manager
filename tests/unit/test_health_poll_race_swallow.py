@@ -47,6 +47,14 @@ def _make_app_stub(backup_running: bool):
 
     stub = MagicMock(spec=BackupManagerApp)
     stub._backup_running = backup_running
+    stub._active_engines = {}
+    stub._launch_in_progress = False
+    stub._last_health_online = {}
+    # The swallow guard now consults the derived predicate
+    # ``_a_backup_is_active`` (so an overlapping run's stale boolean
+    # cannot un-blind it). Bind the REAL predicate against this stub so
+    # the test exercises production logic rather than an auto-mock.
+    stub._a_backup_is_active = lambda: BackupManagerApp._a_backup_is_active(stub)
     # tab_run.after is the schedule-on-main-thread call we want to
     # observe (or NOT observe when the swallow path fires).
     stub.tab_run = MagicMock()
@@ -177,27 +185,29 @@ class TestPartialMatch:
 
 
 class TestNoBackupAttribute:
-    """If ``_backup_running`` is absent (early boot), guard MUST NOT fire.
+    """If the backup-state fields are absent (early boot), guard MUST NOT fire.
 
-    Production code uses ``getattr(self, "_backup_running", False)`` so
-    an attribute lookup against a partially-initialised stub returns
-    False rather than raising. The very first health-check thread can
-    fire before ``__init__`` reaches the line that sets the flag.
+    ``_a_backup_is_active`` reads ``_active_engines`` / ``_backup_running``
+    / ``_launch_in_progress`` via ``getattr`` defaults, so an attribute
+    lookup against a partially-initialised app returns False rather than
+    raising. The very first health-check thread can fire before
+    ``__init__`` reaches the lines that set those fields.
     """
 
     def test_missing_attribute_treated_as_false(self):
-        """A bare object without the attribute must NOT trigger the swallow."""
+        """A bare object without the backup-state fields must NOT swallow."""
         from src.ui.app import BackupManagerApp
 
-        # Plain object (no spec) — ``getattr(stub, "_backup_running", False)``
-        # returns False because the attribute is genuinely absent.
-        # ``MagicMock(spec=...)`` would auto-create attributes; we want
-        # the real "attribute missing" case here.
+        # Plain object (no spec) with NONE of the backup-state fields:
+        # ``_a_backup_is_active`` must return False via its getattr
+        # defaults rather than raising AttributeError.
         class _BareStub:
             pass
 
         stub = _BareStub()
         stub.tab_run = MagicMock()
+        stub._last_health_online = {}
+        stub._a_backup_is_active = lambda: BackupManagerApp._a_backup_is_active(stub)
 
         health = DestinationHealth(
             label="Storage",
@@ -208,7 +218,7 @@ class TestNoBackupAttribute:
 
         BackupManagerApp._on_health_result(stub, 0, health)
 
-        # Not in flight (attribute missing → False) → real error → must
+        # Not in flight (fields missing → False) → real error → must
         # reach the UI so the user sees a destination problem.
         stub.tab_run.after.assert_called_once()
 

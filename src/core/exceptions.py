@@ -95,6 +95,39 @@ class PrecheckUserTimeoutError(Exception):
         return (self.__class__, (self.profile_name, self.timeout_seconds))
 
 
+class PrecheckUserCancelledError(Exception):
+    """Raised when the user explicitly clicks "Cancel backup" on the
+    scheduler's destinations-unavailable prompt.
+
+    An explicit user decision, not a backup failure: the scheduler
+    journals it as ``cancelled`` and bypasses the retry ladder.
+    Pre-fix this path raised a plain ``RuntimeError``, which the
+    retry classification treated as a transient failure — the ladder
+    then re-prompted the user up to five more times over ~6 hours
+    after they had already declined (audit 2026-06-10).
+
+    Args:
+        profile_name: Human-readable profile name for the journal /
+            tray / email surfaces.
+        details: Short summary of the failed targets shown in the
+            prompt, carried into the journal ``detail`` field so the
+            cancellation is diagnosable from the History tab.
+    """
+
+    def __init__(self, profile_name: str, details: str = ""):
+        self.profile_name = profile_name
+        self.details = details
+        suffix = f" — {details}" if details else ""
+        super().__init__(
+            f"Backup cancelled by user: destinations unavailable for '{profile_name}'{suffix}"
+        )
+
+    def __reduce__(self):
+        # Preserve the structured payload across pickling (thread pools,
+        # email queue), mirroring PrecheckUserTimeoutError.
+        return (self.__class__, (self.profile_name, self.details))
+
+
 class DPAPIUnavailableError(RuntimeError):
     """Raised on Windows when DPAPI is required but unusable.
 

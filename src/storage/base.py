@@ -6,6 +6,7 @@ delete_backup, test_connection, get_free_space, get_file_size.
 """
 
 import concurrent.futures
+import contextlib
 import functools
 import logging
 import os
@@ -107,7 +108,25 @@ def with_retry(max_retries: int = 3, base_delay: float = 2.0):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
+            # Snapshot the position of every seekable stream argument
+            # BEFORE the first attempt. A retry must re-send from that
+            # original offset — otherwise s3transfer resumes from the
+            # partially-consumed position and uploads a TRUNCATED object
+            # that the backend records as success (corrupting the small
+            # trust-anchor artefacts: .wbcommit markers, .wbverify
+            # manifests, mirror streams).
+            seekables = []
+            for obj in list(args) + list(kwargs.values()):
+                if hasattr(obj, "seek") and hasattr(obj, "tell"):
+                    with contextlib.suppress(OSError, ValueError):
+                        seekables.append((obj, obj.tell()))
             for attempt in range(max_retries + 1):
+                if attempt > 0:
+                    for obj, pos in seekables:
+                        try:
+                            obj.seek(pos)
+                        except (OSError, ValueError):
+                            logger.debug("Could not rewind %r before retry", obj)
                 try:
                     return func(*args, **kwargs)
                 except (CancelledError, concurrent.futures.CancelledError):

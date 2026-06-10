@@ -63,6 +63,13 @@ from src.security.secure_memory import SecurePassword
 from src.storage.base import StorageBackend
 
 
+# Minimum age before an abandoned ``*.partial`` upload trail is swept
+# by the orphan scan. An actively-written partial advances its mtime
+# continuously, so anything untouched for an hour is genuinely orphaned
+# (process death, OS shutdown) rather than an in-flight concurrent run.
+_STALE_PARTIAL_GRACE_SECONDS = 3600.0
+
+
 def _parse_iso_datetime(value: str | None) -> datetime | None:
     """Parse an ISO-formatted datetime string, returning None on failure."""
     if not value:
@@ -227,6 +234,7 @@ def create_backend(storage: StorageConfig) -> StorageBackend:
             secret_key=s.s3_secret_key,
             endpoint_url=s.s3_endpoint_url,
             provider=s.s3_provider,
+            object_lock=getattr(s, "s3_object_lock", False),
         ),
     }
     builder = builders.get(storage.storage_type)
@@ -330,6 +338,13 @@ class BackupEngine:
         self._events = events or EventBus()
         self._cancelled = False
         self._current_result: BackupResult | None = None
+        # Profile id of the run currently owned by THIS engine. Engines
+        # sharing one EventBus all subscribe _capture_log to it, so a
+        # LOG emitted by engine A (tagged with A's profile_id) also
+        # reaches engine B's _capture_log. This lets _capture_log drop
+        # foreign-tagged lines instead of cross-contaminating B's
+        # per-run log file (from which the History tab derives status).
+        self._run_profile_id: str | None = None
         self._events.subscribe(LOG, self._capture_log)
 
     def cancel(self) -> None:
@@ -369,6 +384,9 @@ class BackupEngine:
         original_events = self._events
         tagged_events = ProfileTaggingEventBus(original_events, profile.id)
         self._events = tagged_events
+        # Remember which profile this run owns so _capture_log keeps
+        # only this run's lines (cleared in the finally block).
+        self._run_profile_id = profile.id
         # Tag every Python log record produced from this thread with
         # ``[<profile_name>]`` so the rotating file can be split per
         # run when two profiles back up in parallel (cf.
@@ -912,15 +930,43 @@ class BackupEngine:
         Checks local/network destinations, SFTP via get_free_space(),
         and the temp drive for S3 encrypted uploads.
 
+        Three robustness fixes (audit 2026-06-10):
+
+        * Local paths are RESOLVED via the drive's hardware serial
+          first, so a USB that moved from ``G:`` to ``H:`` is space-
+          checked at its real location instead of against the dead
+          letter (which raised OSError → silently skipped → run failed
+          mid-write after hours).
+        * An unverifiable destination (OSError, remote check raised)
+          records a WARNING on the result instead of a silent ``pass`` —
+          the run proceeds (failing it would be worse) but the operator
+          can see the check did not happen.
+        * For tar/encrypted destinations the margin scales with the
+          file count (~1.5 KB tar header+padding per file), which on a
+          271 k-file workload is ~400 MB — far beyond the flat 100 MB.
+
         Raises:
             RuntimeError: If any destination has insufficient space.
         """
         import tempfile
 
         backup_size = sum(f.size for f in ctx.files)
-        local_required = backup_size + 100 * 1024 * 1024  # backup + 100 MB margin
+        file_count = len(ctx.files)
+        base_margin = 100 * 1024 * 1024  # 100 MB
+        # tar emits a 512 B header + up to 512 B padding per member; round
+        # to 1.5 KB to also cover the trailing two-record EOF and pax
+        # extended headers on long paths.
+        tar_overhead = file_count * 1536
         s3_temp_required = backup_size + 2 * 1024 * 1024 * 1024  # backup + 2 GB margin
-        errors = []
+        errors: list[str] = []
+        unverifiable: list[str] = []
+
+        def _required(encrypted: bool) -> int:
+            # Encrypted destinations write a single tar → pay per-file
+            # tar overhead. Plain flat copies keep the base margin
+            # (filesystem cluster slack is destination-dependent and
+            # usually well within 100 MB).
+            return backup_size + base_margin + (tar_overhead if encrypted else 0)
 
         is_encrypted = (
             ctx.profile.encrypt_primary
@@ -932,17 +978,19 @@ class BackupEngine:
         primary = ctx.profile.storage
         if primary.storage_type in (StorageType.LOCAL, StorageType.NETWORK):
             self._check_path_space(
-                primary.destination_path,
-                local_required,
+                self._resolved_space_path(primary),
+                _required(is_encrypted),
                 "Storage",
                 errors,
+                unverifiable,
             )
         elif primary.storage_type == StorageType.SFTP:
             self._check_remote_space(
                 primary,
-                local_required,
+                _required(is_encrypted),
                 "Storage (SFTP)",
                 errors,
+                unverifiable,
             )
         elif primary.storage_type == StorageType.S3 and is_encrypted:
             temp_dir = tempfile.gettempdir()
@@ -951,6 +999,7 @@ class BackupEngine:
                 s3_temp_required,
                 f"Temp drive ({temp_dir[:3]}) for encrypted S3 upload",
                 errors,
+                unverifiable,
             )
 
         # --- Mirror destinations ---
@@ -966,17 +1015,19 @@ class BackupEngine:
 
             if config.storage_type in (StorageType.LOCAL, StorageType.NETWORK):
                 self._check_path_space(
-                    config.destination_path,
-                    local_required,
+                    self._resolved_space_path(config),
+                    _required(mirror_encrypted),
                     mirror_name,
                     errors,
+                    unverifiable,
                 )
             elif config.storage_type == StorageType.SFTP:
                 self._check_remote_space(
                     config,
-                    local_required,
+                    _required(mirror_encrypted),
                     f"{mirror_name} (SFTP)",
                     errors,
+                    unverifiable,
                 )
             elif config.storage_type == StorageType.S3 and mirror_encrypted:
                 temp_dir = tempfile.gettempdir()
@@ -985,11 +1036,41 @@ class BackupEngine:
                     s3_temp_required,
                     f"Temp drive ({temp_dir[:3]}) for {mirror_name} encrypted S3",
                     errors,
+                    unverifiable,
                 )
+
+        # Unverifiable destinations are non-fatal but must be visible —
+        # the run proceeds (failing on an un-checkable destination would
+        # be worse than trying), with a warning the operator can act on.
+        for label in unverifiable:
+            ctx.result.add_warning(
+                phase="disk_space",
+                file_path=label,
+                message=f"Free space could not be verified for {label} — proceeding anyway",
+            )
 
         if errors:
             detail = "\n".join(f"  - {e}" for e in errors)
             raise RuntimeError(f"Insufficient disk space:\n{detail}")
+
+    @staticmethod
+    def _resolved_space_path(config: object) -> str:
+        """Resolve a LOCAL destination to its current drive letter.
+
+        A USB drive can re-enumerate under a different letter between
+        runs; ``resolve_local_path`` rewrites ``G:\\...`` to wherever the
+        saved hardware serial currently lives, so the space check hits
+        the real destination instead of a dead letter. NETWORK/UNC
+        paths (no serial) pass through unchanged.
+        """
+        from src.storage.drive_serial import resolve_local_path
+
+        try:
+            return resolve_local_path(
+                config.destination_path, getattr(config, "device_serial", "")
+            )
+        except Exception:
+            return config.destination_path
 
     def _check_remote_space(
         self,
@@ -997,21 +1078,26 @@ class BackupEngine:
         required: int,
         label: str,
         errors: list[str],
+        unverifiable: list[str],
     ) -> None:
         """Check free space on a remote SFTP destination.
 
         Uses the backend's get_free_space() method (SFTP statvfs).
-        Silently skips if the check fails (connection issue, etc.).
+        Records the destination as unverifiable if the check raises
+        (connection issue) rather than silently skipping it.
         """
         try:
             backend = self._get_backend(config)
             free = backend.get_free_space()
-            if free is not None and free < required:
+            if free is None:
+                unverifiable.append(label)
+            elif free < required:
                 free_gb = free / (1024**3)
                 needed_gb = required / (1024**3)
                 errors.append(f"{label}: {free_gb:.1f} GB free, need {needed_gb:.1f} GB")
         except Exception:
-            logger.debug("Remote space check skipped for %s", label, exc_info=True)
+            logger.debug("Remote space check failed for %s", label, exc_info=True)
+            unverifiable.append(label)
 
     @staticmethod
     def _check_path_space(
@@ -1019,18 +1105,26 @@ class BackupEngine:
         required: int,
         label: str,
         errors: list[str],
+        unverifiable: list[str],
     ) -> None:
-        """Check free space at *path* and append to *errors* if insufficient."""
+        """Check free space at *path*.
+
+        Appends to *errors* (fatal) when space is insufficient, or to
+        *unverifiable* (warning) when the path cannot be stat'd — a
+        previously silent ``pass`` that let a run proceed to a mid-write
+        disk-full failure on an unreachable/renamed destination.
+        """
         import shutil
 
         try:
             free = shutil.disk_usage(path).free
-            if free < required:
-                free_gb = free / (1024**3)
-                needed_gb = required / (1024**3)
-                errors.append(f"{label}: {free_gb:.1f} GB free, need {needed_gb:.1f} GB")
         except OSError:
-            pass  # Path not accessible yet (USB not plugged, etc.)
+            unverifiable.append(label)
+            return
+        if free < required:
+            free_gb = free / (1024**3)
+            needed_gb = required / (1024**3)
+            errors.append(f"{label}: {free_gb:.1f} GB free, need {needed_gb:.1f} GB")
 
     def _phase_integrity(self, ctx: PipelineContext) -> None:
         """Phase 3: Build integrity manifest by hashing every source.
@@ -1275,6 +1369,23 @@ class BackupEngine:
                         label,
                         e,
                     )
+
+            # Sweep abandoned ``*.partial`` files for THIS profile. A
+            # hard kill (power loss / OS shutdown) mid-upload leaves a
+            # ``.partial`` that the sidecar filter hides from the orphan
+            # list above, so a 47 GB-class encrypted run cut by a
+            # shutdown would otherwise leak its full size forever. The
+            # age gate protects a concurrent run's in-flight partial
+            # (its mtime keeps advancing as bytes are written).
+            purge_partials = getattr(backend, "purge_stale_partials", None)
+            if purge_partials is not None:
+                try:
+                    removed = purge_partials(profile_prefix, _STALE_PARTIAL_GRACE_SECONDS)
+                except Exception as e:
+                    logger.warning("Orphan scan: partial sweep failed on %s: %s", label, e)
+                else:
+                    for partial_name in removed:
+                        self._log(f"Stale partial removed on {label}: {partial_name}")
 
     def _phase_commit_primary(self, ctx: PipelineContext) -> None:
         """Phase 6.5: Write commit marker for the primary destination.
@@ -2415,9 +2526,12 @@ class BackupEngine:
                 continue
             try:
                 backend = create_backend(config)
-                # Try both plain directory and encrypted archive names
+                # Try plain directory, encrypted archive, and the
+                # ``.partial`` trails of an interrupted write of either.
+                # The partials are otherwise invisible to every cleanup
+                # path (sidecar filter hides them from list_orphan_backups).
                 deleted = False
-                for suffix in ("", ".tar.wbenc"):
+                for suffix in ("", ".tar.wbenc", ".tar.wbenc.partial", ".partial"):
                     target = f"{name}{suffix}"
                     try:
                         backend.delete_backup(target)
@@ -2681,8 +2795,25 @@ class BackupEngine:
             level="info",
         )
 
-    def _capture_log(self, message: str, **_kwargs) -> None:
-        """Capture all LOG events (engine + phases) into BackupResult."""
+    def _capture_log(self, message: str, profile_id: str | None = None, **_kwargs) -> None:
+        """Capture this run's LOG events into BackupResult.
+
+        Drops events tagged with a DIFFERENT profile_id: engines that
+        share one EventBus all receive each other's LOG events, and a
+        foreign line appended here would land in this run's per-run
+        log file — from which the History tab derives status, so
+        another run's "Backup complete" could mark a failed run green
+        (observed 2026-05-30: 'My Backup''s log carried the full
+        crypter run). Untagged events (no profile_id, or before
+        run_backup set _run_profile_id) are kept for backward
+        compatibility.
+        """
+        if (
+            profile_id is not None
+            and self._run_profile_id is not None
+            and profile_id != self._run_profile_id
+        ):
+            return
         if self._current_result is not None:
             self._current_result.log_lines.append(message)
 

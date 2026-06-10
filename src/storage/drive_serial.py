@@ -20,7 +20,15 @@ _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 
 
 logger = logging.getLogger(__name__)
 
-_PS_TIMEOUT = 5  # seconds
+_PS_TIMEOUT = 5  # seconds — single-drive query (synchronous UI callers)
+
+# Full-system enumeration feeds resolve_local_path: a transient
+# PowerShell stall there fakes "Drive not found for serial" and fails
+# the run on a stale path although the disk is mounted (2026-05-21
+# log burst). Background callers can afford a longer budget plus one
+# retry.
+_PS_ENUM_TIMEOUT = 10  # seconds
+_PS_ENUM_RETRIES = 1
 
 
 def get_hardware_serial(drive_letter: str) -> str | None:
@@ -115,35 +123,47 @@ def _enumerate_drive_serials() -> dict[str, str]:
     if sys.platform != "win32":
         return {}
 
-    try:
-        result = subprocess.run(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                # Format-style join: "<letter>\t<serial>" per line.
-                # Drives with no letter (unmounted) are skipped by the
-                # Where-Object filter.
-                "Get-Partition "
-                "| Where-Object { $_.DriveLetter } "
-                "| ForEach-Object { "
-                "    $d = $_ | Get-Disk; "
-                '    "$($_.DriveLetter)`t$($d.SerialNumber)" '
-                "  }",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=_PS_TIMEOUT,
-            creationflags=_SUBPROCESS_FLAGS,
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("PowerShell timeout enumerating drive serials")
-        return {}
-    except FileNotFoundError:
-        logger.debug("PowerShell not available")
-        return {}
-    except Exception as e:
-        logger.debug("Could not enumerate drive serials: %s", e)
+    result = None
+    for attempt in range(_PS_ENUM_RETRIES + 1):
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    # Format-style join: "<letter>\t<serial>" per line.
+                    # Drives with no letter (unmounted) are skipped by the
+                    # Where-Object filter.
+                    "Get-Partition "
+                    "| Where-Object { $_.DriveLetter } "
+                    "| ForEach-Object { "
+                    "    $d = $_ | Get-Disk; "
+                    '    "$($_.DriveLetter)`t$($d.SerialNumber)" '
+                    "  }",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_PS_ENUM_TIMEOUT,
+                creationflags=_SUBPROCESS_FLAGS,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            # One transient stall must not fake an unplugged drive —
+            # the empty mapping downstream becomes "Drive not found
+            # for serial" and the scheduled run aborts on a stale path.
+            if attempt < _PS_ENUM_RETRIES:
+                logger.warning("PowerShell timeout enumerating drive serials — retrying once")
+                continue
+            logger.warning("PowerShell timeout enumerating drive serials (retry exhausted)")
+            return {}
+        except FileNotFoundError:
+            logger.debug("PowerShell not available")
+            return {}
+        except Exception as e:
+            logger.debug("Could not enumerate drive serials: %s", e)
+            return {}
+
+    if result is None:
         return {}
 
     if result.returncode != 0:

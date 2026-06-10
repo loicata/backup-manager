@@ -220,6 +220,58 @@ class LocalStorage(StorageBackend):
             )
         return sorted(orphans, key=lambda b: b["modified"], reverse=True)
 
+    def purge_stale_partials(self, prefix: str, grace_seconds: float) -> list[str]:
+        """Delete abandoned ``*.partial`` files for ``prefix``, older than grace.
+
+        A hard kill (power loss, OS shutdown) during an upload leaves a
+        ``<name>.partial`` that NO other path removes: ``.partial`` is a
+        sidecar suffix, so it is filtered out of both ``list_backups``
+        and ``list_orphan_backups`` — the orphan scan never sees it and
+        a 47 GB-class encrypted run killed mid-write leaks its full size
+        on the destination forever.
+
+        Safety:
+            * Only files whose name starts with ``prefix`` are touched —
+              a concurrent OTHER profile's partial is never deleted.
+            * Only files whose mtime is older than ``grace_seconds`` are
+              deleted. An actively-written ``.partial`` advances its
+              mtime continuously, so a recent mtime means "still being
+              written" and is left alone.
+
+        Args:
+            prefix: Sanitised profile-name prefix (e.g. ``"My_Backup_"``).
+            grace_seconds: Minimum age (by mtime) before a partial is
+                considered abandoned rather than in-flight.
+
+        Returns:
+            Names of the partial files that were removed.
+        """
+        if not prefix or not self._dest.exists():
+            return []
+
+        removed: list[str] = []
+        now = time.time()
+        for entry in self._dest.iterdir():
+            if not entry.name.startswith(prefix) or not entry.name.endswith(".partial"):
+                continue
+            if not entry.is_file():
+                continue
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                continue
+            if age < grace_seconds:
+                # Recent mtime → likely still being written by a
+                # concurrent run. Leave it for a later scan.
+                continue
+            try:
+                entry.unlink()
+                removed.append(entry.name)
+                logger.info("Removed stale partial: %s (age %.0fs)", entry.name, age)
+            except OSError as e:
+                logger.warning("Could not remove stale partial %s: %s", entry.name, e)
+        return removed
+
     @staticmethod
     def _is_backup_candidate(entry: Path) -> bool:
         """Filter out non-backup filesystem noise.

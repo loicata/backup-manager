@@ -35,6 +35,53 @@ class TestValidateRemoteName:
         assert _validate_remote_name("2026/03/backup.zip") == "2026/03/backup.zip"
 
 
+class TestListFilesExecExitStatus:
+    """_list_files_exec must distinguish a missing directory (find exit
+    non-zero) from a genuinely empty backup (exit 0, no output). Before
+    the fix the exit status was discarded, so a vanished remote backup
+    returned [] and fed the verify-skip path (stage-5 family)."""
+
+    def _storage(self):
+        from src.storage.sftp import SFTPStorage
+
+        return SFTPStorage(
+            host="h", port=22, username="u", password="p", remote_path="/backups"
+        )
+
+    def _channel(self, *, out: bytes, exit_status: int, stderr: bytes = b""):
+        channel = MagicMock()
+        # recv returns the payload once, then b"" to end the loop.
+        channel.recv.side_effect = [out, b""] if out else [b""]
+        channel.recv_stderr_ready.side_effect = [bool(stderr), False]
+        channel.recv_stderr.return_value = stderr
+        channel.recv_exit_status.return_value = exit_status
+        return channel
+
+    def test_nonzero_exit_raises_oserror(self):
+        storage = self._storage()
+        transport = MagicMock()
+        transport.open_session.return_value = self._channel(
+            out=b"", exit_status=1, stderr=b"find: '/backups/x': No such file or directory"
+        )
+        with pytest.raises(OSError, match="find exit 1"):
+            storage._list_files_exec(transport, "/backups/x")
+
+    def test_empty_dir_exit_zero_returns_empty_list(self):
+        storage = self._storage()
+        transport = MagicMock()
+        transport.open_session.return_value = self._channel(out=b"", exit_status=0)
+        assert storage._list_files_exec(transport, "/backups/empty") == []
+
+    def test_successful_listing_parsed(self):
+        storage = self._storage()
+        transport = MagicMock()
+        transport.open_session.return_value = self._channel(
+            out=b"100 a.txt\n250 sub/b.txt\n", exit_status=0
+        )
+        result = storage._list_files_exec(transport, "/backups/ok")
+        assert result == [("a.txt", 100), ("sub/b.txt", 250)]
+
+
 class TestShellEscape:
     def test_simple_string(self):
         assert _shell_escape("hello") == "'hello'"

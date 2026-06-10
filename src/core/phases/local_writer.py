@@ -296,9 +296,12 @@ def write_encrypted_tar_with_hashes(
     phase_log = PhaseLogger("writer", events)
     archive_path = destination / f"{backup_name}.tar.wbenc"
     # Sibling ``.partial`` + atomic rename ensures the final name only
-    # appears on success — an interrupted run leaves a ``.partial``
-    # which is filtered out by ``LocalStorage.list_backups`` and
-    # cleaned up by the orphan scan at the next pipeline start.
+    # appears on success. An IN-PROCESS failure unlinks the ``.partial``
+    # in the finally block below. A HARD kill (power loss / OS shutdown)
+    # leaves it behind; ``.partial`` is filtered out of both
+    # ``list_backups`` and ``list_orphan_backups``, so the orphan scan
+    # never sees it — the next run's ``_phase_orphan_scan`` removes it
+    # via ``LocalStorage.purge_stale_partials`` (age-gated) instead.
     partial_path = archive_path.with_name(archive_path.name + ".partial")
     total = len(files)
 

@@ -17,12 +17,54 @@ from src.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
+# Stable alias to the real datetime class. Tests monkeypatch the
+# module-level ``datetime`` name (``patch("...rotator.datetime")``) to
+# control ``now``/``fromtimestamp`` for window math, but the name-date
+# PARSING below must always use the genuine ``strptime`` — going
+# through the patched mock would return a MagicMock and corrupt the
+# sort. This alias is not rebound by that patch.
+_RealDatetime = datetime
+
 # Type marker anchored on the generated timestamp pattern so profile
 # names that happen to contain "_FULL_" or "_DIFF_" (allowed by
 # sanitize_profile_name) are not mis-classified.  See
 # generate_backup_name() which produces "<profile>_<TYPE>_YYYY-MM-DD_HHMMSS".
 _FULL_MARKER = re.compile(r"_FULL_\d{4}-\d{2}-\d{2}_\d{6}")
 _DIFF_MARKER = re.compile(r"_DIFF_\d{4}-\d{2}-\d{2}_\d{6}")
+
+# Captures the authoritative timestamp embedded in every generated
+# backup name. This is the source of truth for rotation ordering —
+# backend ``mtime`` is only a fallback (a server that reports
+# st_mtime=0, or a future mtime, otherwise either deletes a valid
+# backup or makes one immortal). See ``_parse_backup_datetime``.
+_NAME_TIMESTAMP = re.compile(r"_(?:FULL|DIFF)_(\d{4}-\d{2}-\d{2}_\d{6})")
+
+
+def _parse_backup_datetime(name: str, mtime: float) -> datetime | None:
+    """Resolve a backup's timestamp, name first then backend mtime.
+
+    Args:
+        name: Backup name, expected to embed ``_<TYPE>_YYYY-MM-DD_HHMMSS``.
+        mtime: Backend-reported modification time (epoch seconds); used
+            only when the name carries no parseable timestamp.
+
+    Returns:
+        A UTC-aware datetime, or None when neither source yields one
+        (the caller then KEEPs the backup rather than risk deleting it).
+    """
+    match = _NAME_TIMESTAMP.search(name)
+    if match:
+        try:
+            dt = _RealDatetime.strptime(match.group(1), "%Y-%m-%d_%H%M%S")
+            return dt.replace(tzinfo=UTC)
+        except ValueError:
+            pass
+    if mtime:
+        try:
+            return _RealDatetime.fromtimestamp(mtime, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            pass
+    return None
 
 
 def rotate_backups(
@@ -126,13 +168,24 @@ def _rotate_gfs(
         keep.add(current_backup_name)
         keep.add(f"{current_backup_name}.tar.wbenc")
 
-    # Sort by date
+    # Sort by date. The timestamp embedded in the backup NAME is the
+    # source of truth; backend mtime is only a fallback. A backup whose
+    # date cannot be resolved from either source is KEPT unconditionally
+    # (added to ``keep`` with a warning) rather than dropped — the old
+    # ``if mtime:`` filter silently excluded mtime=0 backups from every
+    # window, sending them straight to ``to_delete`` (a server that
+    # omits st_mtime would have every backup deleted).
     dated_backups = []
     for b in backups:
-        mtime = b.get("modified", 0)
-        if mtime:
-            dt = datetime.fromtimestamp(mtime, tz=UTC)
+        dt = _parse_backup_datetime(b["name"], b.get("modified", 0))
+        if dt is not None:
             dated_backups.append((b, dt))
+        else:
+            keep.add(b["name"])
+            phase_log.warning(
+                f"Rotation: keeping {b['name']} — no parseable date in name "
+                f"or backend mtime (refusing to delete an undatable backup)"
+            )
 
     dated_backups.sort(key=lambda x: x[1], reverse=True)
 

@@ -25,10 +25,12 @@ from src.core.config import (
     ConfigManager,
     ScheduleFrequency,
     StorageConfig,
+    StorageType,
 )
 from src.core.events import STATUS, EventBus
 from src.core.run_history import RunHistoryStore, VerifyPromptStore
 from src.core.scheduler import AutoStart, InAppScheduler
+from src.ui.confirm_panel import ConfirmExtra, NotifyLevel, confirm_inline, notify_inline
 from src.ui.tabs.email_tab import EmailTab
 from src.ui.tabs.encryption_tab import EncryptionTab
 from src.ui.tabs.general_tab import GeneralTab
@@ -41,7 +43,6 @@ from src.ui.tabs.run_tab import RunTab
 from src.ui.tabs.schedule_tab import ScheduleTab
 from src.ui.tabs.storage_tab import StorageTab
 from src.ui.tabs.verify_tab import VerifyTab
-from src.ui.confirm_panel import ConfirmExtra, NotifyLevel, confirm_inline, notify_inline
 from src.ui.theme import (
     APP_TITLE,
     MIN_SIZE,
@@ -55,8 +56,15 @@ from src.ui.tray import BackupTray, TrayState
 
 logger = logging.getLogger(__name__)
 
-# Interval between continuous health checks for destinations (ms)
+# Base interval between continuous health checks for LOCAL destinations (ms).
 HEALTH_POLL_INTERVAL_MS = 60_000
+
+# Remote backends (SFTP / S3) are polled every Nth tick instead of every
+# tick. Each remote probe is a full TCP+SSH/TLS handshake; at 60 s × 24/7
+# they dominated the log (91% of lines) and plausibly contributed to the
+# Winsock buffer exhaustion that killed a session. The destination card
+# does not need minute-fresh remote liveness — every 5 minutes is ample.
+_REMOTE_POLL_EVERY_N_TICKS = 5
 
 # Hard timeout on the scheduler's "destinations unavailable" modal.
 # Past this point the scheduler thread reclaims itself with
@@ -66,6 +74,16 @@ HEALTH_POLL_INTERVAL_MS = 60_000
 # that an overnight unattended profile does not pile up several
 # pending modals.
 _PRECHECK_PROMPT_TIMEOUT_SECONDS = 30 * 60
+
+# Backoff ladder for the SCHEDULED precheck before the human prompt.
+# The manual path retries once after 500 ms (user present, fast
+# feedback); an unattended machine deserves a longer ladder — a single
+# false-negative probe (USB wake-up, AV briefly holding the test file
+# after a sibling run's rotation) otherwise escalates straight to a
+# 30-minute modal nobody is present to answer and the day's backup is
+# silently lost (18/05/2026 incident: the destination was healthy two
+# minutes after the verdict).
+_SCHEDULED_PRECHECK_RETRY_DELAYS_S = (5.0, 15.0, 30.0)
 
 # Bug report destination
 BUG_REPORT_EMAIL = "loic@loicata.com"
@@ -794,6 +812,13 @@ class BackupManagerApp:
 
         # Alert frame placeholder (shown when targets are unavailable)
         self._alert_frame: tk.Frame | None = None
+        # Who owns the alert currently in _alert_frame: "manual" or
+        # "scheduler". The scheduler's precheck prompt blocks its
+        # daemon thread on a threading.Event wired to the alert's
+        # buttons — a manual flow destroying that frame would leave
+        # the scheduler stalled for the full 30-min budget. Ownership
+        # lets the displaced-prompt recovery distinguish the cases.
+        self._alert_owner: str | None = None
 
     def _build_sidebar(self, parent):
         """Build the left sidebar with profile list."""
@@ -1324,8 +1349,10 @@ class BackupManagerApp:
             except ValueError:
                 pass
 
-        # Bump generation to cancel polling from previous profile
+        # Bump generation to cancel polling from previous profile, and
+        # reset the per-generation tick counter that throttles remote probes.
         self._health_poll_generation = getattr(self, "_health_poll_generation", 0) + 1
+        self._health_poll_tick = 0
 
         if destinations:
             # When a backup is running on a local destination, the
@@ -1333,6 +1360,8 @@ class BackupManagerApp:
             # PermissionError. Fall back to a read-only probe
             # (``shutil.disk_usage``) so the card still shows the
             # current free space rather than going blank or red.
+            # First pass probes everything (local + remote) so the card
+            # populates immediately on profile switch.
             for index, (cfg, label) in self._health_configs.items():
                 threading.Thread(
                     target=self._check_single_destination,
@@ -1340,7 +1369,8 @@ class BackupManagerApp:
                     daemon=True,
                     name=f"HealthCheck-{label}",
                 ).start()
-            # Schedule continuous polling every 30s
+            # Schedule continuous polling (local every tick, remote every
+            # _REMOTE_POLL_EVERY_N_TICKS ticks, paused while in the tray).
             self.root.after(
                 HEALTH_POLL_INTERVAL_MS,
                 self._poll_health,
@@ -1375,7 +1405,7 @@ class BackupManagerApp:
         """
         from src.storage.local import READ_ONLY_OR_LOCKED_MARKER
 
-        backup_in_flight = bool(getattr(self, "_backup_running", False))
+        backup_in_flight = self._a_backup_is_active()
         if (
             backup_in_flight
             and health.online is False
@@ -1388,6 +1418,27 @@ class BackupManagerApp:
             )
             return
 
+        # Log only on a state TRANSITION, not on every poll — the probe
+        # ran thousands of times per session and a flat DEBUG line hid
+        # genuine outages (a destination that fails every minute produced
+        # no WARNING at all). A flip is rare and worth a WARNING/INFO.
+        last_online = getattr(self, "_last_health_online", None)
+        if last_online is None:
+            last_online = {}
+            self._last_health_online = last_online
+        previous = last_online.get(index)
+        if health.online is not None and previous != health.online:
+            if health.online:
+                if previous is False:
+                    logger.info("Destination back online: %s", health.label)
+            else:
+                logger.warning(
+                    "Destination went offline: %s — %s",
+                    health.label,
+                    health.error or "no detail",
+                )
+            last_online[index] = health.online
+
         with contextlib.suppress(Exception):
             self.tab_run.after(
                 0,
@@ -1397,7 +1448,7 @@ class BackupManagerApp:
             )
 
     def _poll_health(self, generation: int) -> None:
-        """Re-check all destinations periodically.
+        """Re-check destinations periodically (local often, remote rarely).
 
         Stops if the profile changed (generation mismatch) or no
         destinations are configured. While a backup is running,
@@ -1405,6 +1456,16 @@ class BackupManagerApp:
         read-only path so the card stays informative (current free
         space) without flipping to a spurious "read-only" caused by
         the writer holding the I/O queue.
+
+        Two cost controls (audit 2026-06-10):
+        * While the window is in the tray (withdrawn) the card is not
+          visible, so NO probe is spawned — the timer keeps ticking so
+          polling resumes the moment the user reopens the window. This
+          ends the 24/7 per-minute SSH handshake that produced ~91% of
+          the log and risked Winsock buffer exhaustion.
+        * Remote backends (SFTP/S3) are probed only every
+          ``_REMOTE_POLL_EVERY_N_TICKS`` ticks; local backends every
+          tick (a USB unplug should still surface within a minute).
 
         Args:
             generation: Poll generation to detect profile changes.
@@ -1414,7 +1475,21 @@ class BackupManagerApp:
         if not getattr(self, "_health_configs", {}):
             return
 
+        # Re-arm first so an early return below still keeps the loop alive.
+        self.root.after(HEALTH_POLL_INTERVAL_MS, self._poll_health, generation)
+
+        # Paused in the tray: the dashboard is not on screen, so skip the
+        # probes entirely (the next tick re-checks visibility).
+        if self._is_window_hidden():
+            return
+
+        self._health_poll_tick = getattr(self, "_health_poll_tick", 0) + 1
+        probe_remote = (self._health_poll_tick % _REMOTE_POLL_EVERY_N_TICKS) == 0
+
         for index, (config, label) in self._health_configs.items():
+            is_remote = config.storage_type in (StorageType.SFTP, StorageType.S3)
+            if is_remote and not probe_remote:
+                continue
             threading.Thread(
                 target=self._check_single_destination,
                 args=(index, config, label),
@@ -1422,12 +1497,18 @@ class BackupManagerApp:
                 name=f"HealthPoll-{label}",
             ).start()
 
-        # Schedule next poll
-        self.root.after(
-            HEALTH_POLL_INTERVAL_MS,
-            self._poll_health,
-            generation,
-        )
+    def _is_window_hidden(self) -> bool:
+        """True when the main window is minimised to the tray.
+
+        ``withdraw()`` (tray) reports state ``"withdrawn"``; ``iconify()``
+        reports ``"iconic"``. Either way the dashboard is not visible and
+        health probing can pause. Defensive: any TclError (window torn
+        down during shutdown) counts as hidden so no probe is spawned.
+        """
+        try:
+            return self.root.state() in ("withdrawn", "iconic")
+        except tk.TclError:
+            return True
 
     def _repoll_destinations_after_backup_start(self) -> None:
         """Spawn fresh health checks now that ``_backup_running == True``.
@@ -1483,7 +1564,7 @@ class BackupManagerApp:
         """
         from src.core.health_checker import _check_destination
 
-        lightweight = bool(getattr(self, "_backup_running", False))
+        lightweight = self._a_backup_is_active()
         result = _check_destination(config, label, lightweight=lightweight)
         self._on_health_result(index, result)
 
@@ -1542,8 +1623,11 @@ class BackupManagerApp:
         # Never mutate the profile while a backup is running — the engine
         # holds the same instance and relies on a stable view of fields
         # like backup_type, retention and profile_hash. Silent saves (auto)
-        # are dropped; explicit saves warn the user.
-        if self._backup_running:
+        # are dropped; explicit saves warn the user. Derived predicate:
+        # the single boolean alone was cleared by the FIRST of two
+        # overlapping runs to finish, letting a save mutate the other
+        # run's live profile mid-pipeline (audit 2026-06-10).
+        if self._a_backup_is_active():
             if silent:
                 return True
             self._notify(
@@ -1800,7 +1884,6 @@ class BackupManagerApp:
         Returns:
             Error message if duplicates found, empty string if OK.
         """
-        from src.core.config import StorageType
 
         def _destination_key(config) -> str:
             """Build a unique key for a destination."""
@@ -1865,7 +1948,7 @@ class BackupManagerApp:
         user's choice, so the new profile lands in the correct sidebar
         section automatically.
         """
-        if self._backup_running:
+        if self._a_backup_is_active():
             self._notify(
                 title="Backup in progress",
                 body=(
@@ -2526,10 +2609,7 @@ class BackupManagerApp:
         # profile so a double-click never stacks identical full backups.
         # This replaces the old behaviour where the second run hit the
         # engine's per-profile lock and was logged as "Backup rejected".
-        a_backup_is_active = (
-            self._backup_running or self._launch_in_progress or bool(self._active_engines)
-        )
-        if a_backup_is_active:
+        if self._a_backup_is_active():
             self._queue_backup_requests(active_profiles)
             return
 
@@ -2575,6 +2655,74 @@ class BackupManagerApp:
             self.tab_run._append_log(
                 "Backup already running or queued for the selected profile(s)."
             )
+
+    def _a_backup_is_active(self) -> bool:
+        """True while any run is in flight or a launch is mid-precheck.
+
+        Derived from ``_active_engines`` (per-profile, registered by
+        both the manual and the scheduled paths) rather than from the
+        single ``_backup_running`` boolean alone: with two overlapping
+        runs, the FIRST one to finish clears the boolean while the
+        other is still mid-pipeline, un-blinding the ``_save_profile``
+        guard and the health-probe race shields (audit 2026-06-10).
+        The two flags still cover the brief windows before engine
+        registration (launch precheck, thread spin-up).
+
+        Reads via ``getattr`` defaults so a health-check thread that
+        fires before ``__init__`` finishes wiring these fields treats
+        the app as idle rather than raising.
+        """
+        return (
+            bool(getattr(self, "_active_engines", None))
+            or getattr(self, "_backup_running", False)
+            or getattr(self, "_launch_in_progress", False)
+        )
+
+    @staticmethod
+    def _log_precheck_failures(
+        profile_name: str,
+        failures: list[tuple[str, str, bool, str]],
+        context: str,
+    ) -> None:
+        """WARNING-log every failed precheck target with its detail.
+
+        The probe code builds precise failure strings ("Drive not
+        ready after wake-up retries", "read-only or locked", ...) that
+        were previously discarded — the 18/05/2026 incident left zero
+        diagnostic evidence between the trigger line and the prompt
+        timeout 30 minutes later.
+
+        Args:
+            profile_name: Profile being prechecked.
+            failures: ``(role, action, ok, detail)`` tuples with ok=False.
+            context: Short phase tag for the log line (e.g.
+                "scheduled precheck — prompting user").
+        """
+        for role, action, _ok, detail in failures:
+            logger.warning(
+                "Precheck failed for '%s' (%s): %s — %s%s",
+                profile_name,
+                context,
+                role,
+                action,
+                f" — {detail}" if detail else "",
+            )
+
+    def _stop_aware_precheck_wait(self, seconds: float) -> bool:
+        """Sleep in 1 s chunks between scheduled precheck retries.
+
+        Returns:
+            True when the scheduler started stopping (caller should
+            abandon the retry ladder), False after a full wait.
+        """
+        waited = 0.0
+        while waited < seconds:
+            if self.scheduler is not None and self.scheduler.is_stopping():
+                return True
+            chunk = min(1.0, seconds - waited)
+            time.sleep(chunk)
+            waited += chunk
+        return False
 
     def _precheck_and_run(
         self,
@@ -2650,12 +2798,18 @@ class BackupManagerApp:
             # of pause lets Windows finish mounting a drive that the
             # first precheck already started waking up.
             if _retry_attempt == 0:
+                self._log_precheck_failures(
+                    profile.name, failures, "manual precheck — one silent retry"
+                )
                 self.root.after(
                     500,
                     lambda: self._precheck_and_run(profile, engine, _retry_attempt=1),
                 )
                 return
 
+            self._log_precheck_failures(
+                profile.name, failures, "manual precheck — prompting user"
+            )
             self._hide_target_alert()
             # Check if primary storage is OK (only mirrors failed)
             primary_ok = all(r[2] for r in result[0] if r[0] == "Storage")
@@ -2672,7 +2826,11 @@ class BackupManagerApp:
             self._show_target_alert(
                 failures,
                 on_retry=lambda: self._on_precheck_retry(profile, engine),
-                on_cancel=lambda: self._on_precheck_cancel(),
+                # Bind the profile id into the closure so the cancel
+                # releases exactly THIS launch's run slot, even if an
+                # overlapping queue drain re-pointed
+                # ``_launching_profile_id`` at another profile.
+                on_cancel=lambda pid=profile.id: self._on_precheck_cancel(pid),
                 on_continue=on_continue,
             )
 
@@ -2687,6 +2845,7 @@ class BackupManagerApp:
         frame = tk.Frame(self._main_frame, bg=Colors.CARD_BG)
         frame.pack(fill="both", expand=True)
         self._alert_frame = frame
+        self._alert_owner = "manual"
 
         content = tk.Frame(frame, bg=Colors.CARD_BG)
         content.pack(expand=True)
@@ -2721,17 +2880,37 @@ class BackupManagerApp:
         self._hide_target_alert()
         self._start_backup_thread(profile, engine)
 
-    def _on_precheck_cancel(self) -> None:
-        """User clicked Cancel — hide alert, set tray to error."""
+    def _on_precheck_cancel(self, profile_id: str | None = None) -> None:
+        """User clicked Cancel — hide alert, set tray to error.
+
+        Args:
+            profile_id: Run slot to release, bound into the cancel
+                closure by ``_precheck_and_run``. Falls back to the
+                single-slot ``_launching_profile_id`` field for legacy
+                callers — but the explicit id is authoritative, so an
+                overlapping queue drain can no longer make the cancel
+                release ANOTHER profile's slot (leaking this one until
+                app restart).
+        """
         self._hide_target_alert()
         self.tray.set_state(TrayState.BACKUP_ERROR)
         # Launch aborted before the backup thread started — release the
         # flag so the next click can start (or queue) normally.
         self._launch_in_progress = False
+        # The user cancelled the launch: the rest of the queued chain
+        # dies with it. Pre-fix, the leftover entries lingered and were
+        # popped hours later by an unrelated run's drain — backups the
+        # user believed cancelled fired in the middle of the night.
+        if self._backup_queue:
+            names = ", ".join(p.name for p in self._backup_queue)
+            self.tab_run._append_log(f"Backup chain cancelled — removed from queue: {names}")
+            self._backup_queue.clear()
         # Release the run slot claimed in _precheck_and_run so the profile
         # is not left stuck "in progress" after an aborted launch.
-        if self._launching_profile_id is not None:
-            self.scheduler.unmark_profile_running(self._launching_profile_id)
+        target = profile_id if profile_id is not None else self._launching_profile_id
+        if target is not None:
+            self.scheduler.unmark_profile_running(target)
+        if self._launching_profile_id == target:
             self._launching_profile_id = None
 
     def _start_backup_thread(
@@ -2927,7 +3106,10 @@ class BackupManagerApp:
                 # Chain the next queued profile. On success we go
                 # straight to it; on failure or cancellation we ask the
                 # user whether to continue so a broken config doesn't
-                # silently skip all remaining profiles.
+                # silently skip all remaining profiles. Stale entries
+                # for the profile that JUST ran are dropped first
+                # (after(0) callbacks run in registration order).
+                self.root.after(0, self._remove_profile_from_queue, profile.id)
                 self.root.after(
                     0,
                     self._dequeue_next_backup,
@@ -2936,6 +3118,21 @@ class BackupManagerApp:
                 )
 
         threading.Thread(target=_backup_thread, daemon=True, name="Backup").start()
+
+    def _remove_profile_from_queue(self, profile_id: str) -> None:
+        """Drop stale queue entries for a profile whose run just finished.
+
+        ``_queue_backup_requests`` never queues a profile that is
+        already running, so an entry matching a JUST-COMPLETED run can
+        only have been queued before that run started — executing it
+        would back-up the same profile twice back-to-back.
+        """
+        before = len(self._backup_queue)
+        self._backup_queue = [p for p in self._backup_queue if p.id != profile_id]
+        if len(self._backup_queue) != before:
+            self.tab_run._append_log(
+                "Skipped a queued duplicate — this profile was just backed up."
+            )
 
     def _dequeue_next_backup(self, previous_failed: bool, previous_name: str) -> None:
         """Pop the next profile off ``_backup_queue`` and start it.
@@ -2948,6 +3145,13 @@ class BackupManagerApp:
         next profile runs — skipping silently through every remaining
         profile after a failure would hide a broken configuration.
         """
+        if self._launch_in_progress:
+            # A launch is already mid-precheck. Its own completion paths
+            # re-drain the queue (backup finally) or clear it (precheck
+            # cancel), so returning loses nothing. Overlapping drains
+            # used to overwrite ``_launching_profile_id`` mid-launch and
+            # leak the first launch's run slot until restart.
+            return
         if not self._backup_queue:
             return
         next_profile = self._backup_queue[0]
@@ -3341,8 +3545,12 @@ class BackupManagerApp:
         and shows alert on the main thread if any are unavailable.
 
         Raises:
-            RuntimeError: If targets are unavailable and user cancels,
-                or if the backup itself fails.
+            PrecheckUserCancelledError: If targets are unavailable and
+                the user explicitly cancels (journalled "cancelled",
+                no retries).
+            PrecheckUserTimeoutError: If the prompt expires unanswered
+                (journalled "skipped", no retries).
+            Exception: Whatever the backup pipeline raises on failure.
         """
         from datetime import datetime
 
@@ -3361,7 +3569,31 @@ class BackupManagerApp:
         results = engine.precheck_targets(profile)
         failures = [r for r in results if not r[2]]
 
+        # Absorb transient false-negatives with a short backoff ladder
+        # BEFORE involving a human. The manual path retries once after
+        # 500 ms; unattended runs need more — a single bad probe
+        # otherwise escalates straight to a 30-min modal nobody is
+        # there to answer, and the day's backup is silently lost.
+        for delay_s in _SCHEDULED_PRECHECK_RETRY_DELAYS_S:
+            if not failures:
+                break
+            self._log_precheck_failures(
+                profile.name,
+                failures,
+                f"scheduled precheck — retrying in {delay_s:.0f}s",
+            )
+            if self._stop_aware_precheck_wait(delay_s):
+                # Scheduler stopping: fall through with the current
+                # failures — the prompt's own is_stopping check exits
+                # immediately with "timeout" (classified as a skip).
+                break
+            results = engine.precheck_targets(profile)
+            failures = [r for r in results if not r[2]]
+
         if failures:
+            self._log_precheck_failures(
+                profile.name, failures, "scheduled precheck — prompting user"
+            )
             # Show alert on main thread and wait for user decision.
             # The prompt distinguishes three outcomes:
             #   "ok"       — precheck eventually passed, run the backup
@@ -3381,8 +3613,17 @@ class BackupManagerApp:
                     timeout_seconds=_PRECHECK_PROMPT_TIMEOUT_SECONDS,
                 )
             if user_choice == "cancel":
+                from src.core.exceptions import PrecheckUserCancelledError
+
                 self.tray.set_state(TrayState.BACKUP_ERROR)
-                raise RuntimeError("Backup cancelled: destinations unavailable")
+                # Dedicated exception (NOT RuntimeError): the scheduler
+                # classifies it as a user decision — journal status
+                # "cancelled", no retry ladder. The plain RuntimeError
+                # used to be treated as a transient failure and the
+                # ladder re-prompted the user up to 5 more times over
+                # ~6 h after they had explicitly declined.
+                summary = "; ".join(f"{role}: {action}" for role, action, _ok, _d in failures)
+                raise PrecheckUserCancelledError(profile_name=profile.name, details=summary)
 
         # Scheduler owns its own profile instance (freshly loaded from disk)
         # so UI saves cannot mutate it. Raise the flag anyway so a concurrent
@@ -3524,7 +3765,11 @@ class BackupManagerApp:
             # while this scheduled run was in flight. Without this, a
             # manual request made during a scheduled backup would sit in
             # the queue until the next manual click. Posted to the Tk
-            # thread because _dequeue_next_backup touches widgets.
+            # thread because _dequeue_next_backup touches widgets. A
+            # stale queue entry for THIS profile is dropped first so a
+            # finished scheduled run is not immediately re-run from a
+            # pre-run manual request.
+            self.root.after(0, self._remove_profile_from_queue, profile.id)
             self.root.after(0, self._dequeue_next_backup, scheduled_failed, profile.name)
 
     def _scheduled_precheck_prompt(
@@ -3571,12 +3816,33 @@ class BackupManagerApp:
                 d["value"] = choice
                 e.set()
 
-            def _show_alert(f=current_failures, pick=_on_choice):
+            def _show_alert(f=current_failures, pick=_on_choice, d=decision, e=event):
                 self._show_target_alert(
                     f,
                     on_retry=lambda: pick("retry"),
                     on_cancel=lambda: pick("cancel"),
+                    owner="scheduler",
                 )
+                # Displaced-prompt recovery: a manual backup launch (or
+                # any flow calling _hide_target_alert/_show_checking_message)
+                # destroys this frame — and with it the buttons that set
+                # ``event``. Pre-fix the scheduler thread then stalled
+                # for the full remaining 30-min budget and the run was
+                # falsely journalled "skipped (user timeout)" although
+                # the user was present. Binding <Destroy> turns that
+                # into an explicit "displaced" decision the wait loop
+                # handles by re-prompting. The guard on d["value"]
+                # keeps scheduler-initiated hides (after a click or
+                # timeout) from overwriting the real decision.
+                frame = self._alert_frame
+                if frame is not None:
+
+                    def _on_destroyed(_evt, d=d, e=e):
+                        if d["value"] is None:
+                            d["value"] = "displaced"
+                            e.set()
+
+                    frame.bind("<Destroy>", _on_destroyed)
 
             # Show alert on main thread
             self.root.after(0, _show_alert)
@@ -3614,6 +3880,31 @@ class BackupManagerApp:
                 self.root.after(0, self._hide_target_alert)
                 return "cancel"
 
+            if decision["value"] == "displaced":
+                # Another UI flow destroyed our prompt (typically a
+                # manual backup launch taking over the main area).
+                # Wait a few seconds for that flow's overlay to settle,
+                # re-run the precheck (the targets may be fine by now,
+                # or OUR profile may have been launched manually — its
+                # run slot then makes the engine skip us), and loop to
+                # re-show the prompt. Still bounded by the deadline.
+                logger.warning(
+                    "Scheduler precheck prompt for '%s' was displaced by "
+                    "another UI flow — re-prompting",
+                    profile.name,
+                )
+                if self._stop_aware_precheck_wait(5.0):
+                    return "timeout"
+                results = engine.precheck_targets(profile)
+                displaced_failures = [r for r in results if not r[2]]
+                if not displaced_failures:
+                    return "ok"
+                current_failures = displaced_failures
+                if time.monotonic() >= deadline:
+                    self.root.after(0, self._hide_target_alert)
+                    return "timeout"
+                continue
+
             # User clicked retry — hide alert and re-check
             self.root.after(0, self._hide_target_alert)
             results = engine.precheck_targets(profile)
@@ -3641,6 +3932,7 @@ class BackupManagerApp:
         on_retry: callable,
         on_cancel: callable,
         on_continue=None,
+        owner: str = "manual",
     ) -> None:
         """Replace notebook with an alert frame listing unreachable targets.
 
@@ -3648,6 +3940,9 @@ class BackupManagerApp:
             failures: List of (role, action, success, detail) with success=False.
             on_retry: Callback when user clicks Retry.
             on_cancel: Callback when user clicks Cancel backup.
+            on_continue: Optional callback for "Continue without mirror".
+            owner: "manual" or "scheduler" — who owns the alert slot
+                (see ``_alert_owner``).
         """
         self._hide_target_alert()
         self.notebook.pack_forget()
@@ -3658,6 +3953,7 @@ class BackupManagerApp:
         frame = tk.Frame(self._main_frame, bg=Colors.CARD_BG)
         frame.pack(fill="both", expand=True)
         self._alert_frame = frame
+        self._alert_owner = owner
 
         # Centered content with constrained width
         content = tk.Frame(frame, bg=Colors.CARD_BG)
@@ -3683,7 +3979,7 @@ class BackupManagerApp:
         ).pack(pady=(0, 15))
 
         # List each failed target
-        for role, action, _ok, _detail in failures:
+        for role, action, _ok, detail in failures:
             target_frame = tk.Frame(content, bg=Colors.CARD_BG)
             target_frame.pack(fill="x", pady=8, padx=20)
 
@@ -3706,6 +4002,22 @@ class BackupManagerApp:
                 wraplength=max_width,
                 justify="left",
             ).pack(fill="x")
+
+            # The probe's failure reason ("Drive not ready after
+            # wake-up retries", "Connection test timed out after
+            # 30s", ...). Was collected and silently discarded \u2014
+            # the user saw WHAT failed but never WHY.
+            if detail:
+                tk.Label(
+                    target_frame,
+                    text=f"    {detail}",
+                    font=(Fonts.FAMILY, Fonts.SIZE_NORMAL),
+                    fg=Colors.TEXT_SECONDARY,
+                    bg=Colors.CARD_BG,
+                    anchor="w",
+                    wraplength=max_width,
+                    justify="left",
+                ).pack(fill="x")
 
         # Footer message
         tk.Label(
@@ -3741,10 +4053,17 @@ class BackupManagerApp:
             ).pack(side="left", padx=10)
 
     def _hide_target_alert(self) -> None:
-        """Remove the alert frame and restore the notebook."""
+        """Remove the alert frame and restore the notebook.
+
+        Destroying a scheduler-owned alert is allowed — its <Destroy>
+        binding flips the pending prompt to "displaced" so the
+        scheduler thread re-prompts instead of stalling (see
+        ``_scheduled_precheck_prompt``).
+        """
         if self._alert_frame is not None:
             self._alert_frame.destroy()
             self._alert_frame = None
+        self._alert_owner = None
         self.notebook.pack(fill="both", expand=True)
 
     # --- Status ---

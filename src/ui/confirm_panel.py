@@ -46,6 +46,7 @@ keeps running (UI stays responsive) while the panel is up.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import tkinter as tk
 from collections.abc import Callable
@@ -200,7 +201,7 @@ def confirm_inline(
         extra.key: tk.BooleanVar(value=extra.default, master=parent_frame) for extra in extras_list
     }
 
-    panel = _build_panel(
+    panel, bound_sequences = _build_panel(
         parent_frame,
         title=title,
         body=body,
@@ -216,11 +217,10 @@ def confirm_inline(
 
     parent_frame.wait_variable(decision_var)
 
-    try:
+    _unbind_all_sequences(parent_frame, bound_sequences)
+    # Panel already torn down (e.g. parent destroyed mid-wait) is fine.
+    with contextlib.suppress(tk.TclError):
         panel.destroy()
-    except tk.TclError:
-        # Panel already torn down (e.g. parent destroyed mid-wait).
-        pass
 
     if restore_callback is not None:
         try:
@@ -254,6 +254,25 @@ def _validate_args(
             raise ValueError(f"{name} must be a non-empty string, got {value!r}")
 
 
+def _unbind_all_sequences(parent_frame: tk.Misc, sequences: list[str]) -> None:
+    """Remove the panel's application-wide key bindings after teardown.
+
+    ``bind_all`` installs the handler on Tk's "all" bindtag, which is
+    NOT torn down by ``panel.destroy()``. Without this cleanup, every
+    later ``<Return>`` / ``<Escape>`` keypress anywhere in the app would
+    keep firing the destroyed panel's resolver (a dead BooleanVar today,
+    a ghost action the moment any handler gains a side effect). The
+    confirm panels are the only ``bind_all`` users of these sequences,
+    so removing the whole-sequence binding is safe and mirrors the
+    wizard's MouseWheel ``unbind_all`` cleanup.
+    """
+    for seq in sequences:
+        try:
+            parent_frame.unbind_all(seq)
+        except tk.TclError:
+            logger.debug("unbind_all(%s) raised (widget torn down)", seq, exc_info=True)
+
+
 def _resolve(state: dict, var: tk.BooleanVar, *, confirmed: bool) -> None:
     """Record the user's choice and unblock ``wait_variable``."""
     state["confirmed"] = confirmed
@@ -278,11 +297,15 @@ def _build_panel(
     destructive: bool,
     on_confirm: Callable[[], None],
     on_cancel: Callable[[], None],
-) -> ttk.Frame:
+) -> tuple[ttk.Frame, list[str]]:
     """Assemble the panel widget tree and pack it inside the parent.
 
-    Returns the outer ``ttk.Frame`` so the caller can destroy the
-    whole subtree on dismissal.
+    Returns ``(panel, bound_sequences)``: the outer ``ttk.Frame`` so
+    the caller can destroy the whole subtree on dismissal, plus the
+    list of ``bind_all`` key sequences the caller MUST ``unbind_all``
+    after teardown — these live on the application-wide "all" bindtag
+    and survive ``panel.destroy()`` otherwise, so every later
+    Return/Escape keypress would fire this dead panel's resolver.
     """
     panel = ttk.Frame(parent_frame)
     panel.pack(fill="both", expand=True)
@@ -310,12 +333,19 @@ def _build_panel(
         on_cancel=on_cancel,
     )
 
-    # Escape always cancels; Enter triggers the destructive confirm.
-    # Bind on the panel level so the keys work no matter which widget
+    # Escape always cancels. Enter is the cancel-FIRST safety hinge:
+    #   * non-destructive panel → Enter confirms (a convenience OK).
+    #   * destructive panel → Enter CANCELS, never confirms. Binding
+    #     Enter to the destructive action app-wide (bind_all) meant a
+    #     user hammering Enter to dismiss a prior toast could land the
+    #     second Enter on a "Delete profile" confirm and execute it —
+    #     the exact hazard the module docstring claims to prevent but
+    #     did not. A destructive confirm now requires an explicit click.
+    # Bound at the panel level so the keys work no matter which widget
     # has focus (e.g. a checkbox).
     panel.bind_all("<Escape>", lambda _e: on_cancel())
-    panel.bind_all("<Return>", lambda _e: on_confirm())
-    return panel
+    panel.bind_all("<Return>", lambda _e: on_cancel() if destructive else on_confirm())
+    return panel, ["<Escape>", "<Return>"]
 
 
 def _build_header(
@@ -561,7 +591,7 @@ def notify_inline(
 
     decision_var = tk.BooleanVar(value=False, master=parent_frame)
 
-    panel = _build_notify_panel(
+    panel, bound_sequences = _build_notify_panel(
         parent_frame,
         title=title,
         body=body,
@@ -582,10 +612,9 @@ def notify_inline(
 
     parent_frame.wait_variable(decision_var)
 
-    try:
+    _unbind_all_sequences(parent_frame, bound_sequences)
+    with contextlib.suppress(tk.TclError):
         panel.destroy()
-    except tk.TclError:
-        pass
 
     if restore_callback is not None:
         try:
@@ -663,12 +692,14 @@ def _build_notify_panel(
     button_label: str,
     show_button: bool,
     on_dismiss: Callable[[], None],
-) -> ttk.Frame:
+) -> tuple[ttk.Frame, list[str]]:
     """Assemble the notify panel widget tree.
 
-    Returns the outer ``ttk.Frame`` so the caller can destroy the
-    whole subtree on dismissal. Mirrors :func:`_build_panel` but
-    with at most one OK button.
+    Returns ``(panel, bound_sequences)`` — the outer ``ttk.Frame`` to
+    destroy on dismissal, plus the ``bind_all`` sequences the caller
+    must ``unbind_all`` after teardown (they outlive ``destroy`` on the
+    application "all" bindtag otherwise). Mirrors :func:`_build_panel`
+    but with at most one OK button.
 
     Auto-dismiss mode (``show_button=False``): no button is rendered.
     Clicking anywhere on the panel still dismisses early, so the
@@ -691,12 +722,14 @@ def _build_notify_panel(
         for widget in (panel, centre):
             widget.bind("<Button-1>", lambda _e: on_dismiss())
 
-    # Escape and Return both dismiss — there is only one outcome.
-    # Bound at the panel level so the keys work even when the focus
-    # is somewhere else (notebook tab, sidebar entry, etc.).
+    # Escape and Return both dismiss — there is only one outcome, so
+    # binding both to the same action is safe here (unlike the
+    # destructive confirm panel). Bound at the panel level so the keys
+    # work even when the focus is somewhere else (notebook tab, sidebar
+    # entry, etc.). Caller unbinds these after teardown.
     panel.bind_all("<Escape>", lambda _e: on_dismiss())
     panel.bind_all("<Return>", lambda _e: on_dismiss())
-    return panel
+    return panel, ["<Escape>", "<Return>"]
 
 
 def _build_notify_button(

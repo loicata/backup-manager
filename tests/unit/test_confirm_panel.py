@@ -504,6 +504,72 @@ class TestPanelTeardown:
         assert (after - before) == set()
 
 
+class TestKeyBindingSafety:
+    """Audit 2026-06-10: <Return> must not trigger a DESTRUCTIVE confirm
+    app-wide, and the bind_all key bindings must be removed after the
+    panel is torn down (they live on Tk's 'all' bindtag and survive
+    destroy() otherwise — every later keypress would fire a dead panel)."""
+
+    def test_return_cancels_destructive_panel(self, panel_host):
+        # Press Enter instead of clicking — a destructive panel must
+        # treat Enter as Cancel (the cancel-first safety), never Delete.
+        panel_host.after(50, lambda: panel_host.event_generate("<Return>"))
+
+        result = confirm_inline(
+            panel_host,
+            title="Delete profile 'L2'?",
+            body="This removes everything.",
+            confirm_label="Delete",
+            cancel_label="Cancel",
+            destructive=True,
+        )
+
+        assert result.confirmed is False  # Enter did NOT confirm the delete
+
+    def test_return_confirms_non_destructive_panel(self, panel_host):
+        panel_host.after(50, lambda: panel_host.event_generate("<Return>"))
+
+        result = confirm_inline(
+            panel_host,
+            title="Proceed?",
+            body="A routine confirmation.",
+            confirm_label="OK",
+            cancel_label="Cancel",
+            destructive=False,
+        )
+
+        assert result.confirmed is True  # Enter confirms when it's safe
+
+    def test_bindings_removed_after_teardown(self, panel_host, tk_root):
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "Cancel"))
+        confirm_inline(
+            panel_host,
+            title="Title",
+            body="Body",
+            confirm_label="OK",
+            cancel_label="Cancel",
+            destructive=True,
+        )
+
+        # No stale app-level binding remains for either sequence.
+        assert tk_root.bind_all("<Return>") == ""
+        assert tk_root.bind_all("<Escape>") == ""
+
+    def test_notify_bindings_removed_after_teardown(self, panel_host, tk_root):
+        panel_host.after(50, lambda: _click_first_button_with_text(panel_host, "OK"))
+        notify_inline(
+            panel_host,
+            title="Done",
+            body="It worked.",
+            button_label="OK",
+            level="success",
+            auto_dismiss_ms=0,  # force the OK button (no timer)
+        )
+
+        assert tk_root.bind_all("<Return>") == ""
+        assert tk_root.bind_all("<Escape>") == ""
+
+
 # =====================================================================
 # notify_inline tests (added 3.7.34 — single-button acknowledgement
 # panel that replaced the toast system).

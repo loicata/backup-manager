@@ -5,6 +5,51 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.52] - 2026-06-10
+
+Clears the ENTIRE remaining medium-severity backlog of the 2026-06-10 deep audit: 22 fixes
+across profile persistence, scheduling, rotation, remote backends and UI safety. The audit
+backlog now holds low-severity findings only. Full suite: 2746 passed, 28 skipped.
+First release compiled with Nuitka (native C binary) instead of PyInstaller.
+
+### Fixed — profile persistence
+- **Concurrent saves could publish a torn profile file.** ``save_profile`` is reached from the Tk, scheduler and backup-worker threads, all sharing one deterministic ``.json.tmp`` per profile. All disk mutations are now serialized by a manager-wide lock.
+- **The .bak recovery clobbered the live profile with a non-atomic copy.** Recovery now re-parses the live file first (a concurrent save that already fixed it wins) and restores via ``.tmp`` + ``os.replace``.
+- **Switching storage type silently wiped the other type's configuration.** ``_build_storage_config`` now carries over every non-selected-type field, so an SFTP→S3 switch keeps the SFTP settings and stays reversible. (LOCAL↔NETWORK share ``destination_path``, which cannot be preserved.)
+
+### Fixed — scheduling & precheck
+- **Precheck failure details were discarded everywhere.** Each failed target is now logged at WARNING (profile, role, action, detail) and the detail line is rendered in the "Destinations unavailable" alert.
+- **A single transient probe failure cost the day's scheduled backup.** The scheduled precheck now retries with a 5/15/30 s backoff ladder (stop-aware) before involving a human — the manual path's 500 ms retry was never enough for an unattended machine.
+- **The retry ladder re-prompted the user up to 5 more times after an explicit Cancel.** ``_retry_backup`` now classifies skip/cancel-class exceptions like ``_trigger_backup`` and abandons the ladder; an explicit Cancel raises the new ``PrecheckUserCancelledError`` (journalled "cancelled", never retried).
+- **A manual backup launch destroyed the scheduler's pending precheck prompt, stranding it for 30 min.** The alert frame now tracks its owner; a displaced scheduler prompt is detected via ``<Destroy>`` and re-prompts instead of timing out silently.
+- **Queued profiles left by a cancelled chain fired hours later from an unrelated run's drain.** ``_on_precheck_cancel`` clears the queue; a completed run also drops its own stale queue entry.
+- **drive_serial: a single 5 s PowerShell stall faked an unplugged drive.** Full-system enumeration now gets a 10 s budget plus one retry.
+
+### Fixed — concurrency state (UI)
+- **The single ``_backup_running`` boolean was cleared by the FIRST of two overlapping runs to finish**, un-blinding the save guard and the health-probe race shields for the still-running backup. Every reader now uses a predicate derived from the per-profile ``_active_engines`` registry.
+- **An overlapping queue drain could release the WRONG profile's run slot on cancel** (leaking the cancelled one until restart). The cancel closure now binds its own profile id, and drains are skipped while a launch is mid-precheck.
+- **Per-run logs cross-contaminated under concurrent runs.** Engines sharing one EventBus captured each other's LOG lines into their per-run files (History misclassification). ``_capture_log`` now drops events tagged with a different ``profile_id``.
+
+### Fixed — rotation & cleanup
+- **GFS rotation trusted backend mtime exclusively**: ``modified=0`` meant unconditional deletion and a future mtime made a backup immortal. Rotation now parses the timestamp embedded in the backup NAME (mtime is only a fallback) and KEEPS any backup it cannot date.
+- **Abandoned ``.tar.wbenc.partial`` files leaked on the destination forever** (a hard kill mid-write left them invisible to every cleanup path). The orphan scan now sweeps a profile's ``*.partial`` files older than 1 h, and the incomplete-backup cleanup tries the ``.partial`` names too.
+- **The pre-write disk-space check ran against the unresolved drive letter and silently skipped unreachable destinations.** It now resolves the USB drive's current letter, records a visible warning when space cannot be verified, and scales the margin with file count for tar/encrypted destinations.
+
+### Fixed — remote backends
+- **A missing remote directory was indistinguishable from an empty backup**: SFTP ``_list_files_exec`` discarded ``find``'s exit status. Non-zero now raises with the stderr detail (closes the stage-5 family's listing leg).
+- **Every UI/health/precheck "test connection" left an immutable probe object in the Object Lock bucket.** The write probe is now gated on the bucket's Object Lock flag (known at construction), not on the run-time retention date.
+- **A transient S3 failure could record a TRUNCATED upload as success**: retries re-sent a partially-consumed stream (s3transfer resumes from the current position). ``with_retry`` now snapshots and rewinds seekable stream arguments between attempts; non-seekable streams are rejected up front.
+- **delete_backup "succeeded" on Object Lock buckets via delete markers**, hiding backups from the app while every version stayed billed. It now refuses with an explicit error (deletion is lifecycle-only).
+- **A failed prefix-stats call fabricated a 0-byte 1970 backup entry** that rotation would have deleted on sight. The entry is now skipped from the listing (self-healing on the next successful stat) and the real error is logged.
+
+### Fixed — UI safety & noise
+- **The destination health poll ran a full SSH handshake every 60 s, 24/7** (~91% of the log; plausible contributor to the Winsock buffer exhaustion that killed a session). Polling now pauses while the window sits in the tray, probes remote backends only every 5th tick, and logs destination state TRANSITIONS at WARNING/INFO instead of burying failures at DEBUG.
+- **Enter triggered the destructive Confirm app-wide on inline panels** — the exact accident the cancel-first design claims to prevent. On destructive panels Enter now cancels; the panel's app-level key bindings are removed at teardown (they used to survive ``destroy()`` forever).
+
+### Tests
+- +65 tests across config concurrency/recovery, storage-tab type switching, precheck retry classification, capture-log filtering, name-dated rotation, stale-partial sweeping, disk-space verification, health-poll throttling, SFTP exit-status, S3 Object-Lock/rewind/stats, and confirm-panel key safety.
+- Full suite: 2746 passed, 0 failed, 28 skipped.
+
 ## [3.7.51] - 2026-06-10
 
 Batch fix of 13 medium-severity findings from the 2026-06-10 deep audit — the data-compromise

@@ -92,6 +92,7 @@ class S3Storage(StorageBackend):
         secret_key: str = "",
         endpoint_url: str = "",
         provider: str = "Amazon AWS",
+        object_lock: bool = False,
     ):
         super().__init__()
         self._bucket = bucket
@@ -102,6 +103,12 @@ class S3Storage(StorageBackend):
         self._endpoint_url = endpoint_url or self._resolve_endpoint(provider, region)
         self._provider = provider
         self._retain_until = None  # Object Lock retain-until-date (datetime)
+        # Whether the destination bucket is configured with Object Lock.
+        # Distinct from ``_retain_until`` (set only during a backup run):
+        # this flag is known at construction for EVERY backend instance
+        # (UI test button, health poll, precheck), so the write-probe
+        # and delete guards work outside a run too.
+        self._object_lock = object_lock
 
     def set_retain_until(self, retain_until) -> None:
         """Set the Object Lock retain-until-date for subsequent uploads.
@@ -207,7 +214,21 @@ class S3Storage(StorageBackend):
 
     @with_retry(max_retries=3, base_delay=2.0)
     def upload_file(self, fileobj: BinaryIO, remote_path: str, size: int = 0) -> None:
-        """Stream a file-like object to S3."""
+        """Stream a file-like object to S3.
+
+        ``with_retry`` rewinds every seekable stream argument to its
+        pre-first-attempt position between retries, so a transient
+        failure cannot upload a TRUNCATED object recorded as success
+        (the trust-anchor artefacts that go through this path —
+        ``.wbcommit`` markers, ``.wbverify`` manifests, mirror streams).
+        A non-seekable stream cannot be retried safely, so reject it up
+        front rather than risk silent truncation.
+        """
+        if not (hasattr(fileobj, "seek") and hasattr(fileobj, "tell")):
+            raise OSError(
+                f"Cannot upload {remote_path!r}: stream is not seekable (retry-unsafe)"
+            )
+
         client = self._get_client()
         key = self._s3_key(remote_path)
         reader = self._get_throttled_reader(fileobj)
@@ -262,7 +283,20 @@ class S3Storage(StorageBackend):
                 name = dir_prefix.rstrip("/").rsplit("/", 1)[-1]
                 if not _is_committed(name):
                     continue
-                total_size, mtime, has_wbenc = self._get_prefix_stats(client, dir_prefix)
+                try:
+                    total_size, mtime, has_wbenc = self._get_prefix_stats(client, dir_prefix)
+                except Exception as e:
+                    # Stats unavailable (throttling, transient network):
+                    # SKIP this entry rather than publish fabricated
+                    # (size=0, mtime=1970) data that the rotator would
+                    # treat as a real, ancient backup. Skipping keeps it
+                    # out of rotation (so it is never wrongly deleted)
+                    # and out of the Verify/Restore list until a later
+                    # successful stat; self-healing and fail-safe.
+                    logger.warning(
+                        "Skipping backup %r in listing — stats unavailable: %s", name, e
+                    )
+                    continue
                 backups.append(
                     {
                         "name": name,
@@ -328,13 +362,51 @@ class S3Storage(StorageBackend):
                         ts = float(last_mod) if last_mod else 0.0
                     if ts > newest_mtime:
                         newest_mtime = ts
-        except Exception:
-            logger.warning("Failed to get stats for prefix %s", dir_prefix)
+        except Exception as e:
+            # Do NOT fabricate (0, epoch-0, False) as if measured: the
+            # rotator sorts by ``modified`` and a bogus 1970 timestamp
+            # places the backup outside every keep window → eligible for
+            # deletion on that very pass, and the Verify/Restore tabs
+            # would show a 0-byte 1970 backup. Surface the real error
+            # and re-raise so list_backups' caller handles the backend
+            # failure rather than publishing silently-wrong data.
+            logger.warning("Failed to get stats for prefix %s: %s", dir_prefix, e)
+            raise
         return total_size, newest_mtime, has_wbenc
 
     @with_retry(max_retries=3, base_delay=2.0)
     def delete_backup(self, remote_name: str) -> None:
-        """Delete a backup (file or prefix) from S3."""
+        """Delete a backup (file or prefix) from S3.
+
+        Raises:
+            StorageDeleteError: On an Object Lock bucket. ``delete_objects``
+                without a VersionId on a versioned (Object Lock) bucket
+                only inserts a delete marker and reports success — the
+                ``Errors`` inspection below can NEVER fire for a locked
+                object, so the app would report the backup gone while
+                every version stays billed and recoverable only from the
+                AWS console. Refusing here is honest: true removal is
+                lifecycle-only until retention expires (mirrors the
+                engine's orphan-scan / incomplete-cleanup skips).
+        """
+        if self._object_lock:
+            from src.core.exceptions import StorageDeleteError
+            from src.storage._fs_utils import Residual
+
+            raise StorageDeleteError(
+                remote_name,
+                [
+                    Residual(
+                        path=remote_name,
+                        error=(
+                            "Object Lock bucket — deletion is lifecycle-only until "
+                            "retention expires; a delete here would only hide the "
+                            "backup behind a delete marker while all versions remain."
+                        ),
+                    )
+                ],
+            )
+
         client = self._get_client()
         prefix = self._s3_key(remote_name)
 
@@ -401,8 +473,16 @@ class S3Storage(StorageBackend):
             prefix = f"{self._prefix}/" if self._prefix else ""
             client.list_objects_v2(Bucket=self._bucket, Prefix=prefix, MaxKeys=1)
 
-            # Probe write permission when safe to do so (no Object Lock)
-            if self._retain_until is None:
+            # Probe write permission when safe to do so. Gate on the
+            # bucket's Object Lock FLAG, not on ``_retain_until`` — the
+            # latter is only set during a backup run, so every UI /
+            # health-poll / precheck backend (constructed fresh, with
+            # _retain_until=None) used to write a probe object on EVERY
+            # call. Under COMPLIANCE that object is immutable until the
+            # bucket-default retention expires and the cleanup delete
+            # only adds a delete marker → one billed, undeletable 5-byte
+            # version per probe (~1,440/day while the profile is open).
+            if not self._object_lock and self._retain_until is None:
                 self._probe_write(client, prefix)
 
             return True, f"Connected to {self._bucket} ({self._provider})"

@@ -1,5 +1,6 @@
 """Storage tab: primary backup destination configuration."""
 
+import dataclasses
 import tkinter as tk
 from tkinter import filedialog, ttk
 
@@ -18,6 +19,10 @@ class StorageTab(ScrollableTab):
         self._features = get_available_features()
         self._config_frames: dict[str, ttk.Frame] = {}
         self._saved_device_serial: str = ""
+        # Full saved storage config — carried over field-by-field in
+        # _build_storage_config so switching the storage type never
+        # wipes the other types' settings from the persisted profile.
+        self._saved_storage: StorageConfig | None = None
         self._saved_object_lock_fields: dict = {
             "s3_object_lock": False,
             "s3_object_lock_mode": "COMPLIANCE",
@@ -312,12 +317,25 @@ class StorageTab(ScrollableTab):
     def _build_storage_config(self) -> StorageConfig:
         """Build StorageConfig from current UI state.
 
-        Preserves Object Lock fields (s3_object_lock, s3_object_lock_days,
-        s3_speedtest_bucket, etc.) from the saved profile since these are
-        not editable in the storage tab.
+        Starts from a field-by-field copy of the SAVED storage config,
+        then overwrites only the selected type's fields from the UI.
+        A type switch (e.g. SFTP → S3) therefore keeps the other
+        type's settings in the persisted profile and stays reversible
+        — previously every non-selected field was saved back as empty,
+        and the second save rotated the loss into .bak too.
+
+        Limitation: LOCAL and NETWORK share ``destination_path``, so
+        that one field cannot survive a LOCAL ↔ NETWORK switch.
+
+        Also preserves Object Lock fields (s3_object_lock, ...) from
+        the saved profile since these are not editable in the tab.
         """
         stype = StorageType(self.type_var.get())
         config = StorageConfig()  # Default first, set type after populating
+
+        if self._saved_storage is not None:
+            for fld in dataclasses.fields(StorageConfig):
+                setattr(config, fld.name, getattr(self._saved_storage, fld.name))
 
         if stype == StorageType.LOCAL:
             config.destination_path = self.local_path_var.get()
@@ -354,6 +372,8 @@ class StorageTab(ScrollableTab):
         s = profile.storage
         self.type_var.set(s.storage_type.value)
         self._saved_device_serial = getattr(s, "device_serial", "")
+        # Snapshot for the cross-type carry-over in _build_storage_config.
+        self._saved_storage = dataclasses.replace(s)
 
         # Preserve Object Lock fields (set by wizard, not editable here)
         self._saved_object_lock_fields = {

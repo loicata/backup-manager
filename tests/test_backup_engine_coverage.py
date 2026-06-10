@@ -111,17 +111,22 @@ class TestDiskSpaceChecks:
         ):
             engine.run_backup(profile)
 
-    def test_check_path_space_oserror_skipped(self):
-        """OSError from disk_usage is silently skipped."""
+    def test_check_path_space_oserror_recorded_unverifiable(self):
+        """OSError from disk_usage is non-fatal but recorded as unverifiable
+        (was a silent ``pass`` that let a run proceed to a mid-write
+        disk-full failure on an unreachable destination)."""
         errors = []
+        unverifiable = []
         with patch("shutil.disk_usage", side_effect=OSError("not mounted")):
-            BackupEngine._check_path_space("/nonexistent", 1024, "Test", errors)
+            BackupEngine._check_path_space("/nonexistent", 1024, "Test", errors, unverifiable)
         assert errors == []
+        assert unverifiable == ["Test"]
 
     def test_check_remote_space_connection_failure(self, env):
-        """Remote space check logs debug when connection fails."""
+        """Remote space check records unverifiable when connection fails."""
         engine = _engine(env)
         errors = []
+        unverifiable = []
         with patch.object(
             engine,
             "_get_backend",
@@ -134,14 +139,17 @@ class TestDiskSpaceChecks:
                 1024,
                 "SFTP test",
                 errors,
+                unverifiable,
             )
-        # Error is silently skipped, no entry added
+        # Non-fatal: no error, but flagged as unverifiable.
         assert errors == []
+        assert unverifiable == ["SFTP test"]
 
     def test_check_remote_space_sufficient(self, env):
         """Remote space check passes when space is sufficient."""
         engine = _engine(env)
         errors = []
+        unverifiable = []
         mock_backend = MagicMock()
         mock_backend.get_free_space.return_value = 10 * 1024**3  # 10 GB
         with patch.object(engine, "_get_backend", return_value=mock_backend):
@@ -152,13 +160,16 @@ class TestDiskSpaceChecks:
                 1024,
                 "SFTP test",
                 errors,
+                unverifiable,
             )
         assert errors == []
+        assert unverifiable == []
 
     def test_check_remote_space_insufficient(self, env):
         """Remote space check appends error when space is too low."""
         engine = _engine(env)
         errors = []
+        unverifiable = []
         mock_backend = MagicMock()
         mock_backend.get_free_space.return_value = 100  # 100 bytes
         with patch.object(engine, "_get_backend", return_value=mock_backend):
@@ -169,14 +180,17 @@ class TestDiskSpaceChecks:
                 10 * 1024**3,
                 "SFTP test",
                 errors,
+                unverifiable,
             )
         assert len(errors) == 1
         assert "SFTP test" in errors[0]
 
-    def test_check_remote_space_none(self, env):
-        """Remote space check skips when get_free_space returns None."""
+    def test_check_remote_space_none_unverifiable(self, env):
+        """get_free_space() returning None flags the destination as
+        unverifiable rather than silently passing."""
         engine = _engine(env)
         errors = []
+        unverifiable = []
         mock_backend = MagicMock()
         mock_backend.get_free_space.return_value = None
         with patch.object(engine, "_get_backend", return_value=mock_backend):
@@ -187,8 +201,10 @@ class TestDiskSpaceChecks:
                 1024,
                 "SFTP test",
                 errors,
+                unverifiable,
             )
         assert errors == []
+        assert unverifiable == ["SFTP test"]
 
 
 # ---------------------------------------------------------------------------

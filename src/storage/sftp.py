@@ -1561,6 +1561,15 @@ class SFTPStorage(StorageBackend):
 
         Returns:
             List of (relative_path, size_bytes) tuples.
+
+        Raises:
+            OSError: If ``find`` exits non-zero (missing directory,
+                permission denied, restricted shell). Previously the
+                exit status was discarded, so a vanished/never-written
+                backup directory returned ``[]`` — indistinguishable
+                from a genuinely empty backup, which then fed the
+                verify-skip path and committed an empty remote backup
+                as success (the stage-5 family).
         """
         escaped = _shell_escape(remote_dir)
         channel = transport.open_session()
@@ -1568,15 +1577,27 @@ class SFTPStorage(StorageBackend):
             channel.exec_command(f"find {escaped} -type f -printf '%s %P\\n'")
 
             output = b""
+            stderr = b""
             while True:
                 chunk = channel.recv(65536)
                 if not chunk:
                     break
                 output += chunk
+            # Drain stderr so the find error (e.g. "No such file or
+            # directory") is available for the exception message.
+            while channel.recv_stderr_ready():
+                stderr += channel.recv_stderr(65536)
 
-            channel.recv_exit_status()
+            exit_status = channel.recv_exit_status()
         finally:
             channel.close()
+
+        if exit_status != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip() or "(no stderr)"
+            raise OSError(
+                f"Remote listing failed for {remote_dir!r} "
+                f"(find exit {exit_status}): {detail}"
+            )
 
         files: list[tuple[str, int]] = []
         for line in output.decode("utf-8", errors="replace").splitlines():

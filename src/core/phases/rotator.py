@@ -73,6 +73,7 @@ def rotate_backups(
     events: EventBus | None = None,
     current_backup_name: str = "",
     profile_name: str = "",
+    on_deleted=None,
 ) -> int:
     """Apply GFS retention policy and delete old backups.
 
@@ -108,7 +109,7 @@ def rotate_backups(
         if not backups:
             return 0
 
-    return _rotate_gfs(backend, backups, retention, events, current_backup_name)
+    return _rotate_gfs(backend, backups, retention, events, current_backup_name, on_deleted)
 
 
 def _is_full_backup(name: str) -> bool:
@@ -137,6 +138,7 @@ def _rotate_gfs(
     retention: RetentionConfig,
     events: EventBus | None = None,
     current_backup_name: str = "",
+    on_deleted=None,
 ) -> int:
     """GFS rotation: keep daily/weekly/monthly backups.
 
@@ -200,7 +202,7 @@ def _rotate_gfs(
 
     # Delete backups not in keep set
     to_delete = [b for b in backups if b["name"] not in keep]
-    deleted = _delete_old_backups(backend, to_delete, phase_log)
+    deleted = _delete_old_backups(backend, to_delete, phase_log, on_deleted=on_deleted)
 
     # Count only entries that exist in the actual backup list
     backup_names = {b["name"] for b in backups}
@@ -332,6 +334,7 @@ def _delete_old_backups(
     to_delete: list[dict],
     phase_log: PhaseLogger,
     cancel_check=None,
+    on_deleted=None,
 ) -> int:
     """Delete backups not in the keep set, with progress reporting.
 
@@ -344,6 +347,11 @@ def _delete_old_backups(
     deletion again; transient causes (antivirus scan, indexer holding
     a handle) usually resolve by then. Persistent residuals indicate
     a real filesystem problem the user must investigate.
+
+    ``on_deleted(name)`` (optional) is invoked after each successful
+    deletion so the caller can prune side stores (e.g. the encrypted-
+    archive reference hashes in ``verify_hashes.json``). Its failure is
+    swallowed — a bookkeeping miss must never abort rotation.
     """
     total = len(to_delete)
     deleted = 0
@@ -356,6 +364,11 @@ def _delete_old_backups(
             backend.delete_backup(backup["name"])
             deleted += 1
             phase_log.info(f"GFS rotated: deleted {backup['name']}")
+            if on_deleted is not None:
+                try:
+                    on_deleted(backup["name"])
+                except Exception as e:
+                    logger.debug("on_deleted hook failed for %s: %s", backup["name"], e)
         except StorageDeleteError as e:
             failed_with_residuals += 1
             sample = "; ".join(str(r) for r in e.residuals[:3])

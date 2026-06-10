@@ -1536,8 +1536,17 @@ class BackupEngine:
             self._phase("Verifying backup (hash)...")
             self._check_cancel()
             manifest_file = ctx.backup_path.parent / f"{ctx.backup_path.name}.wbverify"
+            # Pass the in-memory manifest so a backup whose .wbverify
+            # write failed (disk full, permissions — downgraded to a
+            # warning in _phase_save_manifest) is still verified against
+            # the authoritative per-file hashes instead of being waved
+            # through as "no manifest found" and committed unverified.
             ok, msg = verify_backup(
-                ctx.backup_path, manifest_file, self._events, cancel_check=self._check_cancel
+                ctx.backup_path,
+                manifest_file,
+                self._events,
+                cancel_check=self._check_cancel,
+                manifest_data=ctx.integrity_manifest,
             )
             if not ok:
                 raise RuntimeError(msg)
@@ -2009,10 +2018,13 @@ class BackupEngine:
     def _phase_update_delta(self, ctx: PipelineContext) -> None:
         """Phase 8: Update manifest for differential tracking.
 
-        After a full backup: writes the manifest and resets the
-        differential counter.  After a differential backup:
-        increments the counter.  The manifest is never overwritten
-        by a differential, so it always reflects the last full.
+        After a full backup: writes the manifest (the reference for
+        every subsequent differential). A differential backup leaves
+        the manifest untouched, so it always reflects the last full.
+        (There is no "differential counter" — full-vs-differential is
+        decided per run by ``_maybe_force_full`` /
+        ``_is_full_due_by_schedule``; the old docstring described a
+        cycle-counter mechanism that no longer exists.)
 
         Relies on ``ctx.forced_full`` as a fallback source of truth
         because ``ctx.profile.backup_type`` can be overwritten mid-pipeline
@@ -2438,12 +2450,25 @@ class BackupEngine:
         """Phase 11: Rotation — delete old backups."""
         self._phase("Rotating old backups...")
         self._check_cancel()
+        # Prune the encrypted-archive reference store as backups are
+        # rotated off the PRIMARY — but only when the profile has no
+        # mirrors. The reference hash is keyed by archive NAME and shared
+        # across destinations, so pruning on a primary delete while a
+        # mirror still holds the same-named archive would orphan that
+        # mirror's reference. No mirrors → the primary is the sole holder,
+        # so pruning is safe (covers the common local-encrypted profile).
+        prune_hook = (
+            self._config.delete_verify_hash
+            if not ctx.profile.mirror_destinations
+            else None
+        )
         ctx.result.rotated_count = rotate_backups(
             ctx.backend,
             ctx.profile.retention,
             self._events,
             current_backup_name=ctx.backup_name,
             profile_name=ctx.profile.name,
+            on_deleted=prune_hook,
         )
 
         # Count remaining backups on primary after rotation, filtered

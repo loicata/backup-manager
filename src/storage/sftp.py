@@ -217,6 +217,13 @@ class _ChannelWriter(io.RawIOBase):
         self._limit_bps = limit_kbps * 1024
         self._start_time = time.monotonic()
         self._buffer = bytearray()
+        # Sliding-window throttle accounting (matches ThrottledReader,
+        # base.py). Computing the rate over the WHOLE transfer let an
+        # early fast burst mandate one large catch-up sleep and made the
+        # instantaneous rate diverge from the limit; a 1 s window keeps
+        # throughput smooth and the two throttle paths consistent.
+        self._window_start = self._start_time
+        self._window_bytes = 0
 
     def write(self, data: bytes | bytearray) -> int:
         """Buffer data and flush in large chunks for efficient SSH transfer."""
@@ -248,15 +255,20 @@ class _ChannelWriter(io.RawIOBase):
         self._channel.sendall(chunk)
         self._bytes_sent += len(chunk)
 
-        # Bandwidth throttling: sleep if sending faster than limit
+        # Bandwidth throttling over a 1-second sliding window: if this
+        # window's bytes would exceed the per-second budget, sleep off
+        # the overshoot, then reset the window. Mirrors ThrottledReader.
         if self._limit_bps > 0:
-            elapsed = time.monotonic() - self._start_time
-            if elapsed > 0:
-                current_rate = self._bytes_sent / elapsed
-                if current_rate > self._limit_bps:
-                    sleep_time = (self._bytes_sent / self._limit_bps) - elapsed
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
+            self._window_bytes += len(chunk)
+            window_elapsed = time.monotonic() - self._window_start
+            allowed = self._limit_bps * window_elapsed if window_elapsed > 0 else 0
+            if self._window_bytes > allowed:
+                sleep_time = (self._window_bytes / self._limit_bps) - window_elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+            if time.monotonic() - self._window_start >= 1.0:
+                self._window_start = time.monotonic()
+                self._window_bytes = 0
 
         if self._progress_callback and self._total_bytes > 0:
             self._progress_callback(self._bytes_sent, self._total_bytes)

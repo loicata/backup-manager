@@ -22,6 +22,40 @@ from src.storage.base import StorageBackend, long_path_str
 logger = logging.getLogger(__name__)
 
 
+def _make_s3_upload_callback(total_bytes, phase_log, cancel_check):
+    """Build an s3transfer Callback that emits progress and honours cancel.
+
+    s3transfer calls the returned callable with the byte delta of each
+    completed chunk. We accumulate it for a 0..total progress bar and
+    re-check ``cancel_check`` — which RAISES ``CancelledError`` to abort
+    the transfer (s3transfer propagates the exception out of upload_file).
+
+    Args:
+        total_bytes: Encrypted archive size, for the progress denominator.
+        phase_log: Phase logger (may be None).
+        cancel_check: Callable that raises on cancel (may be None).
+
+    Returns:
+        A ``callback(bytes_amount: int) -> None``.
+    """
+    progress_total = max(int(total_bytes), 1)
+    sent = {"n": 0}
+
+    def _callback(bytes_amount: int) -> None:
+        if cancel_check is not None:
+            cancel_check()  # raises CancelledError → aborts the upload
+        sent["n"] += bytes_amount
+        if phase_log is not None:
+            phase_log.progress(
+                current=min(sent["n"], progress_total),
+                total=progress_total,
+                filename="",
+                phase="upload",
+            )
+
+    return _callback
+
+
 def write_remote(
     files: list[FileInfo],
     backend: StorageBackend,
@@ -312,7 +346,15 @@ def _upload_encrypted_tar_tempfile(
         if hasattr(backend, "_get_client"):
             from boto3.s3.transfer import TransferConfig
 
+            # Explicit threshold so multipart behaviour is deterministic
+            # (the client-config key that used to "set" this was a no-op).
+            # Note: a multipart object's ETag is not a plain MD5, so the
+            # per-file remote verify falls back to size-only for it — the
+            # ENCRYPTED archive is unaffected because it is verified
+            # against its full SHA-256 reference in verify_hashes.json,
+            # not the S3 ETag.
             transfer_config = TransferConfig(
+                multipart_threshold=16 * 1024 * 1024,
                 multipart_chunksize=16 * 1024 * 1024,
             )
             # Apply bandwidth throttling if configured
@@ -323,6 +365,17 @@ def _upload_encrypted_tar_tempfile(
             client = backend._get_client()
             key = backend._s3_key(remote_path)
             upload_kwargs: dict = {"Config": transfer_config}
+            # Progress + cancellation: s3transfer invokes the Callback
+            # with each byte delta. Emitting progress keeps the UI alive
+            # during a multi-GB encrypted upload, and re-checking
+            # cancel_check lets the user abort mid-upload — without this
+            # the Cancel button did nothing for the whole upload (the
+            # cancel hook only lived in ThrottledReader, which this raw
+            # client path never touches).
+            if cancel_check is not None or phase_log is not None:
+                upload_kwargs["Callback"] = _make_s3_upload_callback(
+                    enc_size, phase_log, cancel_check
+                )
             # Apply S3 Object Lock per-object retention. This raw-client
             # path bypassed S3Storage._upload_one, so without ExtraArgs the
             # encrypted archive received only the bucket DEFAULT retention

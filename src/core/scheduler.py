@@ -738,8 +738,16 @@ class InAppScheduler:
             trigger: Trigger source for journal logging.
         """
         logger.info("Triggering scheduled backup: %s", profile.name)
+        # Stamp the ACTUAL trigger moment, not the loop's ``now`` (captured
+        # once at the start of a catch-up pass). A serial catch-up can fire
+        # the Nth profile hours after ``now`` was taken; persisting the
+        # stale value backdated last_trigger and the in-flight marker —
+        # widening next-day re-trigger windows and lying about when a
+        # died-in-flight run actually started. ``now`` is still used by the
+        # CALLER purely for due-ness evaluation.
+        triggered_at = datetime.now()
         with self._op_lock:
-            self._state.set_last_trigger(profile.id, now)
+            self._state.set_last_trigger(profile.id, triggered_at)
             self._journal.add(
                 ScheduleLogEntry(
                     profile_id=profile.id,
@@ -781,7 +789,7 @@ class InAppScheduler:
             # to False) leaves no signal for the startup catch-up. That
             # gap is the 02/06/2026 incident. Cleared in the finally
             # block, which only runs if the process survives.
-            self._state.set_inflight(profile.id, now)
+            self._state.set_inflight(profile.id, triggered_at)
             self._backup_callback(profile)
             with self._op_lock:
                 self._journal.update_last(

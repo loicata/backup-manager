@@ -14,6 +14,7 @@ line is parsed independently at load time.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
@@ -111,7 +112,24 @@ class RunHistoryStore:
         if not path.exists():
             return []
         lines = self._read_lines(path, profile_id)
-        return self._parse_lines(lines[-_MAX_ENTRIES_PER_PROFILE:], profile_id)
+        entries = self._parse_lines(lines[-_MAX_ENTRIES_PER_PROFILE:], profile_id)
+        # Opportunistic disk compaction. The cap is otherwise enforced
+        # only at load (the tail slice above) — the on-disk file is
+        # never truncated, so a busy profile's JSONL grows without
+        # bound. Once it exceeds 2× the cap, rewrite the retained tail
+        # (atomic .tmp + os.replace) so the file stops growing. Append
+        # stays O(1) the rest of the time; a rewrite failure is
+        # non-fatal (the in-memory result is already correct).
+        if len(lines) > 2 * _MAX_ENTRIES_PER_PROFILE:
+            logger.info(
+                "RunHistory: compacting %s (%d lines → %d)",
+                profile_id,
+                len(lines),
+                len(entries),
+            )
+            with contextlib.suppress(OSError):
+                self.rewrite(profile_id, entries)
+        return entries
 
     def _read_lines(self, path: Path, profile_id: str) -> list[str]:
         """Read all raw lines from ``path`` under the store lock."""

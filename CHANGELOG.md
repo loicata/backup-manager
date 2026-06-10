@@ -5,6 +5,55 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.53] - 2026-06-10
+
+Closes the 2026-06-10 deep audit entirely: the 25 actionable low-severity findings are fixed
+(1 was already fixed in 3.7.52, 1 was refuted on re-verification). The audit backlog is now
+empty across all severities. Full suite: 2775 passed, 28 skipped.
+
+### Fixed — verification & cancellation
+- **A backup whose ``.wbverify`` sidecar failed to write was committed "verified" with zero integrity reference.** ``verify_backup`` now accepts the engine's in-memory manifest and runs the FULL check against it (missing files, parallel re-hash, extras, total-checksum guard) when the sidecar is absent.
+- **Cancelling a periodic verification did nothing** for the duration of a backup's full re-hash: the cancel hook returned a bool instead of raising. ``IntegrityVerifier`` now passes a raising hook, so Cancel interrupts mid-backup.
+- **Files vanishing at collect time were invisible even to the skip accounting** (bare ``except OSError: pass``). They are now recorded as OS-error skips and surface in "N file(s) not backed up".
+
+### Fixed — profile store robustness
+- **A corrupt main profile file can no longer poison its own .bak**: the .bak refresh is guarded by a parse check, so ``.bak`` always holds the last-known-good version.
+- **Unrecoverable profiles (main + .bak both corrupt) are quarantined to ``.json.broken``** — preserved for manual inspection, removed from the active set (no more ERROR on every load), and no longer claimable by a fresh wizard run.
+- The dedup docstring no longer claims "keeps newest" (it keeps the first file in name order; only reachable via manual file copies).
+
+### Removed — dangerous dead code
+- ``src/core/phases/encryptor.py``: an unused, non-atomic twin of the hardened encrypted writer (no ``.partial``, no failure cleanup) that invited rewiring.
+- ``src/security/verification.py``: an unused verifier that hashed the SOURCE paths — wired up, it would have been a fake verifier for local backups. Both removed from the self-integrity APP_FILES list and the coverage config.
+
+### Added — update notifications
+- **The GitHub release checker is now wired into app startup** (it was fully implemented but had zero callers). A newer stable release raises a non-blocking tray notification; the check is HTTPS-only, 10 s timeout, silent on failure.
+
+### Fixed — S3 & wizard hardening
+- **The encrypted-S3 archive upload is now cancellable and reports progress** (the raw client path had no Callback, so Cancel was dead for the whole upload). Multipart sizing moved to an explicit ``TransferConfig``; the client-level ``multipart_chunksize`` key — silently ignored by boto3 — was removed.
+- **New least-privilege IAM policy builder** scopes bucket/object actions to the actual backup buckets instead of ``arn:aws:s3:::*`` (the broad bootstrap policy remains only for pre-bucket setup).
+- **SMTP logins to a remote server with TLS off are upgraded to STARTTLS opportunistically** when the server advertises it (loopback bridges like ProtonMail's stay exempt), so credentials no longer cross the wire in cleartext on misconfigured custom servers.
+- Wizard cost estimator: fixed the ×1000 LIST pricing typo, reconciled the diff-size figures, and documented that the Glacier-IR table is a lower bound while uploads land in STANDARD.
+- The plaintext-HTTP geolocation call is documented as a bounded, non-sensitive exception (suggestion-only, timezone fallback unaffected).
+
+### Fixed — UI & scheduler accuracy
+- **Switching the sidebar to a profile whose backup is already running now shows its live progress** instead of a dead 0% bar (raise-only seed of the live-view flag from the engine registry — the cross-tab contract is preserved).
+- **The startup catch-up no longer backdates ``last_trigger`` and the in-flight marker** by hours: both are stamped at the actual trigger moment.
+- **A session-end marker is logged when the window is destroyed** (OS shutdown with the app in the tray was indistinguishable from a crash — 65 of ~150 sessions).
+- Encryption module docstring updated to the real v2 format (HMAC trailer, split-key derivation); the user-scope DPAPI tradeoff is now documented explicitly.
+
+### Fixed — stores & throttling
+- **Rotation now prunes the rotated archive's entry from ``verify_hashes.json``** (profiles without mirrors — the reference is shared by name across destinations), stopping the signed store's unbounded growth.
+- **``run_history`` JSONL files are compacted on disk** once they exceed twice the load cap (the cap was previously load-only and the files grew forever).
+- The SFTP exec-channel bandwidth throttle uses the same 1-second sliding window as every other throttle path (no more burst-pause divergence on long uploads).
+
+### Deferred (documented in code)
+- The differential filter still re-hashes every unchanged file (perf-only; correctness confirmed exact). Any change requires a real USB benchmark per the project's perf invariants — marked TECH-DEBT in ``filter.py``.
+- Threading ``SecurePassword`` through the encryption path is deferred with rationale (the str-based key-derivation flow is perf-critical).
+
+### Tests
+- +45 tests across in-memory-manifest verification, verify cancellation, collector skip accounting, .bak/quarantine behaviour, update-notice wiring, S3 upload callback, IAM scoping, STARTTLS policy, run-tab live-view seeding, store pruning and history compaction.
+- Full suite: 2775 passed, 0 failed, 28 skipped.
+
 ## [3.7.52] - 2026-06-10
 
 Clears the ENTIRE remaining medium-severity backlog of the 2026-06-10 deep audit: 22 fixes

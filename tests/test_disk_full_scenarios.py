@@ -74,31 +74,10 @@ class TestLocalWriterDiskFull:
 
 
 # ---------------------------------------------------------------------------
-# 3  encryptor: encrypt_backup
-# ---------------------------------------------------------------------------
-
-
-class TestEncryptorDiskFull:
-    """Disk full during encryption output write."""
-
-    def test_encrypt_backup_disk_full_raises(self, tmp_path):
-        """ENOSPC during tar.wbenc write propagates as an error."""
-        from src.core.phases.encryptor import encrypt_backup
-
-        backup_dir = tmp_path / "backup"
-        backup_dir.mkdir()
-        (backup_dir / "data.txt").write_text("secret", encoding="utf-8")
-
-        enospc = OSError(errno.ENOSPC, "No space left on device")
-        with (
-            patch("builtins.open", side_effect=enospc),
-            pytest.raises(OSError, match="No space left"),
-        ):
-            encrypt_backup(backup_dir, "password12345678")
-
-
-# ---------------------------------------------------------------------------
-# 4  manifest: save_integrity_manifest
+# 3  manifest: save_integrity_manifest
+# (the dead encryptor.py module + its disk-full test were removed in the
+#  3.7.53 dead-code cleanup; the live encrypted path is exercised by
+#  write_encrypted_tar_with_hashes tests.)
 # ---------------------------------------------------------------------------
 
 

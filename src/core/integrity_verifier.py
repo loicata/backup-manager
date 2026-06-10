@@ -15,6 +15,7 @@ from pathlib import Path
 
 from src.core.config import BackupProfile, ConfigManager, StorageConfig, StorageType
 from src.core.events import EventBus
+from src.core.exceptions import CancelledError
 from src.core.hashing import compute_sha256
 from src.core.phase_logger import PhaseLogger
 from src.core.phases.verifier import verify_backup
@@ -107,6 +108,18 @@ class IntegrityVerifier:
     def cancel(self) -> None:
         """Request cancellation of the verification."""
         self._cancelled = True
+
+    def _raise_if_cancelled(self) -> None:
+        """cancel_check hook for ``verify_backup``.
+
+        ``verify_backup``'s contract is "a callable that RAISES
+        CancelledError" — it invokes the hook and ignores the return
+        value. Passing ``lambda: self._cancelled`` (a bool that never
+        raises) made Cancel a no-op for the whole ~10 min re-hash of a
+        single large backup; only the per-backup loop honoured the flag.
+        """
+        if self._cancelled:
+            raise CancelledError("Verification cancelled by user")
 
     def verify_all(self) -> VerifyAllResult:
         """Verify all backups on primary storage and mirrors.
@@ -387,7 +400,7 @@ class IntegrityVerifier:
                 backup_path,
                 manifest_path,
                 events=self._events,
-                cancel_check=lambda: self._cancelled,
+                cancel_check=self._raise_if_cancelled,
             )
             status = "ok" if ok else "corrupted"
             self._log.info(f"{role}/{backup_name}: {msg}")

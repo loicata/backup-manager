@@ -678,7 +678,7 @@ class RunTab(ttk.Frame):
             return True
         return event_profile_id == self._current_profile_id
 
-    def set_current_profile_id(self, profile_id: str) -> None:
+    def set_current_profile_id(self, profile_id: str, is_running: bool = False) -> None:
         """Bind the Run-tab to a specific profile id for event filtering.
 
         Called by ``BackupManagerApp._load_profile`` on every sidebar
@@ -694,6 +694,16 @@ class RunTab(ttk.Frame):
         live PROGRESS events get filtered out and never overwrite
         the stale state). No-ops when the id is unchanged so
         re-selecting the same profile does not blink the log.
+
+        Args:
+            profile_id: Profile now shown in the sidebar.
+            is_running: True when this profile has a backup in flight
+                (the app derives it from ``_active_engines``). Seeds
+                ``_backup_active`` so that switching TO a running
+                profile shows its live progress/log instead of a dead
+                0% bar — the profile's ``STATUS=running`` event was
+                filtered out while another profile was selected, so
+                the flag would otherwise stay False for the whole run.
         """
         previous_id = self._current_profile_id
         self._current_profile_id = profile_id or ""
@@ -701,6 +711,15 @@ class RunTab(ttk.Frame):
             self._clear_run_state()
             self._reload_log_history()
             self._restore_pending_verify_prompt(profile_id)
+            # Seed live-view state for a profile whose run is already in
+            # flight (its 'running' STATUS fired while it was off-screen).
+            # RAISE-only: the flag is deliberately never cleared here —
+            # ``_clear_run_state`` documents leaving it untouched (the
+            # cross-tab Verify contract, pinned by the history-swap
+            # tests); terminal STATUS events remain the only thing that
+            # lowers it.
+            if is_running:
+                self._backup_active = True
 
     def _restore_pending_verify_prompt(self, profile_id: str) -> None:
         """Re-insert a Fast-mode prompt row set that survived a switch.

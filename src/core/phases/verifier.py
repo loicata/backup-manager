@@ -51,6 +51,7 @@ def verify_backup(
     manifest_path: Path,
     events: EventBus | None = None,
     cancel_check=None,
+    manifest_data: dict | None = None,
 ) -> tuple[bool, str]:
     """Verify backup contents against manifest.
 
@@ -72,6 +73,13 @@ def verify_backup(
         manifest_path: Path to the .wbverify file.
         events: Optional event bus.
         cancel_check: Optional callable that raises CancelledError.
+        manifest_data: In-memory manifest to use when the on-disk
+            sidecar is absent. The engine already holds the manifest
+            it just built (``ctx.integrity_manifest``); passing it here
+            means a backup whose ``.wbverify`` write failed (disk full,
+            permissions) is still verified against the authoritative
+            per-file hashes instead of being silently waved through as
+            "no manifest found" and committed with zero integrity check.
 
     Returns:
         (success, message) tuple.
@@ -79,6 +87,14 @@ def verify_backup(
     phase_log = PhaseLogger("verifier", events)
 
     if not manifest_path.exists():
+        if manifest_data and manifest_data.get("files"):
+            phase_log.info(
+                "Manifest sidecar missing — verifying against the in-memory "
+                "manifest the engine just built (sidecar write likely failed)"
+            )
+            return _verify_against_manifest(
+                backup_path, manifest_data, phase_log, cancel_check
+            )
         return True, "No manifest found — skipping verification"
 
     # Show an immediate status line so the Verify tab does not look
@@ -99,6 +115,23 @@ def verify_backup(
     except (json.JSONDecodeError, OSError) as e:
         return False, f"Could not read manifest: {e}"
 
+    return _verify_against_manifest(backup_path, manifest, phase_log, cancel_check)
+
+
+def _verify_against_manifest(
+    backup_path: Path,
+    manifest: dict,
+    phase_log: PhaseLogger,
+    cancel_check=None,
+) -> tuple[bool, str]:
+    """Verify a backup directory against an already-loaded manifest.
+
+    Shared by the on-disk path (``verify_backup`` after reading the
+    ``.wbverify`` sidecar) and the in-memory fallback (the engine's
+    ``ctx.integrity_manifest`` when the sidecar write failed). Performs
+    the full check: missing files, parallel per-file re-hash, extras
+    sweep, and the ``total_checksum`` tamper guard.
+    """
     files = manifest.get("files", {})
     total = len(files)
     ok_count = 0

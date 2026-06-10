@@ -118,7 +118,6 @@ APP_FILES = [
     "security/encryption.py",
     "security/integrity_check.py",
     "security/secure_memory.py",
-    "security/verification.py",
     "storage/base.py",
     "storage/local.py",
     "storage/sftp.py",

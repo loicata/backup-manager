@@ -145,11 +145,16 @@ class S3Storage(StorageBackend):
         import boto3
         from botocore.config import Config
 
+        # NOTE: multipart sizing belongs on a per-transfer ``TransferConfig``
+        # (passed to upload_file/upload_fileobj), NOT on the client config.
+        # A previous ``s3={"multipart_chunksize": ...}`` key here was
+        # silently ignored by the transfer layer — boto3 accepted it
+        # without error but it governed nothing. Removed to avoid the
+        # false impression that chunk sizing is configured globally.
         config = Config(
             connect_timeout=60,
             read_timeout=600,
             retries={"max_attempts": 5, "mode": "adaptive"},
-            s3={"multipart_chunksize": 16 * 1024 * 1024},  # 16 MB parts
         )
 
         kwargs = {

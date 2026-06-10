@@ -472,8 +472,10 @@ class ConfigManager:
     def get_all_profiles(self) -> list[BackupProfile]:
         """Load all profiles from disk.
 
-        Recovers from corrupted files using .bak backups.
-        Deduplicates by profile ID (keeps newest).
+        Recovers from corrupted files using .bak backups. On a profile
+        ID collision, keeps the FIRST file in filename order (the JSON
+        embeds the id, so a collision only arises from a manual file
+        copy/rename — see the dedup note below).
         """
         profiles = []
         seen_ids: set[str] = set()
@@ -503,9 +505,39 @@ class ConfigManager:
                 if profile is not None and profile.id not in seen_ids:
                     seen_ids.add(profile.id)
                     profiles.append(profile)
+                elif profile is None:
+                    # Both main and .bak are unparseable. Quarantine the
+                    # corrupt file to ``.json.broken`` so (a) it stops
+                    # re-erroring on every load, (b) the user's data is
+                    # preserved rather than overwritten, and (c) it no
+                    # longer counts as a ``*.json`` — a subsequent
+                    # wizard run creating a fresh profile cannot clobber
+                    # it. Without this the corrupt file sat in place,
+                    # logging the same ERROR forever, and an all-profiles
+                    # failure relaunched the setup wizard on top of it.
+                    self._quarantine_corrupt_profile(path)
 
         profiles.sort(key=lambda p: (p.sort_order, p.name.lower()))
         return profiles
+
+    def _quarantine_corrupt_profile(self, path: Path) -> None:
+        """Move an unrecoverable profile file aside to ``<name>.json.broken``.
+
+        Best-effort: a failure here is non-fatal (the file simply stays
+        and re-errors next load, the pre-quarantine behaviour).
+        """
+        broken = path.with_suffix(".json.broken")
+        try:
+            with self._io_lock:
+                os.replace(path, broken)
+            logger.error(
+                "Quarantined unrecoverable profile %s → %s (preserved, "
+                "removed from the active set so it cannot be overwritten)",
+                path.name,
+                broken.name,
+            )
+        except OSError:
+            logger.error("Could not quarantine corrupt profile %s", path, exc_info=True)
 
     def _recover_profile_from_bak(self, path: Path) -> BackupProfile | None:
         """Recover a corrupted profile file from its .bak, atomically.
@@ -699,6 +731,37 @@ class ConfigManager:
         }
         path = self._verify_hashes_path()
         self._atomic_write(path, envelope)
+
+    def delete_verify_hash(self, archive_name: str) -> None:
+        """Remove an archive's reference entry from ``verify_hashes.json``.
+
+        Called when a backup is rotated/deleted so the signed reference
+        store does not accumulate dead entries forever (the rotator
+        removed the archive + sidecars but never pruned this store).
+        Idempotent: tries both the bare name and the ``.tar.wbenc``
+        form, and is a no-op when neither is present. Only rewrites the
+        file when something actually changed.
+
+        Args:
+            archive_name: Backup name as known to the rotator (with or
+                without the ``.tar.wbenc`` suffix).
+        """
+        if not archive_name:
+            return
+        hashes = self.load_verify_hashes()
+        candidates = {archive_name, f"{archive_name}.tar.wbenc"}
+        removed = [k for k in candidates if k in hashes]
+        if not removed:
+            return
+        for key in removed:
+            del hashes[key]
+        envelope = {
+            "version": _VERIFY_HASHES_ENVELOPE_VERSION,
+            "hashes": hashes,
+            "hmac": self._compute_verify_hashes_hmac(hashes),
+        }
+        self._atomic_write(self._verify_hashes_path(), envelope)
+        logger.debug("Pruned verify-hash reference(s): %s", ", ".join(removed))
 
     @staticmethod
     def _serialise_for_hmac(hashes: dict) -> bytes:
@@ -930,14 +993,31 @@ class ConfigManager:
 
         return failures
 
+    @staticmethod
+    def _file_parses_as_json(filepath: Path) -> bool:
+        """Return True if ``filepath`` contains parseable JSON.
+
+        Used as the .bak-refresh guard in ``_atomic_write`` — a cheap
+        ``json.loads`` (profiles are a few KB). Any read/parse error
+        means "do not trust this file as a backup source".
+        """
+        try:
+            json.loads(filepath.read_text(encoding="utf-8"))
+            return True
+        except (OSError, json.JSONDecodeError, ValueError):
+            return False
+
     def _atomic_write(self, filepath: Path, data: dict) -> None:
         """Crash-safe write: backup existing → fsync .tmp → os.replace.
 
         The steps matter for crash resilience on Windows:
 
-        1. ``bak`` is copied from the **current** ``filepath`` BEFORE
-           we touch anything, so if a crash happens mid-write the
-           previous good version is still available for recovery.
+        1. ``bak`` is refreshed from the **current** ``filepath`` BEFORE
+           we touch anything — but ONLY when that current file still
+           parses as JSON. Refreshing ``.bak`` from an already-corrupt
+           main file would capture the corruption into the very copy
+           meant to recover from it (the both-files-corrupt path); a
+           cheap ``json.loads`` guard keeps ``.bak`` = last-known-good.
 
         2. The serialized payload is written to ``.tmp`` and
            ``fsync``'d so the bytes are on physical media before we
@@ -965,8 +1045,10 @@ class ConfigManager:
             tmp = filepath.with_suffix(".json.tmp")
             bak = filepath.with_suffix(".json.bak")
 
-            # Step 1: backup existing FIRST so we never lose the old copy
-            if filepath.exists():
+            # Step 1: backup existing FIRST so we never lose the old
+            # copy — but only if it parses. A corrupt main file must
+            # not overwrite a good .bak.
+            if filepath.exists() and self._file_parses_as_json(filepath):
                 shutil.copy2(filepath, bak)
 
             # Step 2: write to .tmp with fsync for durability

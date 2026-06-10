@@ -142,3 +142,75 @@ class TestRecoverFromBak:
         profiles = mgr.get_all_profiles()
 
         assert [p.name for p in profiles] == ["Old"]
+
+
+class TestBakNotRefreshedFromCorruptMain:
+    """Audit L4/#5: a corrupt main file must never overwrite a good .bak."""
+
+    def test_save_with_corrupt_main_keeps_good_bak(self, tmp_config_dir):
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="V1")
+        mgr.save_profile(profile)
+        profile.name = "V2"
+        mgr.save_profile(profile)  # .bak now holds the good 'V1'
+
+        path = _profile_path(mgr, profile)
+        bak = path.with_suffix(".json.bak")
+        # Corrupt the live file, then save again.
+        path.write_text("{ corrupt main", encoding="utf-8")
+        profile.name = "V3"
+        mgr.save_profile(profile)
+
+        # .bak must still be valid JSON (NOT the corrupt main).
+        data = json.loads(bak.read_text(encoding="utf-8"))
+        assert data["name"] == "V1"
+        # And the live file is the new good payload.
+        assert json.loads(path.read_text(encoding="utf-8"))["name"] == "V3"
+
+    def test_file_parses_helper(self, tmp_config_dir):
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        good = tmp_config_dir / "good.json"
+        good.write_text('{"a": 1}', encoding="utf-8")
+        bad = tmp_config_dir / "bad.json"
+        bad.write_text("{ nope", encoding="utf-8")
+        assert mgr._file_parses_as_json(good) is True
+        assert mgr._file_parses_as_json(bad) is False
+        assert mgr._file_parses_as_json(tmp_config_dir / "absent.json") is False
+
+
+class TestQuarantineCorruptProfile:
+    """Audit L4/#4: when BOTH main and .bak are unparseable, the file is
+    quarantined to .json.broken (preserved, removed from the active set,
+    stops re-erroring) instead of silently re-failing every load."""
+
+    def test_double_corruption_quarantines(self, tmp_config_dir):
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="Doomed")
+        mgr.save_profile(profile)
+        mgr.save_profile(profile)  # create .bak
+        path = _profile_path(mgr, profile)
+        bak = path.with_suffix(".json.bak")
+        path.write_text("{ corrupt", encoding="utf-8")
+        bak.write_text("{ also corrupt", encoding="utf-8")
+
+        profiles = mgr.get_all_profiles()
+
+        assert profiles == []
+        assert not path.exists()  # moved aside
+        broken = path.with_suffix(".json.broken")
+        assert broken.exists()
+        assert broken.read_text(encoding="utf-8") == "{ corrupt"
+
+    def test_quarantined_file_not_reloaded_next_time(self, tmp_config_dir):
+        mgr = ConfigManager(config_dir=tmp_config_dir)
+        profile = BackupProfile(name="Doomed")
+        mgr.save_profile(profile)
+        mgr.save_profile(profile)
+        path = _profile_path(mgr, profile)
+        path.with_suffix(".json.bak").write_text("{ bad", encoding="utf-8")
+        path.write_text("{ bad", encoding="utf-8")
+
+        mgr.get_all_profiles()  # quarantines
+        # Second load sees no .json at all → clean empty, no error loop.
+        assert mgr.get_all_profiles() == []
+        assert list(mgr.profiles_dir.glob("*.json")) == []

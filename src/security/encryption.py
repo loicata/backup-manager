@@ -1,9 +1,9 @@
 """AES-256-GCM encryption with PBKDF2-HMAC-SHA256 key derivation.
 
-Streaming tar encryption format (.tar.wbenc):
+Streaming tar encryption format (.tar.wbenc), VERSION 2:
     Header (37 bytes):
         [4B magic: b"WBEC"]
-        [1B version: 0x01]
+        [1B version: 0x02]
         [16B salt]
         [16B reserved zeros]
     Body (repeating chunks):
@@ -12,6 +12,14 @@ Streaming tar encryption format (.tar.wbenc):
         [ciphertext + 16B GCM tag]
     EOF:
         [4B zeros]
+    Trailer (32 bytes):
+        [32B HMAC-SHA256 over the whole stream — the truncation
+         defense: a stream cut short fails the trailer check]
+
+    Key derivation (v2): PBKDF2-HMAC-SHA256 derives 64 bytes from the
+    passphrase + salt, split into a 32-byte AES-256-GCM key and a
+    separate 32-byte HMAC key (so the chunk cipher and the trailer MAC
+    never share key material).
 
 Per-field encryption (password storage):
     [16B salt] [12B nonce] [ciphertext + 16B GCM tag]
@@ -19,6 +27,29 @@ Per-field encryption (password storage):
 Password storage:
     - Windows DPAPI (preferred): "dpapi:<base64>"
     - AES-256-GCM fallback: "aes:<base64_salt>:<base64_nonce>:<base64_ciphertext>"
+
+Security model — DPAPI is USER-scope (deliberate tradeoff):
+    All stored secrets (storage/email/S3 credentials AND the backup
+    encryption passphrase) are wrapped with ``CryptProtectData`` in
+    USER scope — NOT machine scope and with no extra entropy. Any
+    process running as the same Windows user can therefore call
+    ``CryptUnprotectData`` and recover them. For the credentials this
+    is the standard desktop-app posture; for the ENCRYPTION PASSPHRASE
+    it is the keystone of archive confidentiality, so the at-rest
+    secrecy of a ``.tar.wbenc`` archive is only as strong as the
+    Windows session that stored the passphrase. This is accepted by
+    design (a portable per-machine secret store would be weaker, and
+    prompting for the passphrase on every scheduled run defeats
+    unattended backups).
+
+    TECH-DEBT: the passphrase flows end-to-end as an immutable ``str``
+    (config → ``retrieve_password`` → key derivation), so it cannot be
+    zeroed after use even though ``SecurePassword`` (bytearray-backed)
+    exists. Threading ``SecurePassword`` through only helps if the key
+    derivation consumes the bytearray WITHOUT decoding to ``str`` —
+    a rewrite of this perf-critical path that is deferred until it can
+    be benchmarked, as the marginal in-memory-scraping benefit does not
+    justify churning the encryption hot path. See ``secure_memory.py``.
 """
 
 import base64

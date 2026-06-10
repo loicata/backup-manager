@@ -14,8 +14,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Minimum IAM policy required for Object Lock setup + backup operations.
-# Displayed in the wizard so the user can create a dedicated IAM user.
+# BOOTSTRAP IAM policy shown in the wizard so the user can create a
+# dedicated IAM user BEFORE any bucket exists. It is necessarily broad
+# (``s3:CreateBucket`` is account-level — there is no bucket to scope to
+# yet). Once the buckets exist, ``build_iam_policy([...])`` produces a
+# least-privilege replacement that scopes the data/retention actions to
+# the actual buckets — recommended, since the DPAPI-stored credentials
+# are recoverable by any process in the user's session, so a tighter
+# policy limits the blast radius of a credential theft to the backup
+# buckets instead of the whole account's S3.
 REQUIRED_IAM_POLICY = """\
 {
   "Version": "2012-10-17",
@@ -45,6 +52,79 @@ REQUIRED_IAM_POLICY = """\
     }
   ]
 }"""
+
+# Account-level actions that genuinely cannot be scoped to a bucket
+# (they operate before the bucket exists / across the account).
+_S3_ACCOUNT_ACTIONS = ["s3:CreateBucket", "s3:ListAllMyBuckets"]
+# Per-bucket / per-object actions, scopeable to the chosen buckets.
+_S3_BUCKET_ACTIONS = [
+    "s3:PutBucketVersioning",
+    "s3:PutBucketObjectLockConfiguration",
+    "s3:GetBucketObjectLockConfiguration",
+    "s3:PutLifecycleConfiguration",
+    "s3:GetLifecycleConfiguration",
+    "s3:ListBucket",
+    "s3:GetBucketLocation",
+]
+_S3_OBJECT_ACTIONS = [
+    "s3:GetObject",
+    "s3:PutObject",
+    "s3:PutObjectRetention",
+    "s3:GetObjectRetention",
+    "s3:DeleteObject",
+]
+
+
+def build_iam_policy(bucket_names: list[str]) -> str:
+    """Build a least-privilege IAM policy scoped to ``bucket_names``.
+
+    Recommended tightening once the backup buckets exist: the broad
+    account-level actions (CreateBucket, ListAllMyBuckets) stay on
+    ``*`` because they cannot be bucket-scoped, but every bucket and
+    object action is restricted to the specific backup buckets — so a
+    leaked credential can no longer read, overwrite or delete objects
+    in unrelated buckets of the account.
+
+    Args:
+        bucket_names: The backup bucket names (primary + speedtest +
+            any mirror buckets). Falsy/blank names are ignored; an
+            empty result falls back to ``REQUIRED_IAM_POLICY``.
+
+    Returns:
+        Pretty-printed JSON policy document.
+    """
+    import json as _json
+
+    clean = [b.strip() for b in bucket_names if b and b.strip()]
+    if not clean:
+        return REQUIRED_IAM_POLICY
+
+    bucket_arns = [f"arn:aws:s3:::{b}" for b in clean]
+    object_arns = [f"arn:aws:s3:::{b}/*" for b in clean]
+    policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "AccountLevelSetup",
+                "Effect": "Allow",
+                "Action": _S3_ACCOUNT_ACTIONS,
+                "Resource": "*",
+            },
+            {
+                "Sid": "BucketScoped",
+                "Effect": "Allow",
+                "Action": _S3_BUCKET_ACTIONS,
+                "Resource": bucket_arns,
+            },
+            {
+                "Sid": "ObjectScoped",
+                "Effect": "Allow",
+                "Action": _S3_OBJECT_ACTIONS,
+                "Resource": object_arns,
+            },
+        ],
+    }
+    return _json.dumps(policy, indent=2)
 
 # AWS S3 Glacier Instant Retrieval pricing per GB/month by region (USD).
 # Source: https://aws.amazon.com/s3/pricing/ (indicative, April 2026).
@@ -175,6 +255,13 @@ def _detect_region_by_ip() -> str:
     import json
     import urllib.request
 
+    # SECURITY NOTE: plaintext HTTP to a third party. This is a
+    # deliberate, bounded exception: ip-api's free tier is HTTP-only,
+    # the request carries no secret (only the public IP the TCP layer
+    # already exposes), and the response merely SUGGESTS a default
+    # region the user reviews and can override. A MITM can at worst
+    # nudge that suggestion. Region detection still works without it via
+    # the system-timezone fallback (_detect_region_by_timezone).
     try:
         req = urllib.request.Request(
             "http://ip-api.com/json/?fields=lat,lon,timezone",
@@ -377,16 +464,24 @@ def estimate_total_cost(
 
     Models the progressive accumulation of backups with all AWS costs:
 
+    This is an indicative DISPLAY estimate, not a billing guarantee.
+
     Storage:
     - Each month: 1 new full backup (size = data_gb)
     - Each day: 1 differential backup (cumulative since last full)
-    - Diffs grow linearly: day 1 ~2%, day 30 ~30%, average ~15%
+    - Diffs grow linearly: day 1 ~2%, day 30 ~50%, average ~25%
     - Diffs are locked 1 month, so ~30 diffs stored at any time
     - Fulls accumulate over the retention period
 
-    Glacier IR minimum storage (90 days):
-    - Diffs deleted after 30 days are billed for 90 days minimum
-    - Effective diff cost multiplier: 3x
+    Pricing model — Glacier Instant Retrieval:
+    - Uses the GLACIER_IR_PRICE_PER_GB table (lowest per-GB tier).
+    - 90-day minimum storage: a diff deleted after 30 days is still
+      billed for 90, so the effective diff multiplier is 3×.
+    - CAVEAT: the app does not currently set a StorageClass on upload,
+      so objects actually land in S3 STANDARD (~$0.023/GB vs the
+      ~$0.004 IR figure used here). This estimate is therefore a LOWER
+      BOUND for the current upload path; it matches reality once the
+      buckets transition objects to Glacier IR via a lifecycle rule.
 
     PUT requests:
     - ~5000 files per backup (realistic for personal data)
@@ -425,8 +520,10 @@ def estimate_total_cost(
     # ~5000 GETs per backup verification × 31 backups/month
     get_cost_per_month = backups_per_month * files_per_backup * 0.001 / 1000
 
-    # LIST request costs: verification + rotation
-    list_cost_per_month = 10 * 0.02 / 1000  # ~10,000 LISTs
+    # LIST request costs: verification + rotation (~10,000 LISTs/month).
+    # Was ``10 * 0.02 / 1000`` — a ×1000 typo that priced 10 LISTs
+    # ($0.0002) instead of the documented 10,000 ($0.20).
+    list_cost_per_month = 10_000 * 0.02 / 1000
 
     api_cost_per_month = put_cost_per_month + get_cost_per_month + list_cost_per_month
 

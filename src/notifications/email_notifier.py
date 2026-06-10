@@ -31,6 +31,26 @@ def _esc(value) -> str:
 
 logger = logging.getLogger(__name__)
 
+# Hosts treated as private loopback bridges — exempt from the
+# opportunistic STARTTLS upgrade (the hop never leaves the machine,
+# and a local bridge like ProtonMail's may not offer STARTTLS).
+_LOCAL_SMTP_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _should_opportunistic_starttls(config: "EmailConfig") -> bool:
+    """True when a cleartext-login send should be upgraded to STARTTLS.
+
+    Only for a credentialed login to a NON-local server with ``use_tls``
+    off — exactly the case where the password would otherwise traverse
+    the wire in cleartext. The actual upgrade is still gated on the
+    server advertising the STARTTLS extension.
+    """
+    if config.use_tls or not config.username:
+        return False
+    host = (config.smtp_host or "").strip().lower()
+    return host not in _LOCAL_SMTP_HOSTS
+
+
 # SMTP presets
 SMTP_PRESETS = {
     "gmail": {"host": "smtp.gmail.com", "port": 587, "tls": True},
@@ -199,6 +219,22 @@ def _send_email(
                 if config.use_tls:
                     context = ssl.create_default_context()
                     server.starttls(context=context)
+                elif _should_opportunistic_starttls(config):
+                    # use_tls is off, but this is a remote server that
+                    # advertises STARTTLS — upgrade opportunistically so
+                    # the login credentials are not sent in cleartext.
+                    # Local bridges (ProtonMail on 127.0.0.1) are exempt:
+                    # the loopback hop is already private and the bridge
+                    # may not offer STARTTLS.
+                    server.ehlo()
+                    if server.has_extn("starttls"):
+                        logger.info(
+                            "SMTP: upgrading to STARTTLS on %s (use_tls was off) "
+                            "to avoid sending credentials in cleartext",
+                            config.smtp_host,
+                        )
+                        server.starttls(context=ssl.create_default_context())
+                        server.ehlo()
                 if config.username:
                     server.login(config.username, config.password)
                 server.sendmail(config.from_address, recipients, msg.as_string())

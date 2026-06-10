@@ -41,9 +41,8 @@ omit = [
     "src/storage/network.py",
     "src/storage/sftp.py",
     "src/storage/s3.py",
-    # Standalone verification module (pipeline verifier is tested)
+    # Self-integrity HMAC of app files (exercised at runtime, not in unit tests)
     "src/security/integrity_check.py",
-    "src/security/verification.py",
     # Remote-only pipeline phases
     "src/core/phases/remote_writer.py",
     "src/core/phases/mirror.py",

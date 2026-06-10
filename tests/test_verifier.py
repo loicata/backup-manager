@@ -34,8 +34,53 @@ class TestVerifyBackup:
         assert "OK" in msg
 
     def test_verify_missing_manifest(self, tmp_path):
-        """Missing manifest should skip verification."""
+        """Missing manifest AND no in-memory fallback should skip."""
         ok, msg = verify_backup(tmp_path, tmp_path / "nonexistent.wbverify")
+        assert ok is True
+        assert "skipping" in msg.lower()
+
+    def test_verify_falls_back_to_in_memory_manifest(self, sample_files, tmp_path):
+        """When the .wbverify sidecar is absent but the engine supplies
+        the in-memory manifest, the backup is REALLY verified (audit L1)
+        — not waved through as 'no manifest found'."""
+        files = collect_files([str(sample_files)])
+        dest = tmp_path / "backups"
+        dest.mkdir()
+        backup = write_flat(files, dest, "test_verify")
+        manifest = build_integrity_manifest(files)
+        # Sidecar deliberately NOT written (simulates a failed write).
+        missing_sidecar = backup.parent / f"{backup.name}.wbverify"
+        assert not missing_sidecar.exists()
+
+        ok, msg = verify_backup(backup, missing_sidecar, manifest_data=manifest)
+        assert ok is True
+        assert "OK" in msg
+        assert "skipping" not in msg.lower()
+
+    def test_in_memory_fallback_detects_corruption(self, sample_files, tmp_path):
+        """The in-memory fallback is a REAL check: a tampered backup
+        fails even though the sidecar is missing."""
+        files = collect_files([str(sample_files)])
+        dest = tmp_path / "backups"
+        dest.mkdir()
+        backup = write_flat(files, dest, "test_verify")
+        manifest = build_integrity_manifest(files)
+        for f in backup.rglob("file1.txt"):
+            f.write_text("TAMPERED", encoding="utf-8")
+            break
+
+        ok, msg = verify_backup(
+            backup, backup.parent / f"{backup.name}.wbverify", manifest_data=manifest
+        )
+        assert ok is False
+        assert "Mismatch" in msg
+
+    def test_empty_in_memory_manifest_still_skips(self, tmp_path):
+        """An empty/file-less in-memory manifest is treated like no
+        manifest (nothing to verify against)."""
+        ok, msg = verify_backup(
+            tmp_path, tmp_path / "nonexistent.wbverify", manifest_data={"files": {}}
+        )
         assert ok is True
         assert "skipping" in msg.lower()
 

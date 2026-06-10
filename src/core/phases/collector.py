@@ -229,7 +229,7 @@ def collect_files(
         if source_path.is_file():
             matched = _match_excluded(source_path, exclude, source_path.parent)
             if matched is None:
-                _add_file(files, seen, source_path, source_path.parent, source)
+                _add_file(files, seen, source_path, source_path.parent, source, skipped)
                 heartbeat.tick_file()
             else:
                 skipped.add_excluded(str(source_path), matched)
@@ -298,7 +298,7 @@ def _collect_directory(
                 elif entry.is_file(follow_symlinks=False):
                     matched = _match_excluded(path, exclude, root_path)
                     if matched is None:
-                        _add_file(files, seen, path, root_path, source_root)
+                        _add_file(files, seen, path, root_path, source_root, skipped)
                         if heartbeat is not None:
                             heartbeat.tick_file()
                     else:
@@ -321,8 +321,17 @@ def _add_file(
     filepath: Path,
     source_root: Path,
     source_root_str: str,
+    skipped: "_SkippedPaths | None" = None,
 ) -> None:
-    """Add a file to the collection if not already seen."""
+    """Add a file to the collection if not already seen.
+
+    A ``stat()`` failure (file vanished between scandir and here, or a
+    transient OS error) is recorded on ``skipped`` so it surfaces in the
+    "N file(s) not backed up" accounting — the previous bare
+    ``except OSError: pass`` dropped the file with no trace, leaving a
+    hole in the "did my file get backed up?" audit trail and violating
+    the project's no-silent-except rule.
+    """
     abs_path = str(filepath.resolve())
     if abs_path in seen:
         return
@@ -343,8 +352,9 @@ def _add_file(
                 source_root=source_root_str,
             )
         )
-    except OSError:
-        pass
+    except OSError as e:
+        if skipped is not None:
+            skipped.add_os_error(str(filepath), str(e))
 
 
 def _match_excluded(

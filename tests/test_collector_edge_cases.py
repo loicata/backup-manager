@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from src.core.phases.collector import FileInfo, collect_files
+from src.core.phases.collector import (
+    FileInfo,
+    _add_file,
+    _SkippedPaths,
+    collect_files,
+)
 
 
 class TestPermissionDenied:
@@ -35,7 +40,7 @@ class TestPermissionDenied:
 
 class TestRaceConditions:
     def test_file_deleted_during_stat(self, tmp_path):
-        """File vanishing between scandir and stat is silently skipped."""
+        """File vanishing between scandir and stat is skipped (and tracked)."""
         f = tmp_path / "ephemeral.txt"
         f.write_text("gone soon", encoding="utf-8")
         (tmp_path / "stable.txt").write_text("here", encoding="utf-8")
@@ -53,6 +58,47 @@ class TestRaceConditions:
         names = [f.relative_path for f in files]
         assert any(n.endswith("/stable.txt") for n in names)
         assert not any(n.endswith("/ephemeral.txt") for n in names)
+
+    def test_stat_failure_recorded_in_skipped(self, tmp_path):
+        """A stat() failure in _add_file is recorded on the skipped
+        accumulator instead of being silently swallowed (audit L3)."""
+        f = tmp_path / "vanishing.txt"
+        f.write_text("x", encoding="utf-8")
+        skipped = _SkippedPaths()
+        files: list[FileInfo] = []
+
+        original_stat = Path.stat
+
+        def boom(self, *args, **kwargs):
+            if self.name == "vanishing.txt":
+                raise OSError("WinError 32 sharing violation")
+            return original_stat(self, *args, **kwargs)
+
+        with patch.object(Path, "stat", boom):
+            _add_file(files, set(), f, tmp_path, str(tmp_path), skipped)
+
+        assert files == []  # not collected
+        assert len(skipped.os_errors) == 1  # but NOT silently dropped
+        path, message = skipped.os_errors[0]
+        assert path.endswith("vanishing.txt")
+        assert "sharing violation" in message
+
+    def test_add_file_without_accumulator_does_not_raise(self, tmp_path):
+        """Backward compat: skipped defaults to None and a stat failure
+        is tolerated (no accumulator to record into)."""
+        f = tmp_path / "x.txt"
+        f.write_text("x", encoding="utf-8")
+        files: list[FileInfo] = []
+        original_stat = Path.stat
+
+        def boom(self, *args, **kwargs):
+            if self.name == "x.txt":
+                raise OSError("gone")
+            return original_stat(self, *args, **kwargs)
+
+        with patch.object(Path, "stat", boom):
+            _add_file(files, set(), f, tmp_path, str(tmp_path))  # no skipped arg
+        assert files == []
 
 
 class TestDeepDirectory:

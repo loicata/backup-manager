@@ -792,11 +792,66 @@ class BackupManagerApp:
         # Window close handler
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Session-end marker. The only existing "exiting" log line lives
+        # in __main__'s finally (reached on a clean _quit_app). An OS
+        # shutdown with the app in the tray kills the process; Tk's
+        # handling of WM_ENDSESSION destroys the root, which fires this
+        # <Destroy>, giving post-mortem analysis a real session boundary
+        # instead of leaving the kill indistinguishable from a crash.
+        self._session_end_logged = False
+        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
+
         # Subscribe to status events
         self.events.subscribe(STATUS, self._on_status_change)
 
         # Listen for single-instance "show me" message from second launch
         self._setup_single_instance_listener()
+
+        # Best-effort GitHub release check (daemon thread, HTTPS-only,
+        # 10 s timeout). Silent unless a strictly-newer stable release
+        # exists; the callback fires off-thread so it marshals back to
+        # the Tk loop via root.after before touching the tray.
+        self._pending_update_url: str = ""
+        try:
+            from src.core.update_checker import check_for_update
+
+            check_for_update(__version__, self._on_update_available)
+        except Exception:
+            logger.debug("Update check could not be started", exc_info=True)
+
+    def _on_root_destroy(self, event) -> None:
+        """Log a session-end marker exactly once when the root is torn down.
+
+        Every child widget's ``<Destroy>`` bubbles to this binding, so we
+        filter to the root widget and a one-shot guard.
+        """
+        if getattr(self, "_session_end_logged", True):
+            return
+        if event.widget is not self.root:
+            return
+        self._session_end_logged = True
+        logger.info("Backup Manager session ending (root destroyed)")
+
+    def _on_update_available(self, latest_version: str, release_url: str) -> None:
+        """Update-checker callback — fires on the checker's daemon thread.
+
+        Marshals onto the Tk main thread before showing the tray notice;
+        ``check_for_update`` only invokes this when ``latest_version`` is
+        strictly newer than the running build.
+        """
+        self.root.after(0, self._show_update_notice, latest_version, release_url)
+
+    def _show_update_notice(self, latest_version: str, release_url: str) -> None:
+        """Show a non-blocking tray notice that a newer release exists."""
+        self._pending_update_url = release_url
+        logger.info("Update available: v%s — %s", latest_version, release_url)
+        try:
+            self.tray.notify(
+                "Update available",
+                f"Backup Manager v{latest_version} is available — see {release_url}",
+            )
+        except Exception:
+            logger.debug("Could not show update notification", exc_info=True)
 
     def _build_ui(self):
         """Build the main window layout."""
@@ -1242,7 +1297,12 @@ class BackupManagerApp:
         # the new profile's persisted history (no explicit clear_log
         # needed here — that's reserved for "new run" entry points
         # which still want to reset progress bar / status / alerts).
-        self.tab_run.set_current_profile_id(profile.id)
+        # Seed the Run tab's live-view flag from the engine registry so
+        # switching to a profile whose scheduled/manual run is already
+        # in flight shows its progress instead of a dead 0% bar.
+        self.tab_run.set_current_profile_id(
+            profile.id, is_running=profile.id in self._active_engines
+        )
 
         self._update_health_dashboard(profile)
 

@@ -93,6 +93,17 @@ def filter_changed_files(
             continue
 
         # Deep check: hash changed?
+        # TECH-DEBT (audit 2026-06-10, perf-only — correctness is GOOD):
+        # this re-reads and SHA-256s every same-size unchanged file
+        # sequentially on each differential run, even though the manifest
+        # stores mtime. A mtime+size fast-path (or parallelising this loop
+        # like build_integrity_manifest) would avoid a full-disk read on a
+        # "no changes" run over a 250k-file source. NOT done here: the
+        # hashing pipeline is perf-critical (see the perf-invariants note —
+        # four past releases regressed by relaxing it), so any change must
+        # be validated by a real USB benchmark first, not green unit tests
+        # on NVMe tmp_path. The current full-hash is the safe default
+        # (it can never miss a change that mtime preservation would hide).
         try:
             current_hash = compute_sha256(file_info.source_path)
             computed_hashes[key] = current_hash

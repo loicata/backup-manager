@@ -147,3 +147,43 @@ class TestWriteBackupRemote:
             if len(call_kwargs[0]) > 3
             else "encrypt_password" in call_kwargs[1]
         )
+
+
+class TestPrimaryIsEncrypted:
+    """The shared encryption predicate used by both the writer and the
+    verify phase. All three flags must be set for the primary to be
+    written as an encrypted ``.tar.wbenc`` archive."""
+
+    @staticmethod
+    def _profile(*, primary: bool, enabled: bool, password: str) -> BackupProfile:
+        from src.core.config import EncryptionConfig
+
+        return BackupProfile(
+            storage=StorageConfig(storage_type=StorageType.S3, s3_bucket="b"),
+            encrypt_primary=primary,
+            encryption=EncryptionConfig(enabled=enabled, stored_password=password),
+        )
+
+    def test_all_flags_set_is_encrypted(self) -> None:
+        from src.core.phases.writer import primary_is_encrypted
+
+        prof = self._profile(primary=True, enabled=True, password="pw")
+        assert primary_is_encrypted(prof) is True
+
+    def test_encrypt_primary_off_is_not_encrypted(self) -> None:
+        from src.core.phases.writer import primary_is_encrypted
+
+        prof = self._profile(primary=False, enabled=True, password="pw")
+        assert primary_is_encrypted(prof) is False
+
+    def test_encryption_disabled_is_not_encrypted(self) -> None:
+        from src.core.phases.writer import primary_is_encrypted
+
+        prof = self._profile(primary=True, enabled=False, password="pw")
+        assert primary_is_encrypted(prof) is False
+
+    def test_no_password_is_not_encrypted(self) -> None:
+        from src.core.phases.writer import primary_is_encrypted
+
+        prof = self._profile(primary=True, enabled=True, password="")
+        assert primary_is_encrypted(prof) is False

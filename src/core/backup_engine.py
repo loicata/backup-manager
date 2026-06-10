@@ -53,7 +53,7 @@ from src.core.phase_logger import PhaseLogger
 from src.core.phases.mirror import mirror_backup
 from src.core.phases.rotator import rotate_backups
 from src.core.phases.verifier import verify_backup
-from src.core.phases.writer import write_backup
+from src.core.phases.writer import primary_is_encrypted, write_backup
 from src.core.profile_lock import ProfileLockError, acquire, release
 from src.security.secure_memory import SecurePassword
 from src.storage.base import StorageBackend
@@ -485,14 +485,28 @@ class BackupEngine:
         Without a ``.wbcommit`` the backup is invisible to ``list_backups``
         either way, so leaving the bytes on disk is correctness-safe;
         the cleanup just frees space sooner.
+
+        Exception — a COMMITTED primary is never deleted here. Once
+        ``_phase_commit_primary`` has written the marker the backup is
+        complete, integrity-verified and authoritative; a failure in a
+        LATER phase (mirror upload, rotation) or a user Cancel must not
+        destroy it. Deleting a committed primary because a secondary
+        destination failed is the 15/05/2026 zero-backup-day data-loss
+        incident (an SFTP mirror socket error wiped the day's good backup,
+        twice). Uncommitted mirror artifacts are still cleaned.
         """
         # Without a backup_name there is nothing to delete.
         backup_name = getattr(ctx, "backup_name", "")
         if not backup_name:
             return
 
-        # Primary destination
-        if ctx.backend is not None:
+        # Primary destination — only when NOT yet committed.
+        if getattr(ctx, "primary_committed", False):
+            self._log(
+                "Primary backup already committed — keeping it despite the "
+                "failure; cleaning up uncommitted mirror artifacts only."
+            )
+        elif ctx.backend is not None:
             self._try_delete(ctx.backend, backup_name, "primary")
             self._try_delete(ctx.backend, f"{backup_name}.tar.wbenc", "primary")
 
@@ -1223,6 +1237,9 @@ class BackupEngine:
                     f"Backup will be treated as orphaned at the next run."
                 )
                 raise
+            # The primary is now complete and authoritative; protect it
+            # from _best_effort_cleanup if a later phase fails.
+            ctx.primary_committed = True
             return
 
         # Remote destination
@@ -1245,6 +1262,9 @@ class BackupEngine:
                     f"Backup will be treated as orphaned at the next run."
                 )
                 raise
+            # The primary is now complete and authoritative; protect it
+            # from _best_effort_cleanup if a later phase fails.
+            ctx.primary_committed = True
 
     def _phase_verify(self, ctx: PipelineContext) -> None:
         """Phase 6: Post-backup verification.
@@ -1377,21 +1397,71 @@ class BackupEngine:
             ctx: Pipeline context with backend and files.
 
         Raises:
-            RuntimeError: If any file fails verification.
+            RuntimeError: If any file fails verification, if the encrypted
+                remote archive is missing/empty, or if a non-empty backup
+                produced an empty remote listing (the stage-5 bug).
         """
+        # Encrypted remote primary: the artifact is a single
+        # ``{name}.tar.wbenc`` object, never a directory of files, so the
+        # per-file listing path below always returns empty for it. Size-
+        # check the archive object directly instead of silently skipping.
+        # The skip path committed empty/failed uploads as success
+        # (stage-5, 14/05/2026; live on the AWS S3 profile every run since
+        # encryption was enabled on 28/05/2026).
+        if primary_is_encrypted(ctx.profile):
+            self._verify_remote_encrypted_archive(ctx)
+            return
+
         # Try hash-based verification first
         verified_files = ctx.backend.verify_backup_files(ctx.backup_remote_name)
         has_checksums = verified_files and any(checksum for _, _, checksum in verified_files)
 
         if has_checksums:
             self._verify_remote_checksums(ctx, verified_files)
-        else:
-            # Fall back to size-only verification
-            remote_files = ctx.backend.list_backup_files(ctx.backup_remote_name)
-            if not remote_files:
-                self._log("Remote verification skipped: backend does not " "support file listing")
-                return
-            self._verify_remote_sizes(ctx, remote_files)
+            return
+
+        # Size-only fallback. Only SFTP and S3 reach this method
+        # (StorageConfig.is_remote() is True for those two only), and both
+        # implement list_backup_files — so an empty listing means the
+        # upload produced nothing on the server, NOT that listing is
+        # unsupported. Committing in that state silently records an empty
+        # backup as success (the stage-5 data-loss bug); fail loudly.
+        remote_files = ctx.backend.list_backup_files(ctx.backup_remote_name)
+        if not remote_files:
+            if ctx.files:
+                raise RuntimeError(
+                    f"Remote verification failed: expected {len(ctx.files)} "
+                    f"file(s) but the remote backup {ctx.backup_remote_name!r} "
+                    f"is empty — the upload produced nothing on the server."
+                )
+            # Genuinely nothing to verify (no source files). Not an error.
+            self._log("Remote verification skipped: no files to verify")
+            return
+        self._verify_remote_sizes(ctx, remote_files)
+
+    def _verify_remote_encrypted_archive(self, ctx: PipelineContext) -> None:
+        """Verify the encrypted remote primary archive exists with size > 0.
+
+        The encrypted remote primary is a single ``{name}.tar.wbenc``
+        object; listing ``{name}/`` is always empty for it, so the normal
+        remote-verify path would "skip" and commit an unverified (possibly
+        empty or truncated) upload as success — the stage-5 data-loss bug.
+        AES-256-GCM authentication tags guarantee content integrity at
+        restore time; here we confirm the archive is present and non-empty
+        on the server. Mirrors :meth:`_verify_encrypted_archive`, which the
+        mirror path already uses for the same artifact shape.
+
+        Raises:
+            RuntimeError: If the archive is missing or zero bytes.
+        """
+        archive_name = f"{ctx.backup_remote_name}.tar.wbenc"
+        size = ctx.backend.get_file_size(archive_name)
+        if not size:  # None (missing) or 0 (truncated/empty upload)
+            raise RuntimeError(
+                f"Remote verification failed: encrypted archive "
+                f"{archive_name!r} is missing or empty on the server."
+            )
+        self._log(f"Remote verification OK: {archive_name} present ({size:,} bytes)")
 
     def _verify_remote_checksums(
         self,

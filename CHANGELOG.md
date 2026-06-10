@@ -5,6 +5,18 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.49] - 2026-06-10
+
+### Fixed
+- **An empty or failed remote upload could be recorded as a successful backup (the "stage-5" hole).** Incident (14/05/2026): a server-helper shell incompatibility silently dropped the tar stream; the remote directory ended up empty, yet the run was committed and journaled as success with 231,908 files. The mechanism survived the helper fix: ``_verify_remote`` interpreted an empty ``list_backup_files()`` result as "backend does not support file listing" and skipped verification — but SFTP and S3 (the only storage types that reach this code) both implement listing, so an empty list means the upload produced *nothing on the server*, not that listing is unsupported. Worse, the live encrypted-S3 profile hit this branch on **every run since encryption was enabled (28/05/2026)**: the artifact is a single ``{name}.tar.wbenc`` object, so listing the ``{name}/`` prefix is always empty and no AWS upload was ever post-checked.
+- **Fix**: ``_verify_remote`` now (1) routes encrypted remote primaries to a new ``_verify_remote_encrypted_archive`` that size-checks the ``.tar.wbenc`` object directly (mirroring what ``_verify_encrypted_archive`` already did for mirrors) and raises if it is missing or zero bytes; (2) raises ``RuntimeError`` when a non-encrypted remote backup has source files but an empty remote listing, instead of silently skipping; the skip path remains only for the genuinely-empty case (no source files). The primary-encryption decision is extracted into ``primary_is_encrypted()`` in ``src/core/phases/writer.py`` — a single predicate shared by the writer and the verify phase so they can never diverge.
+- **A committed, verified primary backup was destroyed when any post-commit phase failed or the user cancelled.** Incident (15/05/2026, twice in one day): an SFTP mirror socket error after the primary commit routed through ``run_backup``'s except blocks into ``_best_effort_cleanup``, which unconditionally deleted the day's good primary **including its ``.wbcommit`` marker** — leaving zero backup for the day. The cleanup docstring's correctness claim ("without a ``.wbcommit`` the backup is invisible either way") was false for the post-commit window.
+- **Fix**: ``PipelineContext`` gains a ``primary_committed`` flag, set by ``_phase_commit_primary`` on both its success paths (local marker write, remote marker upload) and left ``False`` on failure. ``_best_effort_cleanup`` now refuses to touch the primary when the flag is set — uncommitted mirror artifacts are still reclaimed, and the uncommitted-primary path is unchanged.
+
+### Tests
+- +15 regression tests: ``TestVerifyRemote`` (encrypted archive present / missing / zero-byte; empty listing with files raises, without files skips; checksum and size dispatch unchanged), ``TestBestEffortCleanup`` (committed primary never deleted, uncommitted mirrors still cleaned, uncommitted primary still reclaimed), ``TestPhaseCommitPrimary`` (flag set on local + remote success, left unset on both failure paths), ``TestPrimaryIsEncrypted`` (all-flags / each-flag-off matrix).
+- Full suite: 2586 passed, 0 failed, 28 skipped, 92% coverage.
+
 ## [3.7.48] - 2026-06-02
 
 ### Fixed

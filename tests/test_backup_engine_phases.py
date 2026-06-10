@@ -61,6 +61,10 @@ def _make_ctx(**overrides) -> MagicMock:
     ctx.backup_path = None
     ctx.backup_remote_name = ""
     ctx.backend = None
+    # Matches PipelineContext's real default. Without this the MagicMock
+    # would yield a truthy child attribute, making _best_effort_cleanup
+    # wrongly treat every backup as committed.
+    ctx.primary_committed = False
     ctx.integrity_manifest = {
         "version": 1,
         "files": {},
@@ -190,6 +194,53 @@ class TestBestEffortCleanup:
         backend.delete_backup.side_effect = [OSError("boom"), None]
         ctx = _make_ctx()
         ctx.backend = backend
+        engine._best_effort_cleanup(ctx)
+        assert backend.delete_backup.call_count == 2
+
+    def test_committed_primary_is_never_deleted(self) -> None:
+        # Regression for the 15/05/2026 zero-backup-day: a post-commit
+        # failure (mirror upload error, rotation error, user cancel) must
+        # NOT destroy the already-committed, verified primary backup.
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        backend = MagicMock()
+        ctx = _make_ctx()
+        ctx.backend = backend
+        ctx.primary_committed = True
+
+        engine._best_effort_cleanup(ctx)
+
+        # The committed primary survives — not one delete attempt on it.
+        backend.delete_backup.assert_not_called()
+
+    def test_committed_primary_still_cleans_uncommitted_mirrors(self) -> None:
+        # Keeping the committed primary must not leak the failed mirror's
+        # uncommitted artefacts — those are still cleaned.
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        primary_backend = MagicMock()
+        mirror_backend = MagicMock()
+        engine._get_backend = MagicMock(return_value=mirror_backend)
+
+        ctx = _make_ctx()
+        ctx.backend = primary_backend
+        ctx.primary_committed = True
+        ctx.profile.mirror_destinations = [MagicMock()]
+
+        engine._best_effort_cleanup(ctx)
+
+        primary_backend.delete_backup.assert_not_called()
+        # Mirror artefacts (directory + archive) are still reclaimed.
+        assert mirror_backend.delete_backup.call_count == 2
+
+    def test_uncommitted_primary_is_deleted(self) -> None:
+        # The default (no commit yet) path is unchanged: an uncommitted
+        # partial backup is reclaimed exactly as before.
+        engine = _bare_engine()
+        backend = MagicMock()
+        ctx = _make_ctx()
+        ctx.backend = backend
+        ctx.primary_committed = False
         engine._best_effort_cleanup(ctx)
         assert backend.delete_backup.call_count == 2
 
@@ -423,6 +474,62 @@ class TestPhaseCommitPrimary:
         ctx.backend = None
         # No exception raised, no marker written.
         engine._phase_commit_primary(ctx)
+
+    def test_local_success_sets_primary_committed(self, tmp_path: Path) -> None:
+        # The flag that protects the primary from _best_effort_cleanup
+        # must be set only AFTER the marker is written.
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        backup = tmp_path / "BLoic_FULL_zzz"
+        backup.mkdir()
+        ctx = _make_ctx()
+        ctx.backup_path = backup
+        assert ctx.primary_committed is False
+        with patch("src.core.phases.commit_marker.write_commit_marker"):
+            engine._phase_commit_primary(ctx)
+        assert ctx.primary_committed is True
+
+    def test_remote_success_sets_primary_committed(self) -> None:
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        ctx = _make_ctx()
+        ctx.backup_path = None
+        ctx.backup_remote_name = "RemoteBk"
+        ctx.backend = MagicMock()
+        engine._phase_commit_primary(ctx)
+        assert ctx.primary_committed is True
+
+    def test_local_failure_leaves_primary_uncommitted(self, tmp_path: Path) -> None:
+        # If the marker write fails, the flag must stay False so cleanup
+        # is still allowed to reclaim the (now orphaned) partial backup.
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        engine._log = MagicMock()
+        backup = tmp_path / "BLoic_FULL_fail"
+        backup.mkdir()
+        ctx = _make_ctx()
+        ctx.backup_path = backup
+        with patch(
+            "src.core.phases.commit_marker.write_commit_marker",
+            side_effect=OSError("disk full"),
+        ):
+            with pytest.raises(OSError):
+                engine._phase_commit_primary(ctx)
+        assert ctx.primary_committed is False
+
+    def test_remote_failure_leaves_primary_uncommitted(self) -> None:
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        engine._log = MagicMock()
+        backend = MagicMock()
+        backend.upload_file.side_effect = OSError("connection reset")
+        ctx = _make_ctx()
+        ctx.backup_path = None
+        ctx.backup_remote_name = "RemoteBk"
+        ctx.backend = backend
+        with pytest.raises(OSError):
+            engine._phase_commit_primary(ctx)
+        assert ctx.primary_committed is False
 
 
 # ---------------------------------------------------------------------------
@@ -676,3 +783,98 @@ class TestApplyPendingRollback:
         # Profile untouched, sentinel left in place (we couldn't parse it
         # so we don't risk silently masking the issue with a delete).
         assert profile.backup_type == BackupType.FULL
+
+
+# ---------------------------------------------------------------------------
+# _verify_remote — stage-5 hole (empty remote listing committed as success)
+# ---------------------------------------------------------------------------
+
+
+def _remote_ctx(*, encrypted: bool, files: int = 1) -> MagicMock:
+    """``_make_ctx`` tuned for the remote-verify path.
+
+    ``encrypted`` toggles ``primary_is_encrypted(ctx.profile)`` by setting
+    the three flags the predicate reads. ``files`` controls how many
+    source files the run thought it was backing up (a real list, so
+    ``len`` / truthiness behave).
+    """
+    ctx = _make_ctx()
+    ctx.backup_remote_name = "RemoteBk"
+    ctx.backend = MagicMock()
+    ctx.files = [MagicMock() for _ in range(files)]
+    ctx.profile.encrypt_primary = encrypted
+    ctx.profile.encryption.enabled = encrypted
+    ctx.profile.encryption.stored_password = "pw" if encrypted else ""
+    return ctx
+
+
+class TestVerifyRemote:
+    """Phase 6 remote verification — the stage-5 silent-success guard."""
+
+    def test_encrypted_archive_present_passes(self) -> None:
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        ctx = _remote_ctx(encrypted=True)
+        ctx.backend.get_file_size.return_value = 4096
+
+        engine._verify_remote(ctx)  # must not raise
+
+        ctx.backend.get_file_size.assert_called_once_with("RemoteBk.tar.wbenc")
+        # The plain file-listing path must never run for an encrypted primary.
+        ctx.backend.list_backup_files.assert_not_called()
+
+    def test_encrypted_archive_missing_raises(self) -> None:
+        # get_file_size returns None for a missing object — the empty
+        # upload that stage-5 used to commit as success.
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        ctx = _remote_ctx(encrypted=True)
+        ctx.backend.get_file_size.return_value = None
+        with pytest.raises(RuntimeError, match="missing or empty"):
+            engine._verify_remote(ctx)
+
+    def test_encrypted_archive_zero_bytes_raises(self) -> None:
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        ctx = _remote_ctx(encrypted=True)
+        ctx.backend.get_file_size.return_value = 0
+        with pytest.raises(RuntimeError, match="missing or empty"):
+            engine._verify_remote(ctx)
+
+    def test_empty_listing_with_files_raises(self) -> None:
+        # The core stage-5 fix: a non-encrypted backup that uploaded
+        # nothing (empty listing) while it had files to back up must FAIL,
+        # not be silently skipped and committed as success.
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        ctx = _remote_ctx(encrypted=False, files=20)
+        ctx.backend.verify_backup_files.return_value = []
+        ctx.backend.list_backup_files.return_value = []
+        with pytest.raises(RuntimeError, match="produced nothing"):
+            engine._verify_remote(ctx)
+
+    def test_empty_listing_no_files_skips(self) -> None:
+        # No source files → an empty listing is genuinely fine.
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        ctx = _remote_ctx(encrypted=False, files=0)
+        ctx.backend.verify_backup_files.return_value = []
+        ctx.backend.list_backup_files.return_value = []
+        engine._verify_remote(ctx)  # must not raise
+
+    def test_checksums_dispatch_to_checksum_verifier(self) -> None:
+        engine = _bare_engine()
+        engine._verify_remote_checksums = MagicMock()
+        ctx = _remote_ctx(encrypted=False, files=2)
+        ctx.backend.verify_backup_files.return_value = [("a.txt", 10, "deadbeef")]
+        engine._verify_remote(ctx)
+        engine._verify_remote_checksums.assert_called_once()
+
+    def test_nonempty_listing_dispatches_to_size_verifier(self) -> None:
+        engine = _bare_engine()
+        engine._verify_remote_sizes = MagicMock()
+        ctx = _remote_ctx(encrypted=False, files=2)
+        ctx.backend.verify_backup_files.return_value = []  # no checksums
+        ctx.backend.list_backup_files.return_value = [("a.txt", 10), ("b.txt", 20)]
+        engine._verify_remote(ctx)
+        engine._verify_remote_sizes.assert_called_once()

@@ -102,6 +102,31 @@ def write_backup(
             secure_pw.clear()
 
 
+def primary_is_encrypted(profile) -> bool:
+    """True when the primary destination is written as an encrypted .tar.wbenc.
+
+    Single source of truth for the primary-encryption decision, shared by
+    the writer (which encrypts) and ``BackupEngine._verify_remote`` (which
+    must size-check the single ``{name}.tar.wbenc`` object instead of
+    listing files under ``{name}/``). Keep these two callers in sync: if
+    the verify side ever disagrees with the write side, an encrypted
+    remote primary gets verified as a plain file listing — which is always
+    empty for an archive — and verification is silently skipped (the
+    stage-5 "empty remote upload committed as success" data-loss bug).
+
+    Args:
+        profile: The BackupProfile being executed.
+
+    Returns:
+        True if the primary will be / was written as an encrypted archive.
+    """
+    return bool(
+        profile.encrypt_primary
+        and profile.encryption.enabled
+        and profile.encryption.stored_password
+    )
+
+
 def _get_encrypt_password(ctx: PipelineContext) -> SecurePassword | None:
     """Extract encryption password from context if applicable.
 
@@ -114,10 +139,6 @@ def _get_encrypt_password(ctx: PipelineContext) -> SecurePassword | None:
     Returns:
         SecurePassword wrapping the password, or None.
     """
-    if (
-        ctx.profile.encrypt_primary
-        and ctx.profile.encryption.enabled
-        and ctx.profile.encryption.stored_password
-    ):
+    if primary_is_encrypted(ctx.profile):
         return SecurePassword(ctx.profile.encryption.stored_password)
     return None

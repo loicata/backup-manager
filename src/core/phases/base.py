@@ -46,6 +46,12 @@ class PipelineContext:
     filter_hashes: dict[str, str] = field(default_factory=dict)  # From filter phase
     file_hashes: dict[str, str] = field(default_factory=dict)  # rel_path → sha256
     backend: Any | None = None  # StorageBackend
+    # Set True by _phase_commit_primary once the primary .wbcommit marker
+    # is written. Read by _best_effort_cleanup to refuse deleting a
+    # committed, verified primary backup when a LATER phase (mirror,
+    # rotate) fails or the user cancels — the 15/05/2026 zero-backup-day
+    # data-loss bug.
+    primary_committed: bool = False
 
     def is_local(self) -> bool:
         """True if backup target is a local or network path.

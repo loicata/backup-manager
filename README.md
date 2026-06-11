@@ -3,8 +3,8 @@
 [![CI](https://github.com/loicata/backup-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/loicata/backup-manager/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-1429%20passed-brightgreen.svg)](#testing)
-[![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-2781%20passed-brightgreen.svg)](#testing)
+[![Coverage](https://img.shields.io/badge/coverage-87%25-brightgreen.svg)](#testing)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6.svg)](https://github.com/loicata/backup-manager/releases)
 
 ## 🛡️ Backup Manager
@@ -186,7 +186,7 @@ pytest                                      # full suite
 pytest --cov=src --cov-report=term-missing  # with coverage
 ```
 
-**Current status:** 1429 tests, 85 % coverage, 0 failures.
+**Current status:** 2781 tests, 87 % coverage, 0 failures.
 
 CI (GitHub Actions, every push): Black formatting, Ruff linting (Ubuntu), full pytest with coverage enforcement (Windows, Python 3.12 + 3.13).
 
@@ -230,4 +230,38 @@ backup-manager/
 │   │       └── rotator.py       # GFS retention rotation
 │   ├── storage/                 # Storage backends
 │   │   ├── local.py             # Local / USB with drive-serial detection
-│   �
+│   │   ├── network.py           # SMB / CIFS network shares
+│   │   ├── sftp.py              # SSH with tar-stream
+│   │   ├── s3.py                # S3 + Object Lock
+│   │   ├── s3_setup.py          # Bucket provisioning + cost simulation
+│   │   └── base.py              # Abstract backend + retry + throttling
+│   ├── security/                # Encryption, DPAPI, secure memory
+│   ├── notifications/           # SMTP email with HTML reports
+│   └── ui/                      # Tkinter GUI (Sun Valley theme)
+│       ├── wizard.py            # Classic (3 steps) + Pro (11 steps) wizard
+│       ├── app.py               # Main window with sidebar (mode per profile)
+│       └── tabs/                # Tab implementations
+├── tests/                       # 2781 tests (unit + integration)
+├── CHANGELOG.md
+├── requirements.txt
+└── pyproject.toml
+```
+
+## Requirements
+
+| Requirement | Version |
+|---|---|
+| OS | Windows 10 / 11 |
+| Python | 3.11+ (dev only — end users install the MSI) |
+| cryptography | >= 43.0.0 |
+| paramiko | >= 3.0.0 |
+| boto3 | >= 1.35.0 |
+| Pillow | >= 10.0.0 |
+| pystray | >= 0.19.0 |
+| sv_ttk | >= 2.6.0 |
+
+---
+
+**License** — [GPL v3.0](LICENSE) — © 2026 Loic Ader — [loicata.com](https://loicata.com)
+
+**Issues / PRs** — welcome. Open an issue first for anything significant.

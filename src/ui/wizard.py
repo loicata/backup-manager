@@ -1424,24 +1424,18 @@ class SetupWizard:
         self._data["retention_gfs_monthly"] = initial_monthly
 
         def _on_daily(*_args) -> None:
-            try:
+            with contextlib.suppress(tk.TclError, ValueError):
                 self._data["retention_gfs_daily"] = int(daily_var.get())
-            except (tk.TclError, ValueError):
-                pass
             _refresh_summary()
 
         def _on_weekly(*_args) -> None:
-            try:
+            with contextlib.suppress(tk.TclError, ValueError):
                 self._data["retention_gfs_weekly"] = int(weekly_var.get())
-            except (tk.TclError, ValueError):
-                pass
             _refresh_summary()
 
         def _on_monthly(*_args) -> None:
-            try:
+            with contextlib.suppress(tk.TclError, ValueError):
                 self._data["retention_gfs_monthly"] = int(monthly_var.get())
-            except (tk.TclError, ValueError):
-                pass
             _refresh_summary()
 
         if show_daily:

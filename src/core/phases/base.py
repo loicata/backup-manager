@@ -52,6 +52,12 @@ class PipelineContext:
     # rotate) fails or the user cancels — the 15/05/2026 zero-backup-day
     # data-loss bug.
     primary_committed: bool = False
+    # Zero-based indexes of mirror destinations whose .wbcommit marker
+    # was written by _commit_mirror. Read by _best_effort_cleanup for
+    # the same reason as primary_committed, mirror-side: a failure in a
+    # LATER phase (rotation) or a user Cancel must not destroy a mirror
+    # artefact that is already committed and verified.
+    mirrors_committed: set[int] = field(default_factory=set)
 
     def is_local(self) -> bool:
         """True if backup target is a local or network path.

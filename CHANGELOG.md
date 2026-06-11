@@ -5,6 +5,29 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.54] - 2026-06-11
+
+Post-audit coherence review of the 3.7.49→3.7.53 fix marathon, cross-checked against the
+first scheduled-run logs on the Nuitka build (all clean). One real finding fixed, plus the
+remaining lint leftovers.
+
+### Fixed — data protection
+- **A failure or user Cancel during rotation could destroy committed mirror backups.** The
+  committed-primary protection (3.7.49) did not extend to mirrors: ``_commit_mirror`` recorded
+  nothing, so ``_best_effort_cleanup`` unconditionally deleted every mirror artefact — including
+  ones whose ``.wbcommit`` had just been written, leaving an orphan marker behind and wiping a
+  valid, verified mirror copy. Each committed mirror's index is now recorded in
+  ``ctx.mirrors_committed`` and the cleanup keeps those artefacts, logging the keep exactly like
+  the primary's. (No user profile currently configures a mirror, so no run was exposed.)
+- The cleanup's mirror loop no longer skips silently when a mirror backend cannot be built —
+  the skip and its reason are logged (the orphan scan reclaims any leftovers at the next run).
+
+### Code quality
+- Cleared every remaining ruff finding: unused ``PROGRESS`` import, unsorted imports and a
+  manual index counter (→ ``enumerate``) in ``backup_engine.py``; 7 specific-exception
+  ``try/except/pass`` blocks rewritten as ``contextlib.suppress`` in ``_fs_utils``,
+  ``progress_panel`` and ``wizard``. ``ruff check src/`` is now fully clean.
+
 ## [3.7.53] - 2026-06-10
 
 Closes the 2026-06-10 deep audit entirely: the 25 actionable low-severity findings are fixed

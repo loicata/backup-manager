@@ -30,11 +30,11 @@ from src.core.events import (
     LOG,
     PHASE_CHANGED,
     PHASE_COUNT,
-    PROGRESS,
     STATUS,
     EventBus,
 )
 from src.core.exceptions import CancelledError
+from src.core.phase_logger import PhaseLogger
 from src.core.phases.base import PipelineContext
 from src.core.phases.collector import collect_files
 from src.core.phases.filter import (
@@ -53,7 +53,6 @@ from src.core.phases.manifest import (
     save_integrity_manifest,
     upload_manifest_to_remote,
 )
-from src.core.phase_logger import PhaseLogger
 from src.core.phases.mirror import mirror_backup
 from src.core.phases.rotator import rotate_backups
 from src.core.phases.verifier import verify_backup
@@ -61,7 +60,6 @@ from src.core.phases.writer import primary_is_encrypted, write_backup
 from src.core.profile_lock import ProfileLockError, acquire, release
 from src.security.secure_memory import SecurePassword
 from src.storage.base import StorageBackend
-
 
 # Minimum age before an abandoned ``*.partial`` upload trail is swept
 # by the orphan scan. An actively-written partial advances its mtime
@@ -297,14 +295,12 @@ def delete_profile_backups(
 
     total = len(plan)
     total_deleted = 0
-    current = 0
 
     # Pass 2: delete with progress reporting.  ``progress_callback`` is
     # called BEFORE the actual delete so the UI shows the file that is
     # currently being processed (matches user expectation of "Deleting
     # X" rather than the just-finished name).
-    for backend, name in plan:
-        current += 1
+    for current, (backend, name) in enumerate(plan, start=1):
         if progress_callback is not None:
             try:
                 progress_callback(current, total, name)
@@ -508,14 +504,17 @@ class BackupEngine:
         either way, so leaving the bytes on disk is correctness-safe;
         the cleanup just frees space sooner.
 
-        Exception — a COMMITTED primary is never deleted here. Once
+        Exception — a COMMITTED artefact is never deleted here. Once
         ``_phase_commit_primary`` has written the marker the backup is
         complete, integrity-verified and authoritative; a failure in a
         LATER phase (mirror upload, rotation) or a user Cancel must not
         destroy it. Deleting a committed primary because a secondary
         destination failed is the 15/05/2026 zero-backup-day data-loss
         incident (an SFTP mirror socket error wiped the day's good backup,
-        twice). Uncommitted mirror artifacts are still cleaned.
+        twice). The same rule applies per mirror: a mirror whose
+        ``.wbcommit`` was written by ``_commit_mirror`` (its index is in
+        ``ctx.mirrors_committed``) is kept; only uncommitted mirror
+        artifacts are cleaned.
         """
         # Without a backup_name there is nothing to delete.
         backup_name = getattr(ctx, "backup_name", "")
@@ -533,12 +532,22 @@ class BackupEngine:
             self._try_delete(ctx.backend, f"{backup_name}.tar.wbenc", "primary")
 
         # Mirror destinations: each one might have its own backend.
+        committed_mirrors = getattr(ctx, "mirrors_committed", None) or set()
         for i, config in enumerate(ctx.profile.mirror_destinations):
+            label = f"mirror {i + 1}"
+            if i in committed_mirrors:
+                self._log(f"Backup on {label} already committed — keeping it despite the failure.")
+                continue
             try:
                 backend = self._get_backend(config)
-            except Exception:
+            except Exception as e:
+                logger.debug(
+                    "Best-effort cleanup: cannot build backend for %s (%s) — "
+                    "the orphan scan will reclaim any leftovers at the next run",
+                    label,
+                    e,
+                )
                 continue
-            label = f"mirror {i + 1}"
             self._try_delete(backend, backup_name, label)
             self._try_delete(backend, f"{backup_name}.tar.wbenc", label)
 
@@ -1066,9 +1075,7 @@ class BackupEngine:
         from src.storage.drive_serial import resolve_local_path
 
         try:
-            return resolve_local_path(
-                config.destination_path, getattr(config, "device_serial", "")
-            )
+            return resolve_local_path(config.destination_path, getattr(config, "device_serial", ""))
         except Exception:
             return config.destination_path
 
@@ -2046,8 +2053,7 @@ class BackupEngine:
             # re-creation would be skipped by EVERY future differential,
             # silently dropping the file from all incremental backups.
             skipped_paths = {
-                entry.get("path")
-                for entry in ctx.integrity_manifest.get("skipped_files", [])
+                entry.get("path") for entry in ctx.integrity_manifest.get("skipped_files", [])
             }
             delta_files = (
                 [f for f in ctx.all_files if f.relative_path not in skipped_paths]
@@ -2242,6 +2248,12 @@ class BackupEngine:
         is honest: a mirror that did not pass verification has no
         marker and is invisible to the orphan scan / restore.
 
+        On success the mirror's index is recorded in
+        ``ctx.mirrors_committed`` so ``_best_effort_cleanup`` refuses to
+        delete this now-authoritative artefact if a LATER phase
+        (rotation) fails or the user cancels — the committed-primary
+        protection, applied per mirror.
+
         Args:
             ctx: Pipeline context (already-built integrity manifest).
             config: This mirror's storage configuration.
@@ -2288,6 +2300,7 @@ class BackupEngine:
                     f"This mirror will be treated as orphaned at the next run."
                 )
                 raise
+            ctx.mirrors_committed.add(mirror_idx)
             return
 
         # Local mirror
@@ -2310,6 +2323,7 @@ class BackupEngine:
                 f"This mirror will be treated as orphaned at the next run."
             )
             raise
+        ctx.mirrors_committed.add(mirror_idx)
 
     def _verify_mirror_checksums(
         self,
@@ -2458,9 +2472,7 @@ class BackupEngine:
         # mirror's reference. No mirrors → the primary is the sole holder,
         # so pruning is safe (covers the common local-encrypted profile).
         prune_hook = (
-            self._config.delete_verify_hash
-            if not ctx.profile.mirror_destinations
-            else None
+            self._config.delete_verify_hash if not ctx.profile.mirror_destinations else None
         )
         ctx.result.rotated_count = rotate_backups(
             ctx.backend,
@@ -2701,8 +2713,8 @@ class BackupEngine:
 
         from src.core.config import StorageType
 
-        is_object_lock_mirror = (
-            config.storage_type == StorageType.S3 and getattr(config, "s3_object_lock", False)
+        is_object_lock_mirror = config.storage_type == StorageType.S3 and getattr(
+            config, "s3_object_lock", False
         )
         if not is_object_lock_mirror or not hasattr(backend, "set_retain_until"):
             return

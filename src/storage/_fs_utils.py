@@ -31,6 +31,7 @@ propagate (``LocalStorage.delete_backup`` raises
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import stat
@@ -125,10 +126,8 @@ def _clear_readonly(path: str) -> None:
     ``os.rmdir`` will surface the real error (and add it to the
     residuals list) if clearing didn't help.
     """
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(path, stat.S_IWRITE)
-    except OSError:
-        pass
 
 
 def _attempt_remove(
@@ -255,9 +254,7 @@ def safe_remove_tree(
         # ``path.lstat`` may now report "not found" if the OS finally
         # released the locks and the parent caller managed to drop the
         # tree mid-sleep — handled inside the pass helper.
-        retry_result = _safe_remove_tree_pass(
-            path, max_retries=max_retries, base_delay=base_delay
-        )
+        retry_result = _safe_remove_tree_pass(path, max_retries=max_retries, base_delay=base_delay)
         # Accumulate counts: the first pass may have removed most
         # files; the retry adds whatever it finishes.
         result.removed_files += retry_result.removed_files

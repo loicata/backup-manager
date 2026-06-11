@@ -28,6 +28,7 @@ Design notes:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import tkinter as tk
 from collections.abc import Callable
@@ -147,19 +148,16 @@ class InlineProgressPanel:
                 leaves the bar in its initial 0 % state.
             name: Item name shown in the "Working on: …" line.
         """
-        try:
+        # Tk torn down (test shutdown, app quit) raises RuntimeError or
+        # TclError here. The worker can safely keep running — the UI
+        # just won't reflect it.
+        with contextlib.suppress(RuntimeError, tk.TclError):
             self._parent.after(0, self._do_update, current, total, name)
-        except (RuntimeError, tk.TclError):
-            # Tk torn down (test shutdown, app quit). The worker can
-            # safely keep running — the UI just won't reflect it.
-            pass
 
     def complete(self) -> None:
         """Snap to 100 %, switch title to completion, schedule destroy."""
-        try:
+        with contextlib.suppress(RuntimeError, tk.TclError):
             self._parent.after(0, self._do_complete)
-        except (RuntimeError, tk.TclError):
-            pass
 
     def destroy(self) -> None:
         """Force-close the panel. Idempotent."""
@@ -206,10 +204,8 @@ class InlineProgressPanel:
         if self._closed:
             return
         self._closed = True
-        try:
+        with contextlib.suppress(tk.TclError):
             self._panel.destroy()
-        except tk.TclError:
-            pass
         if self._restore_callback is not None and self._hide_called:
             try:
                 self._restore_callback()

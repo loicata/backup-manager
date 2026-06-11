@@ -68,6 +68,9 @@ def _make_ctx(**overrides) -> MagicMock:
     # would yield a truthy child attribute, making _best_effort_cleanup
     # wrongly treat every backup as committed.
     ctx.primary_committed = False
+    # Same rationale, mirror-side: match the real default (empty set) so
+    # membership tests behave like the genuine PipelineContext field.
+    ctx.mirrors_committed = set()
     ctx.integrity_manifest = {
         "version": 1,
         "files": {},
@@ -246,6 +249,51 @@ class TestBestEffortCleanup:
         ctx.primary_committed = False
         engine._best_effort_cleanup(ctx)
         assert backend.delete_backup.call_count == 2
+
+    def test_committed_mirror_is_never_deleted(self) -> None:
+        # Regression for the 2026-06-11 review finding: a failure or user
+        # Cancel in a phase AFTER _phase_verify_mirrors (rotation) must
+        # NOT destroy a mirror artefact whose .wbcommit was already
+        # written — the committed-primary rule, applied per mirror.
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        engine._get_backend = MagicMock()
+
+        ctx = _make_ctx()
+        ctx.backend = MagicMock()
+        ctx.primary_committed = True
+        ctx.profile.mirror_destinations = [MagicMock()]
+        ctx.mirrors_committed = {0}
+
+        engine._best_effort_cleanup(ctx)
+
+        # The committed mirror is skipped before its backend is even
+        # built — zero delete attempts can reach it.
+        engine._get_backend.assert_not_called()
+        # And the skip is surfaced in the run log, like the primary's.
+        logged = " ".join(str(c.args[0]) for c in engine._log.call_args_list)
+        assert "mirror 1" in logged
+
+    def test_committed_mirror_kept_while_uncommitted_mirror_cleaned(self) -> None:
+        # Mixed outcome: mirror 1 committed (kept), mirror 2 not yet
+        # committed when the run died (cleaned). Each mirror's fate is
+        # decided independently by its own index.
+        engine = _bare_engine()
+        engine._log = MagicMock()
+        uncommitted_backend = MagicMock()
+        engine._get_backend = MagicMock(return_value=uncommitted_backend)
+
+        ctx = _make_ctx()
+        ctx.backend = MagicMock()
+        ctx.primary_committed = True
+        ctx.profile.mirror_destinations = [MagicMock(), MagicMock()]
+        ctx.mirrors_committed = {0}
+
+        engine._best_effort_cleanup(ctx)
+
+        # Only mirror 2's backend was built and cleaned (dir + archive).
+        assert engine._get_backend.call_count == 1
+        assert uncommitted_backend.delete_backup.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +728,62 @@ class TestCommitMirror:
         ):
             with pytest.raises(OSError, match="ENOSPC"):
                 engine._commit_mirror(ctx, cfg, 0, "Mirror 1", False)
+
+    def test_remote_success_records_mirror_committed(self) -> None:
+        # The index that protects this mirror from _best_effort_cleanup
+        # must be recorded only AFTER the marker upload succeeded.
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        engine._get_backend = MagicMock(return_value=MagicMock())
+        ctx = _make_ctx()
+        ctx.backup_name = "Bk_FULL"
+        assert ctx.mirrors_committed == set()
+        engine._commit_mirror(ctx, self._mirror_cfg(remote=True), 1, "Mirror 2", False)
+        assert ctx.mirrors_committed == {1}
+
+    def test_local_success_records_mirror_committed(self, tmp_path: Path) -> None:
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        artefact = tmp_path / "Bk_FULL"
+        artefact.mkdir()
+        ctx = _make_ctx()
+        ctx.backup_name = "Bk_FULL"
+        cfg = self._mirror_cfg(dest=str(tmp_path))
+        with patch("src.core.phases.commit_marker.write_commit_marker"):
+            engine._commit_mirror(ctx, cfg, 0, "Mirror 1", False)
+        assert ctx.mirrors_committed == {0}
+
+    def test_remote_failure_does_not_record_committed(self) -> None:
+        # A failed marker upload leaves the mirror unprotected so the
+        # cleanup may reclaim the (orphaned) artefact.
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        engine._log = MagicMock()
+        backend = MagicMock()
+        backend.upload_file.side_effect = OSError("S3 unreachable")
+        engine._get_backend = MagicMock(return_value=backend)
+        ctx = _make_ctx()
+        ctx.backup_name = "Bk_FULL"
+        with pytest.raises(OSError):
+            engine._commit_mirror(ctx, self._mirror_cfg(remote=True), 0, "Mirror 1", False)
+        assert ctx.mirrors_committed == set()
+
+    def test_local_write_failure_does_not_record_committed(self, tmp_path: Path) -> None:
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        engine._log = MagicMock()
+        artefact = tmp_path / "Bk_FULL"
+        artefact.mkdir()
+        ctx = _make_ctx()
+        ctx.backup_name = "Bk_FULL"
+        cfg = self._mirror_cfg(dest=str(tmp_path))
+        with patch(
+            "src.core.phases.commit_marker.write_commit_marker",
+            side_effect=OSError("ENOSPC"),
+        ):
+            with pytest.raises(OSError):
+                engine._commit_mirror(ctx, cfg, 0, "Mirror 1", False)
+        assert ctx.mirrors_committed == set()
 
 
 # ---------------------------------------------------------------------------

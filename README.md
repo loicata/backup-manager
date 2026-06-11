@@ -9,6 +9,8 @@
 
 ## 🛡️ Backup Manager
 
+**Free, open-source, ransomware-proof backup software for Windows.** Immutable backups with S3 Object Lock — your data becomes **physically impossible to delete**, even by ransomware running with admin rights.
+
 **📦 Classic profiles** — backup to external drive, network share, SSH server, or S3 cloud storage.  
 **🔒 Anti-Ransomware profiles** — backup to Amazon AWS S3 with Object Lock, **the technology used in banking**. Your data becomes **impossible to delete**, even by ransomware.
 
@@ -25,6 +27,21 @@
 | <img src="assets/screenshots/general_tab.png" width="450"> | <img src="assets/screenshots/mirror_tab.png" width="450"> |
 
 ---
+
+## How it compares
+
+Most backup tools either charge for cloud immutability or cannot do it at all. Backup Manager is the only free, open-source Windows backup application with **native S3 Object Lock (Compliance mode)** — set up by a wizard, with no AWS knowledge required.
+
+| | Free | Open source | Cloud target (free tier) | Immutable backups (Object Lock) | AWS setup automated |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **Backup Manager** | ✅ | ✅ GPL v3 | ✅ | ✅ Compliance mode | ✅ wizard |
+| Veeam Agent Free | ✅ | ❌ | ❌ blocked in free edition | ❌ paid editions only | ❌ |
+| Acronis True Image | ❌ subscription | ❌ | ✅ | ❌ behavioral detection only | ❌ |
+| Macrium Reflect | ❌ free edition discontinued | ❌ | ❌ | ❌ | ❌ |
+| Duplicati | ✅ | ✅ | ✅ | ❌ not supported | ❌ |
+| restic / Kopia | ✅ | ✅ | ✅ | ❌ incompatible with Compliance mode | ❌ |
+
+What the others do better: Veeam and Macrium offer **full disk imaging and bare-metal recovery** — Backup Manager is file-level by design. If you need to restore a complete bootable system, pair it with an imaging tool; if you need backups that ransomware cannot touch, this is the free way to get them.
 
 ## Two modes
 
@@ -213,38 +230,4 @@ backup-manager/
 │   │       └── rotator.py       # GFS retention rotation
 │   ├── storage/                 # Storage backends
 │   │   ├── local.py             # Local / USB with drive-serial detection
-│   │   ├── network.py           # SMB / CIFS network shares
-│   │   ├── sftp.py              # SSH with tar-stream
-│   │   ├── s3.py                # S3 + Object Lock
-│   │   ├── s3_setup.py          # Bucket provisioning + cost simulation
-│   │   └── base.py              # Abstract backend + retry + throttling
-│   ├── security/                # Encryption, DPAPI, secure memory
-│   ├── notifications/           # SMTP email with HTML reports
-│   └── ui/                      # Tkinter GUI (Sun Valley theme)
-│       ├── wizard.py            # Classic (3 steps) + Pro (11 steps) wizard
-│       ├── app.py               # Main window with sidebar (mode per profile)
-│       └── tabs/                # Tab implementations
-├── tests/                       # 1429 tests (unit + integration)
-├── CHANGELOG.md
-├── requirements.txt
-└── pyproject.toml
-```
-
-## Requirements
-
-| Requirement | Version |
-|---|---|
-| OS | Windows 10 / 11 |
-| Python | 3.11+ (dev only — end users install the MSI) |
-| cryptography | >= 43.0.0 |
-| paramiko | >= 3.0.0 |
-| boto3 | >= 1.35.0 |
-| Pillow | >= 10.0.0 |
-| pystray | >= 0.19.0 |
-| sv_ttk | >= 2.6.0 |
-
----
-
-**License** — [GPL v3.0](LICENSE) — © 2026 Loic Ader — [loicata.com](https://loicata.com)
-
-**Issues / PRs** — welcome. Open an issue first for anything significant.
+│   �

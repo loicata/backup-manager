@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 
 import pytest
 
 from src.core.run_history import (
+    _DETAIL_SAMPLE_CAP,
     _MAX_ENTRIES_PER_PROFILE,
+    _MAX_LINE_CHARS,
     RunHistoryStore,
     VerifyPromptStore,
 )
@@ -162,6 +163,50 @@ def test_isolation_between_profiles(store):
 
     assert store.load("alpha") == [{"msg": "A1"}, {"msg": "A2"}]
     assert store.load("beta") == [{"msg": "B1"}]
+
+
+class TestOversizedLineCapping:
+    """A single event must never persist as a multi-MB line.
+
+    Regression for the 2026-06-16 storm: the collector's 'Skipped N
+    file(s)' event embeds every skipped path; persisted once per retry
+    cycle it grew one profile's history to 722 MB and fed a load-time OOM.
+    """
+
+    def test_oversized_details_list_is_capped(self, store, tmp_path):
+        """A details list of 50k items is sampled down + an omitted-count
+        recorded; the persisted line stays under the ceiling."""
+        big = {"os_errors": [[f"C:/path/{i}", "WinError 3"] for i in range(50_000)]}
+        store.append("p", {"msg": "Skipped 50000 files", "details": big})
+
+        path = tmp_path / "run_history" / "p.jsonl"
+        line = path.read_text(encoding="utf-8").splitlines()[0]
+        assert len(line) <= _MAX_LINE_CHARS
+
+        [event] = store.load("p")
+        assert event["msg"] == "Skipped 50000 files"
+        assert len(event["details"]["os_errors"]) == _DETAIL_SAMPLE_CAP
+        assert event["details"]["os_errors_omitted"] == 50_000 - _DETAIL_SAMPLE_CAP
+
+    def test_normal_event_written_verbatim(self, store):
+        """An event under the ceiling is stored byte-for-byte unchanged."""
+        entry = {"msg": "small", "details": {"patterns": ["*.tmp", "*.log"]}}
+        store.append("p", entry)
+        assert store.load("p") == [entry]
+
+    def test_oversized_without_details_dict_drops_payload(self, store, tmp_path):
+        """A huge non-dict payload that can't be sample-capped falls back
+        to dropping ``details`` while keeping the human-readable message."""
+        store.append("p", {"msg": "weird", "details": "x" * (200 * 1024)})
+
+        path = tmp_path / "run_history" / "p.jsonl"
+        line = path.read_text(encoding="utf-8").splitlines()[0]
+        assert len(line) <= _MAX_LINE_CHARS
+
+        [event] = store.load("p")
+        assert event["msg"] == "weird"
+        assert event.get("details_dropped") is True
+        assert "details" not in event
 
 
 class TestRewrite:

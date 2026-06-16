@@ -168,7 +168,8 @@ class TestCancellation:
 
 
 class TestErrorPropagation:
-    """Vanished files are skipped (#9); genuine I/O errors still fail-fast."""
+    """Vanished files (#9) and unreadable files (2026-06-16) are both
+    skipped + recorded, never fatal."""
 
     def test_vanished_file_is_skipped_not_fatal(self, tmp_path: Path) -> None:
         """A file disappearing mid-build is skipped + recorded, not fatal —
@@ -183,16 +184,21 @@ class TestErrorPropagation:
         skipped = {e["path"] for e in manifest.get("skipped_files", [])}
         assert files[2].relative_path in skipped
 
-    def test_genuine_oserror_still_propagates(self, tmp_path: Path) -> None:
-        """A non-FileNotFoundError (locked file, disk error) must still
-        abort the manifest — only a vanished source is tolerated."""
+    def test_genuine_oserror_is_skipped_not_fatal(self, tmp_path: Path) -> None:
+        """A non-ENOENT OSError (locked file, [Errno 22] on a corrupt
+        forensic dump) is skipped + recorded, not fatal — one unreadable
+        file must never abort the whole backup (2026-06-16)."""
         files = _make_files(tmp_path, count=3)
         with patch(
             "src.core.phases.manifest.compute_sha256",
             side_effect=PermissionError("locked by antivirus"),
         ):
-            with pytest.raises(PermissionError):
-                build_integrity_manifest(files)
+            manifest = build_integrity_manifest(files)
+
+        assert manifest["files"] == {}
+        reasons = {e["reason"] for e in manifest.get("skipped_files", [])}
+        assert reasons == {"unreadable_before_hash"}
+        assert len(manifest["skipped_files"]) == 3
 
 
 # ---------------------------------------------------------------------------

@@ -82,6 +82,64 @@ def _make_ctx(**overrides) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
+# _phase_integrity — unreadable-source handling (2026-06-16)
+# ---------------------------------------------------------------------------
+
+
+class TestIntegrityPhaseDropsUnreadable:
+    """``_phase_integrity`` keeps ``ctx.files`` aligned with the manifest:
+    unreadable sources (recorded by ``build_integrity_manifest``) are
+    dropped so write / verify / mirror never re-open them; vanished
+    sources stay (the writers already tolerate + prune them)."""
+
+    @staticmethod
+    def _fi(rel: str):
+        from src.core.phases.collector import FileInfo
+
+        return FileInfo(
+            source_path=Path("C:/s") / rel,
+            relative_path=rel,
+            size=1,
+            mtime=0.0,
+            source_root="C:/s",
+        )
+
+    def _run(self, ctx_files, skipped_files):
+        engine = _bare_engine()
+        engine._phase = MagicMock()
+        engine._check_cancel = MagicMock()
+        ctx = _make_ctx()
+        ctx.files = ctx_files
+        ctx.filter_hashes = None
+        fake_manifest = {
+            "version": 1,
+            "files": {"good.txt": {"hash": "a" * 64, "size": 1}},
+            "total_checksum": "b" * 64,
+            "skipped_files": skipped_files,
+        }
+        with patch(
+            "src.core.backup_engine.build_integrity_manifest",
+            return_value=fake_manifest,
+        ):
+            engine._phase_integrity(ctx)
+        return ctx
+
+    def test_unreadable_files_dropped_from_ctx_files(self):
+        ctx = self._run(
+            [self._fi("good.txt"), self._fi("bad.txt")],
+            [{"path": "bad.txt", "reason": "unreadable_before_hash"}],
+        )
+        assert [f.relative_path for f in ctx.files] == ["good.txt"]
+
+    def test_vanished_files_kept_in_ctx_files(self):
+        ctx = self._run(
+            [self._fi("good.txt"), self._fi("gone.txt")],
+            [{"path": "gone.txt", "reason": "vanished_before_hash"}],
+        )
+        assert [f.relative_path for f in ctx.files] == ["good.txt", "gone.txt"]
+
+
+# ---------------------------------------------------------------------------
 # _try_delete (static helper)
 # ---------------------------------------------------------------------------
 

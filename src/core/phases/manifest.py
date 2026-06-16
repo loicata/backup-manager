@@ -97,6 +97,7 @@ def build_integrity_manifest(
     cache = cached_hashes or {}
     file_hashes: dict = {}
     vanished: list[str] = []
+    unreadable: list[str] = []
     total = len(files)
     cache_hits = 0
     completed = 0
@@ -158,14 +159,32 @@ def build_integrity_manifest(
                     # skipped rather than aborting the whole backup. It is
                     # recorded under ``skipped_files`` so the loss is
                     # surfaced, never hidden behind a recomputed checksum.
-                    # Other errors (locked file, permission, network) still
-                    # propagate — those are not "the file is simply gone".
                     try:
                         file_hash = fut.result()
                     except FileNotFoundError:
                         vanished.append(file_info.relative_path)
                         logger.warning(
                             "Source file vanished before hashing, skipping: %s",
+                            file_info.relative_path,
+                        )
+                        completed += 1
+                        continue
+                    except OSError as exc:
+                        # A file that EXISTS but cannot be read — permission
+                        # denied, [Errno 22] on a corrupt forensic dump, a
+                        # share that dropped mid-read. Before 2026-06-16 any
+                        # such OSError propagated, so ONE unreadable file
+                        # among millions aborted the whole backup and the
+                        # scheduler + crash-recovery retried it forever (the
+                        # Loic15062026 storm: 1773 unreadable files inside a
+                        # Raspberry-Pi SD-card forensic image). It is now
+                        # skipped and RECORDED under ``skipped_files`` so the
+                        # loss is surfaced (warning + UI), never silent.
+                        unreadable.append(file_info.relative_path)
+                        logger.warning(
+                            "Source file unreadable (errno=%s: %s), skipping: %s",
+                            exc.errno,
+                            exc.strerror,
                             file_info.relative_path,
                         )
                         completed += 1
@@ -205,15 +224,21 @@ def build_integrity_manifest(
     # exchanged without changing the global checksum.
     # Including the path (and size as a second witness) defeats
     # that swap attack.
-    skipped_files = (
-        [{"path": p, "reason": "vanished_before_hash"} for p in vanished] if vanished else None
-    )
+    skipped_entries: list[dict] = []
+    skipped_entries += [{"path": p, "reason": "vanished_before_hash"} for p in vanished]
+    skipped_entries += [{"path": p, "reason": "unreadable_before_hash"} for p in unreadable]
+    skipped_files = skipped_entries or None
     total_checksum = _compute_total_checksum(file_hashes, skipped_files=skipped_files)
 
     if vanished:
         phase_log.warning(
             f"Manifest: {len(vanished)} source file(s) vanished before hashing "
             f"and were excluded from the backup"
+        )
+    if unreadable:
+        phase_log.warning(
+            f"Manifest: {len(unreadable)} source file(s) could not be read "
+            f"(I/O error) and were excluded from the backup"
         )
     phase_log.info(
         f"Manifest created: {len(file_hashes)} files, checksum: {total_checksum[:16]}..."

@@ -1177,6 +1177,22 @@ class BackupEngine:
             for rel_path, info in ctx.integrity_manifest.get("files", {}).items()
         }
 
+        # Files that exist but could not be read were skipped by the
+        # manifest (errno != ENOENT) and recorded under skipped_files.
+        # Drop them from ctx.files so the write / verify / mirror phases
+        # never re-open them — the manifest is the single place that hashes
+        # every source, so detect once here and keep ctx.files aligned with
+        # manifest['files']. Vanished files stay in ctx.files: the writers
+        # already tolerate FileNotFoundError and prune them, so that flow
+        # is left untouched.
+        unreadable_paths = {
+            entry["path"]
+            for entry in ctx.integrity_manifest.get("skipped_files", [])
+            if entry.get("reason") == "unreadable_before_hash"
+        }
+        if unreadable_paths:
+            ctx.files = [f for f in ctx.files if f.relative_path not in unreadable_paths]
+
     def _phase_write(self, ctx: PipelineContext) -> None:
         """Phase 4: Write backup to primary destination."""
         target = self._describe_target(ctx.profile.storage)
@@ -1188,11 +1204,12 @@ class BackupEngine:
         self._record_skipped_files(ctx)
 
     def _record_skipped_files(self, ctx: PipelineContext) -> None:
-        """Surface files that vanished during the run as result warnings.
+        """Surface files skipped during the run (vanished or unreadable) as warnings.
 
         ``build_integrity_manifest`` (pre-hash) and the writers (mid-copy)
-        record vanished source files under ``ctx.integrity_manifest
-        ['skipped_files']``. Without surfacing them the run would report a
+        record skipped source files — vanished (ENOENT) or unreadable
+        (other OSError) — under ``ctx.integrity_manifest['skipped_files']``.
+        Without surfacing them the run would report a
         plain green success while silently having backed up fewer files
         than collected. Each becomes a WARNING (not an error — the run
         still succeeds), and ``files_processed`` is corrected to the count
@@ -1203,18 +1220,21 @@ class BackupEngine:
             return
         for entry in skipped:
             path = entry.get("path", "")
-            ctx.result.add_warning(
-                phase="write",
-                file_path=path,
-                message=(
+            if entry.get("reason") == "unreadable_before_hash":
+                message = (
+                    f"Source file could not be read (I/O error) and was "
+                    f"excluded from this backup: {path}"
+                )
+            else:
+                message = (
                     f"Source file vanished during backup and was excluded "
                     f"from this backup: {path}"
-                ),
-            )
+                )
+            ctx.result.add_warning(phase="write", file_path=path, message=message)
         ctx.result.files_processed = len(ctx.integrity_manifest.get("files", {}))
         self._log(
-            f"{len(skipped)} file(s) vanished during backup and were skipped "
-            f"(backup still completed; see warnings)"
+            f"{len(skipped)} file(s) were skipped (vanished or unreadable) "
+            f"during backup (backup still completed; see warnings)"
         )
 
     def _phase_save_manifest(self, ctx: PipelineContext) -> None:

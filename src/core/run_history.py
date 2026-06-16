@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 # the file itself is not rewritten so append stays O(1).
 _MAX_ENTRIES_PER_PROFILE = 50_000
 
+# Hard ceiling on a single persisted line. Normal events are well under
+# 1 KB; the collector's "Skipped N file(s)" event embeds every skipped
+# path and can reach tens of MB. Persisted once per retry/crash-recovery
+# cycle, that blob bloated one profile's history to 722 MB (2026-06-16)
+# and fed a load-time OOM. Oversized events are summarised before write
+# so a pathological payload can never blow up the file (or the loader).
+_MAX_LINE_CHARS = 64 * 1024
+# When summarising, keep at most this many sample items per detail list.
+_DETAIL_SAMPLE_CAP = 20
+
 
 class RunHistoryStore:
     """Append-only JSONL history of log events per profile.
@@ -79,6 +89,8 @@ class RunHistoryStore:
                 exc,
             )
             return
+        if len(line) > _MAX_LINE_CHARS:
+            line = self._shrink_oversized(entry)
         path = self._path_for(profile_id)
         with self._lock:
             try:
@@ -91,6 +103,45 @@ class RunHistoryStore:
                     profile_id,
                     exc,
                 )
+
+    @staticmethod
+    def _shrink_oversized(entry: dict) -> str:
+        """Serialise an oversized event with its detail lists capped.
+
+        The collector's skip summary carries one item per skipped path;
+        persisting tens of thousands verbatim is what bloated the history
+        file. For the Run-tab a capped sample plus an omitted-count is just
+        as useful. Falls back to dropping ``details`` entirely if capping
+        still leaves the line over the ceiling (pathologically long paths).
+
+        Args:
+            entry: The event whose serialised form exceeded the ceiling.
+
+        Returns:
+            A JSON line guaranteed small in the normal case (oversized
+            ``details`` lists), best-effort otherwise.
+        """
+        details = entry.get("details")
+        capped_entry = dict(entry)
+        if isinstance(details, dict):
+            capped: dict = {}
+            for key, value in details.items():
+                if isinstance(value, list) and len(value) > _DETAIL_SAMPLE_CAP:
+                    capped[key] = value[:_DETAIL_SAMPLE_CAP]
+                    capped[f"{key}_omitted"] = len(value) - _DETAIL_SAMPLE_CAP
+                else:
+                    capped[key] = value
+            capped_entry["details"] = capped
+
+        line = json.dumps(capped_entry, ensure_ascii=False, separators=(",", ":"))
+        if len(line) <= _MAX_LINE_CHARS:
+            return line
+
+        # Capping was not enough (e.g. very long individual paths): drop
+        # the structured payload entirely but keep the human-readable msg.
+        minimal = {k: v for k, v in entry.items() if k != "details"}
+        minimal["details_dropped"] = True
+        return json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
 
     def load(self, profile_id: str) -> list[dict]:
         """Return all stored events for a profile, oldest first.

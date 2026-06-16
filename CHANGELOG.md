@@ -5,6 +5,32 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.55] - 2026-06-16
+
+Fix for a backup crash-loop: a single unreadable source file (e.g. a corrupt forensic dump on a
+failing disk) aborted the entire backup, which the scheduler then retried 5×/day and crash-recovery
+relaunched on every restart — an infinite storm that also bloated the run history to hundreds of MB
+and drove memory use into the gigabytes.
+
+### Fixed — reliability
+- **An unreadable source file no longer aborts the whole backup.** ``build_integrity_manifest``
+  caught only ``FileNotFoundError`` (a vanished file); any other ``OSError`` — permission denied,
+  ``[Errno 22]`` on a corrupt/forensic file, a share dropping mid-read — propagated and killed the
+  run, which the scheduler then retried forever. Such files are now skipped and recorded under
+  ``skipped_files`` (reason ``unreadable_before_hash``), surfaced as a per-file warning plus a count
+  in the Run log — never hidden behind a recomputed checksum. This aligns the manifest with the
+  filter phase, which already tolerated these errors.
+- The write, verify and mirror phases no longer re-open those files: ``_phase_integrity`` drops the
+  unreadable paths from the working set once the manifest has identified them. Vanished files keep
+  their existing behaviour (the writers tolerate and prune them).
+
+### Fixed — run history
+- **A single oversized log event can no longer bloat the per-profile history file.** The collector's
+  "Skipped N file(s)" event embeds every skipped path and could reach tens of MB; written once per
+  retry/crash-recovery cycle it grew one profile's JSONL to 722 MB and fed a load-time memory spike.
+  Each persisted line is now capped — oversized ``details`` lists are sampled with an omitted-count,
+  or dropped entirely — so the file stays bounded regardless of payload size.
+
 ## [3.7.54] - 2026-06-11
 
 Post-audit coherence review of the 3.7.49→3.7.53 fix marathon, cross-checked against the

@@ -274,6 +274,65 @@ class TestTarStreamUpload:
         finally:
             _cleanup_paramiko()
 
+    def test_tar_stream_skips_unreadable_source(self, tmp_path, monkeypatch):
+        """A source whose ``open()`` fails (e.g. mid-backup bad-block I/O)
+        must be RECORDED in ``skipped_out`` and OMITTED from the tar, not
+        abort the whole stream — the 2026-06-16 storm killed a 1h28 upload
+        on one such file. Symmetric to the v3.7.55 manifest fix."""
+        _setup_mock_paramiko()
+        try:
+            storage = _make_storage()
+            storage._exec_available = True
+
+            mock_transport = MagicMock()
+            mock_transport.is_active.return_value = True
+            storage._persistent_transport = mock_transport
+
+            sent_data = bytearray()
+            mock_channel = MagicMock()
+            mock_channel.recv_exit_status.return_value = 0
+
+            def capture_sendall(data):
+                sent_data.extend(data)
+
+            mock_channel.sendall.side_effect = capture_sendall
+            mock_transport.open_session.return_value = mock_channel
+
+            good = tmp_path / "good.txt"
+            bad = tmp_path / "bad.txt"
+            good.write_text("alpha", encoding="utf-8")
+            bad.write_text("beta", encoding="utf-8")
+            files = [
+                (good, "good.txt", good.stat().st_size),
+                (bad, "bad.txt", bad.stat().st_size),
+            ]
+
+            # open() raises errno-22 on bad.txt — mirrors a file readable
+            # at manifest time but unreadable at tar-stream time.
+            real_open = open
+
+            def selective_open(path, *args, **kwargs):
+                if "bad.txt" in str(path):
+                    raise OSError(22, "Invalid argument")
+                return real_open(path, *args, **kwargs)
+
+            monkeypatch.setattr("builtins.open", selective_open)
+
+            skipped: set[str] = set()
+            storage.upload_tar_stream(files, "backup_2026", skipped_out=skipped)
+
+            monkeypatch.setattr("builtins.open", real_open)
+            assert skipped == {"bad.txt"}, f"bad.txt must be in skipped_out, got {skipped}"
+
+            # The tar stream still went through — good.txt is in it, bad.txt is NOT.
+            tar_io = io.BytesIO(bytes(sent_data))
+            with tarfile.open(fileobj=tar_io, mode="r|") as tar:
+                names = [m.name for m in tar]
+            assert "good.txt" in names
+            assert "bad.txt" not in names
+        finally:
+            _cleanup_paramiko()
+
     def test_tar_stream_preserves_persistent_transport(self, tmp_path):
         """When using a persistent transport, upload_tar_stream must NOT close it."""
         _setup_mock_paramiko()

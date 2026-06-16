@@ -4,8 +4,9 @@ Verifies plain/encrypted uploads, fail-fast on errors, temp file cleanup,
 progress callbacks, and edge cases.
 """
 
+import builtins
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -150,6 +151,112 @@ def test_network_timeout_raises_write_error(tmp_path):
     assert isinstance(exc_info.value.original, TimeoutError)
     # Only first file attempted before failure
     assert backend.upload_file.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-16 fix: a source that becomes unreadable between manifest and write
+# must be SKIPPED + RECORDED in the manifest's skipped_files, not abort the
+# whole upload. The original storm killed a 1h28 SFTP upload on one such file.
+# ---------------------------------------------------------------------------
+
+
+def _selective_unreadable_open(target_name: str):
+    """Build a builtins.open side_effect that raises OSError on one file."""
+    real_open = builtins.open
+
+    def _side(path, *args, **kwargs):
+        if isinstance(path, str | Path) and target_name in str(path):
+            raise OSError(22, "Invalid argument")
+        return real_open(path, *args, **kwargs)
+
+    return _side
+
+
+def _make_manifest(files):
+    return {
+        "version": 1,
+        "algorithm": "sha256",
+        "files": {f.relative_path: {"hash": "a" * 64, "size": f.size} for f in files},
+        "total_checksum": "x" * 64,
+    }
+
+
+class TestEncryptedTarUnreadableSource:
+    """The encrypted-remote tar writer must tolerate a single source that
+    becomes unreadable between manifest hash and write (forensic-dump
+    bad-blocks class, the 2026-06-16 storm)."""
+
+    def test_one_unreadable_source_skipped_in_encrypted_tar(self, tmp_path):
+        files = _make_files(tmp_path, count=3)
+        backend = MagicMock()
+        backend.upload_file.side_effect = _drain_upload
+        manifest = _make_manifest(files)
+        target = files[1].source_path.name
+
+        with patch("builtins.open", side_effect=_selective_unreadable_open(target)):
+            write_remote(
+                files,
+                backend,
+                "backup_01",
+                encrypt_password="password12345678",
+                integrity_manifest=manifest,
+            )
+
+        backend.upload_file.assert_called_once()
+        assert files[1].relative_path not in manifest["files"]
+        skipped_paths = {e["path"] for e in manifest.get("skipped_files", [])}
+        assert files[1].relative_path in skipped_paths
+        assert manifest["total_checksum"]  # recomputed
+
+
+class TestUploadTarBatchPlumbing:
+    """``_upload_tar_batch`` must pass a ``skipped_out`` set to
+    ``backend.upload_tar_stream`` and prune the integrity manifest with
+    whatever the SFTP writer reported as skipped."""
+
+    def test_plumbs_skipped_set_and_prunes(self, tmp_path):
+        files = _make_files(tmp_path, count=3)
+        backend = MagicMock()
+        backend.supports_tar_stream = True  # MagicMock attr != True without this
+        backend.is_remote = MagicMock(return_value=True)
+
+        def fake_upload(
+            files,
+            remote_dir,
+            progress_callback=None,
+            cancel_check=None,
+            skipped_out=None,
+        ):
+            assert skipped_out is not None, "must receive a skipped_out set"
+            skipped_out.add(files[1][1])  # rel_path of the middle file
+
+        backend.upload_tar_stream.side_effect = fake_upload
+
+        manifest = _make_manifest(files)
+        write_remote(files, backend, "backup_01", integrity_manifest=manifest)
+
+        backend.upload_tar_stream.assert_called_once()
+        assert files[1].relative_path not in manifest["files"]
+        skipped_paths = {e["path"] for e in manifest.get("skipped_files", [])}
+        assert files[1].relative_path in skipped_paths
+
+    def test_no_skipped_leaves_manifest_unchanged(self, tmp_path):
+        """When the writer reports no skipped files, the manifest is intact."""
+        files = _make_files(tmp_path, count=3)
+        backend = MagicMock()
+        backend.supports_tar_stream = True
+        backend.is_remote = MagicMock(return_value=True)
+        backend.upload_tar_stream.side_effect = (
+            lambda files, remote_dir, progress_callback=None, cancel_check=None, skipped_out=None: None
+        )
+
+        manifest = _make_manifest(files)
+        original = {k: dict(v) for k, v in manifest["files"].items()}
+
+        write_remote(files, backend, "backup_01", integrity_manifest=manifest)
+
+        assert manifest["files"] == original
+        assert "skipped_files" not in manifest
 
 
 def test_disconnect_called_even_on_failure(tmp_path):

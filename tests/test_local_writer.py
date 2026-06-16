@@ -731,6 +731,124 @@ class TestVanishingFileManifestSync:
 
 
 # ---------------------------------------------------------------------------
+# 2026-06-16 fix: a source unreadable AT WRITE TIME (open() OSError) is
+# skipped — not just vanished (ENOENT) ones. The 2026-06-16 storm: one
+# unreadable forensic-dump file aborted a 1h28 SFTP upload.
+# ---------------------------------------------------------------------------
+
+
+class TestUnreadableSourceSkippedAtWrite:
+    """The encrypted writer must skip a source whose ``open()`` fails with
+    any ``OSError`` (not just ENOENT), the same way the v3.7.55 manifest
+    fix does for the hash phase. Symmetry between the two phases keeps a
+    single bad file from killing the whole backup."""
+
+    def test_unreadable_source_not_in_embedded_manifest(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """File with valid getsize but failing open() is skipped."""
+        from src.security.encryption import DecryptingReader
+
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        f1 = src_dir / "a.txt"
+        f2 = src_dir / "bad.txt"
+        f1.write_text("aaa", encoding="utf-8")
+        f2.write_text("bbb", encoding="utf-8")
+
+        files = [
+            _make_file_info(f1, "a.txt"),
+            _make_file_info(f2, "bad.txt"),
+        ]
+
+        # Both files exist (getsize succeeds), but open() on bad.txt
+        # raises [Errno 22] — the forensic-dump bad-block pattern.
+        real_open = open
+
+        def selective_open(path, *args, **kwargs):
+            if "bad.txt" in str(path):
+                raise OSError(22, "Invalid argument")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", selective_open)
+
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        archive = write_encrypted_tar(
+            files=files,
+            destination=dest,
+            backup_name="Prof_FULL_2026-06-16_180000",
+            password="pw",
+        )
+
+        # Backup completed — open() failure on bad.txt did NOT raise.
+        # Restore real open so we can read the archive back.
+        monkeypatch.setattr("builtins.open", real_open)
+
+        with open(archive, "rb") as f:
+            reader = DecryptingReader(f, "pw")
+            with tarfile.open(fileobj=reader, mode="r|") as tar:
+                names = []
+                embedded = None
+                for member in tar:
+                    names.append(member.name)
+                    if member.name == ".wbverify":
+                        embedded = json.loads(tar.extractfile(member).read())
+
+        assert "a.txt" in names, "good file must be in archive"
+        assert "bad.txt" not in names, "unreadable file must NOT be in archive"
+        assert embedded is not None and "a.txt" in embedded["files"]
+        assert "bad.txt" not in embedded["files"]
+
+    def test_unreadable_source_in_skipped_set_for_remote_pipe(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The lower-level ``_build_encrypted_tar`` records the skipped path
+        in the ``skipped`` set used for ``prune_manifest_entries``."""
+        import io
+
+        from src.core.phases.remote_writer import _build_encrypted_tar
+
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        f1 = src_dir / "ok.txt"
+        f2 = src_dir / "bad.txt"
+        f1.write_text("x", encoding="utf-8")
+        f2.write_text("y", encoding="utf-8")
+        files = [_make_file_info(f1, "ok.txt"), _make_file_info(f2, "bad.txt")]
+
+        real_open = open
+
+        def selective_open(path, *args, **kwargs):
+            if "bad.txt" in str(path):
+                raise PermissionError("locked")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", selective_open)
+
+        manifest = {
+            "version": 1,
+            "files": {
+                "ok.txt": {"hash": "a" * 64, "size": 1},
+                "bad.txt": {"hash": "b" * 64, "size": 1},
+            },
+            "total_checksum": "x" * 64,
+        }
+
+        from src.core.events import EventBus
+        from src.core.phase_logger import PhaseLogger
+
+        phase_log = PhaseLogger("remote_writer", EventBus())
+        buf = io.BytesIO()
+        _build_encrypted_tar(buf, files, "pw", phase_log, None, manifest)
+
+        # Manifest was pruned by _build_encrypted_tar via prune_manifest_entries.
+        assert "bad.txt" not in manifest["files"]
+        skipped_paths = {e["path"] for e in manifest.get("skipped_files", [])}
+        assert "bad.txt" in skipped_paths
+
+
+# ---------------------------------------------------------------------------
 # generate_backup_name
 # ---------------------------------------------------------------------------
 

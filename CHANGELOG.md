@@ -5,6 +5,28 @@ All notable changes to Backup Manager are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.56] - 2026-06-16
+
+Same-day follow-up to 3.7.55, which fixed only the manifest phase. The first runtime test of
+3.7.55 surfaced an identical bug in **three other write paths**: the tar streamer killed a 2h13
+SFTP backup after the manifest had skipped 1 951 unreadable files cleanly, because one of the
+files the manifest accepted became unreadable later (bad-blocks-shifting) and the tar writer
+had no equivalent tolerance.
+
+### Fixed — reliability
+- **The tar-stream writers now skip unreadable source files instead of aborting the upload.** The
+  v3.7.55 manifest fix was applied symmetrically to the three remaining unguarded sites:
+  ``remote_writer._build_encrypted_tar`` (encrypted SFTP/S3 tar), ``local_writer.write_encrypted_tar``
+  (encrypted local tar), and ``SFTPStorage.upload_tar_stream`` (plain SFTP tar, both the classic and
+  helper paths). A source file whose ``open()`` raises any ``OSError`` is now logged, recorded under
+  ``skipped_files``, and dropped from the tar stream; the run continues. Files that vanish mid-read
+  (after ``tar.addfile()`` has written the entry header) still abort — once the tar stream is in an
+  entry, skipping would leave a corrupt archive — but that case is much rarer than ``open()``-time
+  failures.
+- ``_upload_tar_batch`` now receives the integrity manifest and prunes it against the skipped set
+  the SFTP writer reports, so the ``.wbverify`` sidecar saved next phase matches what actually
+  landed on the remote — verify can no longer flag the skipped files as "missing" forever.
+
 ## [3.7.55] - 2026-06-16
 
 Fix for a backup crash-loop: a single unreadable source file (e.g. a corrupt forensic dump on a

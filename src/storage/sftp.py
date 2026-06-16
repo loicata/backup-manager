@@ -600,6 +600,7 @@ class SFTPStorage(StorageBackend):
         remote_dir: str,
         progress_callback=None,
         cancel_check=None,
+        skipped_out: set[str] | None = None,
     ) -> None:
         """Upload multiple files as a single tar stream via exec channel.
 
@@ -625,6 +626,12 @@ class SFTPStorage(StorageBackend):
             remote_dir: Remote directory where files are extracted.
             progress_callback: Optional callable(bytes_sent, total_bytes).
             cancel_check: Optional callable that raises CancelledError.
+            skipped_out: Optional set; relative paths of source files that
+                could not be opened are added here (the caller is then
+                responsible for pruning the integrity manifest). Files
+                readable at manifest time can become unreadable later
+                (bad blocks shifting, AV mid-scan, transient I/O); the
+                2026-06-16 storm killed a 1h28 upload on one such file.
 
         Raises:
             OSError: If the remote tar extraction fails.
@@ -654,6 +661,7 @@ class SFTPStorage(StorageBackend):
                         helper_remote,
                         progress_callback,
                         cancel_check,
+                        skipped_out,
                     )
                     return
                 except _HelperEarlyFailure as e:
@@ -683,9 +691,26 @@ class SFTPStorage(StorageBackend):
                     for local_path, rel_path, size in files:
                         if cancel_check is not None:
                             cancel_check()
+                        # Catch open() BEFORE tar.addfile() writes the
+                        # 512-byte header. See ``skipped_out`` in the
+                        # public docstring and ``remote_writer
+                        # ._build_encrypted_tar`` for the full rationale.
+                        try:
+                            fobj = open(local_path, "rb")  # noqa: SIM115 — see comment above
+                        except OSError as exc:
+                            logger.warning(
+                                "Source unreadable during tar write "
+                                "(errno=%s: %s), skipping: %s",
+                                exc.errno,
+                                exc.strerror,
+                                rel_path,
+                            )
+                            if skipped_out is not None:
+                                skipped_out.add(rel_path)
+                            continue
                         info = tarfile.TarInfo(name=rel_path)
                         info.size = size
-                        with open(local_path, "rb") as f:
+                        with fobj as f:
                             tar.addfile(info, fileobj=f)
 
                 # Flush remaining buffered data before closing channel
@@ -711,6 +736,7 @@ class SFTPStorage(StorageBackend):
         helper_remote: str,
         progress_callback,
         cancel_check,
+        skipped_out: set[str] | None = None,
     ) -> None:
         """Upload via the v3.6 helper, capturing the hash sidecar inline.
 
@@ -811,9 +837,25 @@ class SFTPStorage(StorageBackend):
                     for local_path, rel_path, size in files:
                         if cancel_check is not None:
                             cancel_check()
+                        # See the classic ``upload_tar_stream`` path for the
+                        # rationale: catch only at open() so the tar stream
+                        # stays consistent if a source becomes unreadable.
+                        try:
+                            fobj = open(local_path, "rb")  # noqa: SIM115 — see comment above
+                        except OSError as exc:
+                            logger.warning(
+                                "Source unreadable during tar write "
+                                "(errno=%s: %s), skipping: %s",
+                                exc.errno,
+                                exc.strerror,
+                                rel_path,
+                            )
+                            if skipped_out is not None:
+                                skipped_out.add(rel_path)
+                            continue
                         info = tarfile.TarInfo(name=rel_path)
                         info.size = size
-                        with open(local_path, "rb") as f:
+                        with fobj as f:
                             tar.addfile(info, fileobj=f)
                 writer.flush()
                 channel.shutdown_write()

@@ -318,15 +318,32 @@ def write_encrypted_tar_with_hashes(
                     src_path = long_path_str(file_info.source_path)
                     try:
                         actual_size = os.path.getsize(src_path)
-                    except OSError:
+                    except OSError as exc:
                         logger.warning(
-                            "File vanished, skipping: %s",
+                            "File vanished or unreadable before tar write "
+                            "(errno=%s: %s), skipping: %s",
+                            exc.errno,
+                            exc.strerror,
                             file_info.relative_path,
                         )
                         continue
                     info = tarfile.TarInfo(name=file_info.relative_path)
                     info.size = actual_size
-                    with open(src_path, "rb") as f:
+                    # See remote_writer._build_encrypted_tar for the rationale:
+                    # catch open() BEFORE tar.addfile() writes the header. A
+                    # mid-read failure (already inside addfile) still aborts.
+                    try:
+                        fobj = open(src_path, "rb")  # noqa: SIM115 — see comment above
+                    except OSError as exc:
+                        logger.warning(
+                            "Source unreadable during tar write (errno=%s: %s), "
+                            "skipping: %s",
+                            exc.errno,
+                            exc.strerror,
+                            file_info.relative_path,
+                        )
+                        continue
+                    with fobj as f:
                         wrapper = _HashingFileWrapper(f)
                         tar.addfile(info, fileobj=wrapper)
                     file_hashes[file_info.relative_path] = wrapper.hexdigest()

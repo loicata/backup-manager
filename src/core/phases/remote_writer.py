@@ -120,6 +120,7 @@ def write_remote(
                 backup_name,
                 phase_log,
                 cancel_check,
+                integrity_manifest,
             )
         else:
             _upload_file_by_file(
@@ -224,13 +225,42 @@ def _build_encrypted_tar(
             src_path = long_path_str(file_info.source_path)
             try:
                 actual_size = os.path.getsize(src_path)
-            except OSError:
-                logger.warning("File vanished, skipping: %s", file_info.relative_path)
+            except OSError as exc:
+                logger.warning(
+                    "File vanished or unreadable before tar write "
+                    "(errno=%s: %s), skipping: %s",
+                    exc.errno,
+                    exc.strerror,
+                    file_info.relative_path,
+                )
                 skipped.add(file_info.relative_path)
                 continue
             info = tarfile.TarInfo(name=file_info.relative_path)
             info.size = actual_size
-            with open(src_path, "rb") as f:
+            # Catch open() BEFORE tar.addfile() writes the header. A source
+            # readable at manifest time can become unreadable later (bad
+            # blocks shifting on the C: NTFS copy of F: forensic data, AV
+            # mid-scan, transient I/O) — the 2026-06-16 storm killed an
+            # otherwise-good 1h28 SFTP upload on one such file. tarfile's
+            # addfile writes the 512-byte header BEFORE reading any bytes,
+            # so once we're inside addfile we cannot skip without leaving a
+            # half-written entry in the tar stream — catch only at open(),
+            # mid-read failures still abort (much rarer than open failures).
+            # ``with open()`` would catch BOTH cases as one, breaking the
+            # distinction; hence the bare open() + later ``with fobj``.
+            try:
+                fobj = open(src_path, "rb")  # noqa: SIM115 — see comment above
+            except OSError as exc:
+                logger.warning(
+                    "Source unreadable during tar write (errno=%s: %s), "
+                    "skipping: %s",
+                    exc.errno,
+                    exc.strerror,
+                    file_info.relative_path,
+                )
+                skipped.add(file_info.relative_path)
+                continue
+            with fobj as f:
                 tar.addfile(info, fileobj=f)
             bytes_written += actual_size
             phase_log.progress(
@@ -408,6 +438,7 @@ def _upload_tar_batch(
     backup_name: str,
     phase_log: PhaseLogger,
     cancel_check: Callable[[], None] | None = None,
+    integrity_manifest: dict | None = None,
 ) -> None:
     """Upload all files as a single unencrypted tar stream.
 
@@ -417,6 +448,10 @@ def _upload_tar_batch(
         backup_name: Remote directory name.
         phase_log: Phase logger for progress events.
         cancel_check: Optional callable that raises CancelledError.
+        integrity_manifest: Optional manifest dict. When provided, source
+            files that became unreadable between manifest build and tar
+            write are pruned from it after the upload (the writer skips
+            them rather than aborting the whole stream).
     """
     total_bytes = sum(f.size for f in files)
     progress_total = max(total_bytes, 1)
@@ -430,6 +465,7 @@ def _upload_tar_batch(
         )
 
     tar_files = [(f.source_path, f.relative_path, f.size) for f in files]
+    skipped: set[str] = set()
 
     try:
         backend.upload_tar_stream(
@@ -437,9 +473,20 @@ def _upload_tar_batch(
             backup_name,
             progress_callback=_on_progress,
             cancel_check=cancel_check,
+            skipped_out=skipped,
         )
     except Exception as e:
         raise WriteError("tar-stream", e) from e
+
+    # Keep the integrity manifest consistent with the tar that actually
+    # landed on the remote: drop entries for files the writer skipped,
+    # otherwise the .wbverify sidecar saved next phase would list files
+    # missing from the backup and verify would report them as missing
+    # forever.
+    if integrity_manifest is not None and skipped:
+        from src.core.phases.manifest import prune_manifest_entries
+
+        prune_manifest_entries(integrity_manifest, skipped)
 
     phase_log.progress(
         current=progress_total,

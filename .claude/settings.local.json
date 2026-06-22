@@ -1,17 +1,4 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash .claude/guard_destructive.sh"
-          }
-        ]
-      }
-    ]
-  },
   "permissions": {
     "allow": [
       "Bash(ls -1 tests/test_*.py)",
@@ -216,7 +203,79 @@
       "Bash(python -m scripts.s3_bandwidth_bench)",
       "Bash(python -m scripts.s3_bandwidth_bench --yes)",
       "Bash(python -m black src/ui/wizard.py)",
-      "Bash(chmod +x \"F:/Documents/loicata/BackupManager/Backup Manager v3/.claude/guard_destructive.sh\")"
+      "Bash(chmod +x \"F:/Documents/loicata/BackupManager/Backup Manager v3/.claude/guard_destructive.sh\")",
+      "Bash(dir /s /b *recovery*)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "WebFetch(domain:github.com)",
+      "mcp__Claude_in_Chrome__navigate",
+      "mcp__Claude_in_Chrome__computer",
+      "mcp__Claude_in_Chrome__find",
+      "mcp__Claude_in_Chrome__get_page_text",
+      "mcp__Claude_in_Chrome__javascript_tool",
+      "mcp__Claude_in_Chrome__tabs_create_mcp",
+      "Bash(ls -la /c/Users/loica/Downloads/products-current*)",
+      "Bash(base64 -w0 \"/c/Users/loica/Downloads/products-new.html\")",
+      "WebFetch(domain:www.loicata.com)",
+      "Bash(python -c ' *)",
+      "PowerShell(Write-Output \"=== Defender exclusion paths ===\"; try { \\(Get-MpPreference -ErrorAction Stop\\).ExclusionPath } catch { \"ERROR: $\\($_.Exception.Message\\)\" }; Write-Output \"\"; Write-Output \"=== Targeted check ===\"; try { $excl = \\(Get-MpPreference -ErrorAction Stop\\).ExclusionPath; if \\($excl -contains \"C:\\\\Program Files \\(x86\\)\\\\Backup Manager\"\\) { \"OK — exclusion ACTIVE\" } else { \"MISSING — Add-MpPreference n'a pas pris \\(PowerShell non admin ?\\)\" } } catch { \"ERROR: $\\($_.Exception.Message\\)\" })",
+      "PowerShell($cmd = '$ErrorActionPreference=\"Stop\"; try { $excl = \\(Get-MpPreference\\).ExclusionPath; $hit = $excl -contains \"C:\\\\Program Files \\(x86\\)\\\\Backup Manager\"; \"ExclusionCount=$\\($excl.Count\\)\"; \"BackupManagerExcluded=$hit\"; \"AllExclusions:\"; $excl | ForEach-Object { \"  $_\" } } catch { \"ERROR: $\\($_.Exception.Message\\)\" } | Out-File -FilePath \"$env:TEMP\\\\defender_check.txt\" -Encoding utf8'; Start-Process -FilePath powershell -ArgumentList \"-NoProfile\",\"-Command\",$cmd -Verb RunAs -Wait; Write-Output \"=== Result ===\"; Get-Content \"$env:TEMP\\\\defender_check.txt\" -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Process -Name BackupManager -ErrorAction SilentlyContinue | Select-Object Id, Responding, @{n='CPU_s';e={[math]::Round\\($_.CPU,1\\)}}, @{n='RAM_MB';e={[math]::Round\\($_.WS/1MB,0\\)}}, @{n='Threads';e={$_.Threads.Count}} | Format-Table -AutoSize; Write-Output \"=== Disk F: speed \\(over 1s\\) ===\"; Get-Counter '\\\\PhysicalDisk\\(1 f:\\)\\\\Disk Read Bytes/sec','\\\\PhysicalDisk\\(1 f:\\)\\\\Disk Write Bytes/sec' -SampleInterval 1 -MaxSamples 1 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty CounterSamples | Select-Object Path, @{n='MBps';e={[math]::Round\\($_.CookedValue/1MB,2\\)}} | Format-Table -AutoSize)",
+      "PowerShell($key = 'HKCU:\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run'; try { \\(Get-ItemProperty -Path $key -Name 'BackupManager' -ErrorAction Stop\\).BackupManager } catch { 'NOT SET' })",
+      "PowerShell($py = \\(where.exe py 2>$null | Select-Object -First 1\\); if \\(-not $py\\) { $py = \\(where.exe python 2>$null | Select-Object -First 1\\) }; if \\(-not $py\\) { 'No python found' } else { & $py -c \"import winreg; key=winreg.OpenKey\\(winreg.HKEY_CURRENT_USER, r'Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run', 0, winreg.KEY_READ\\); v=winreg.QueryValueEx\\(key, 'BackupManager'\\); print\\('VALUE:', v\\); winreg.CloseKey\\(key\\)\" 2>&1 })",
+      "PowerShell(try { gh auth status 2>&1 | Out-String; \"---\"; gh release list --repo loicata/backup-manager --limit 20 2>&1 | Out-String } catch { \"gh CLI not available: $_\" })",
+      "PowerShell($paths = @\\(\"$env:LOCALAPPDATA\\\\Programs\\\\GitHub CLI\\\\gh.exe\", \"$env:ProgramFiles\\\\GitHub CLI\\\\gh.exe\", \"${env:ProgramFiles\\(x86\\)}\\\\GitHub CLI\\\\gh.exe\"\\); $found = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1; if \\($found\\) { \"FOUND: $found\" } else { \"gh.exe not found in standard install paths\" }; \"---\"; \"GH_TOKEN set: $\\([bool]$env:GH_TOKEN\\)\"; \"GITHUB_TOKEN set: $\\([bool]$env:GITHUB_TOKEN\\)\"; \"---\"; \"winget available: \"; \\(Get-Command winget -ErrorAction SilentlyContinue\\).Source)",
+      "PowerShell(winget install --id GitHub.cli --accept-source-agreements --accept-package-agreements --silent 2>&1)",
+      "PowerShell($f = Join-Path $env:APPDATA \"BackupManager\\\\logs\\\\backup_manager.log\"; \\(Get-Content $f\\).Count)",
+      "PowerShell($bm = \"C:\\\\Program Files \\(x86\\)\\\\Backup Manager\\\\BackupManager.exe\"; if \\(Test-Path $bm\\) { $proc = Get-Process | Where-Object { $_.Path -eq $bm }; if \\($proc\\) { foreach \\($p in $proc\\) { try { $tok = Get-WmiObject Win32_Process -Filter \"ProcessId=$\\($p.Id\\)\" | Select-Object Name, CommandLine ; \"PID $\\($p.Id\\): $\\($tok.Name\\)\" } catch {} } } else { \"BackupManager.exe not running\" } } else { \"Not installed\" })",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/test_commit_marker.py -v 2>&1)",
+      "PowerShell($logDir = \"$env:APPDATA\\\\BackupManager\"; Test-Path $logDir; Get-ChildItem -Path $logDir -Force -ErrorAction SilentlyContinue | Select-Object Name, Length, LastWriteTime)",
+      "PowerShell($log = \"$env:APPDATA\\\\BackupManager\\\\logs\\\\backup_manager.log\"; \\(Get-Content $log -Tail 200\\) -join \"`n\")",
+      "PowerShell(Get-Process -Id 14144)",
+      "PowerShell(Get-Process python -ErrorAction SilentlyContinue | Select-Object Id, StartTime, CPU, @{N='CmdLine';E={\\(Get-CimInstance Win32_Process -Filter \"ProcessId=$\\($_.Id\\)\"\\).CommandLine}} | Format-Table -AutoSize -Wrap)",
+      "PowerShell($boot = \\(Get-CimInstance Win32_OperatingSystem\\).LastBootUpTime; $now = Get-Date; \"Last boot: $boot\"; \"Current time: $now\"; \"Uptime: $\\($now - $boot\\)\")",
+      "PowerShell($evt = Get-WinEvent -FilterHashtable @{LogName='System'; ID=41} -MaxEvents 4 -ErrorAction SilentlyContinue; foreach \\($e in $evt\\) { \"=== $\\($e.TimeCreated\\) ===\"; $xml = [xml]$e.ToXml\\(\\); $xml.Event.EventData.Data | ForEach-Object { \"$\\($_.Name\\) = $\\($_.'#text'\\)\" }; \"\" })",
+      "PowerShell(powercfg /a)",
+      "PowerShell(powercfg /getactivescheme)",
+      "PowerShell(\"=== Sleep states supported ===\")",
+      "PowerShell(\"`n=== Active power scheme ===\")",
+      "PowerShell($exe = \"F:/Documents/loicata/BackupManager/Backup Manager v3/.venv/Scripts/python.exe\"; $proj = \"F:/Documents/loicata/BackupManager/Backup Manager v3\"; $job = Start-Job -ScriptBlock { param\\($exe, $proj\\) Set-Location $proj; & $exe -m pytest tests/unit/test_commit_marker.py --no-cov -q --tb=short 2>&1 } -ArgumentList $exe, $proj; $peakMB = 0; while \\($job.State -eq 'Running'\\) { $procs = Get-Process python -ErrorAction SilentlyContinue; if \\($procs\\) { $maxNow = \\($procs | Measure-Object -Property WorkingSet64 -Maximum\\).Maximum / 1MB; if \\($maxNow -gt $peakMB\\) { $peakMB = $maxNow } }; Start-Sleep -Milliseconds 200 }; Receive-Job $job; Remove-Job $job; \"`n=== Peak python WorkingSet: $\\([math]::Round\\($peakMB,1\\)\\) MB ===\")",
+      "mcp__scheduled-tasks__list_scheduled_tasks",
+      "PowerShell(Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4688; StartTime=\\(Get-Date\\).AddMinutes\\(-10\\)} -ErrorAction SilentlyContinue -MaxEvents 30 | Where-Object { $_.Message -match 'cmd\\\\.exe|conhost\\\\.exe|powershell\\\\.exe|wscript\\\\.exe|cscript\\\\.exe' } | Select-Object TimeCreated, @{N='Process';E={\\($_.Properties[5].Value\\)}}, @{N='ParentProcess';E={\\($_.Properties[13].Value\\)}} | Format-Table -AutoSize)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/test_collector_skipped_aggregation.py -v)",
+      "PowerShell(& .venv\\\\Scripts\\\\python.exe -m pytest tests/test_sftp_verify_parallel.py --no-cov -p no:cacheprovider 2>&1)",
+      "PowerShell($null = Get-Command -Syntax \\(Resolve-Path scripts\\\\monitor-stage5.ps1\\) 2>&1; $tokens = $null; $errors = $null; [System.Management.Automation.Language.Parser]::ParseFile\\(\\(Resolve-Path scripts\\\\monitor-stage5.ps1\\).Path, [ref]$tokens, [ref]$errors\\) | Out-Null; if \\($errors.Count -eq 0\\) { \"syntax OK\" } else { $errors | ForEach-Object { \"$\\($_.Message\\) at line $\\($_.Extent.StartLineNumber\\)\" } })",
+      "PowerShell($bm = Get-Process BackupManager -ErrorAction SilentlyContinue; if \\($bm\\) { \"BM RUNNING: PID $\\($bm.Id\\), WS $\\([math]::Round\\($bm.WS/1MB\\)\\)MB\"; \"ABORT: close BackupManager first\" } else { \"BM not running -- safe to build\" }; \"RAM: $\\([math]::Round\\(\\(Get-CimInstance Win32_OperatingSystem\\).FreePhysicalMemory/1MB, 1\\)\\) GB free of $\\([math]::Round\\(\\(Get-CimInstance Win32_OperatingSystem\\).TotalVisibleMemorySize/1MB, 1\\)\\) GB\")",
+      "PowerShell($tokens = $null; $errors = $null; [System.Management.Automation.Language.Parser]::ParseFile\\(\"F:\\\\Documents\\\\loicata\\\\BackupManager\\\\Backup Manager v3\\\\scripts\\\\monitor-stage5.ps1\", [ref]$tokens, [ref]$errors\\) | Out-Null; if \\($errors.Count -eq 0\\) { \"syntax OK\" } else { $errors })",
+      "PowerShell($logDir = Join-Path $env:APPDATA \"BackupManager\\\\logs\"; if \\(Test-Path $logDir\\) { Get-ChildItem $logDir | Sort-Object LastWriteTime -Descending | Select-Object Name, Length, LastWriteTime } else { Write-Output \"Log dir not found: $logDir\" })",
+      "PowerShell($logDir = Join-Path $env:APPDATA \"BackupManager\\\\logs\"; Write-Output \"Looking at: $logDir\"; Test-Path $logDir; if \\(Test-Path $logDir\\) { Get-ChildItem $logDir -Force | Format-Table Name, Length, LastWriteTime -AutoSize }; Write-Output \"---\"; Get-ChildItem \\(Join-Path $env:APPDATA \"BackupManager\"\\) -Force -ErrorAction SilentlyContinue | Format-Table Name, LastWriteTime -AutoSize)",
+      "PowerShell(Get-CimInstance Win32_PerfFormattedData_PerfProc_Thread -Filter \"IDProcess=9064\" -ErrorAction SilentlyContinue)",
+      "PowerShell($logDir = Join-Path $env:APPDATA \"BackupManager\\\\logs\"; $log = Join-Path $logDir \"backup_manager.log\"; Write-Output \"=== Lines NOT matching the noisy paramiko probe \\(10:43+\\) ===\"; Get-Content $log -Encoding utf8 | Select-String -Pattern \"2026-05-15\" | Where-Object { $_.Line -notmatch \"paramiko.transport\\(\\\\.sftp\\)?:\" -and $_.Line -notmatch \"Exec channel probe: output='ok'\" } | Select-Object -Last 80 | ForEach-Object { $_.Line })",
+      "PowerShell(powershell.exe -ExecutionPolicy Bypass -File \"F:\\\\Documents\\\\loicata\\\\BackupManager\\\\Backup Manager v3\\\\scripts\\\\run-bounded.ps1\" -LimitMB 2048 cmd.exe /c \"echo hello & ver\")",
+      "PowerShell(Get-ChildItem \"$env:LOCALAPPDATA\\\\BackupManager\\\\logs\" | Sort-Object LastWriteTime -Descending | Select-Object -First 15 | Format-Table Name, Length, LastWriteTime -AutoSize)",
+      "PowerShell($f = \"$env:APPDATA\\\\BackupManager\\\\logs\\\\backup_manager.log\"; \\(Get-Item $f\\).Length; \\(Get-Content $f | Measure-Object -Line\\).Lines)",
+      "PowerShell($log = \"C:\\\\Users\\\\loica\\\\AppData\\\\Roaming\\\\BackupManager\\\\logs\\\\backup_manager.log\"; $todayLines = Select-String -Path $log -Pattern \"2026-05-18\" -SimpleMatch; Write-Output \"Total lines matching 2026-05-18: $\\($todayLines.Count\\)\"; if \\($todayLines.Count -gt 0\\) { $todayLines | Select-Object -First 1 | ForEach-Object { Write-Output \"First: $\\($_.LineNumber\\)\" }; $todayLines | Select-Object -Last 1 | ForEach-Object { Write-Output \"Last: $\\($_.LineNumber\\)\" } })",
+      "PowerShell($log = \"C:\\\\Users\\\\loica\\\\AppData\\\\Roaming\\\\BackupManager\\\\logs\\\\backup_manager.log\"; \\(Get-Item $log\\).Length; \\(Get-Item $log\\).LastWriteTime)",
+      "PowerShell(Get-Process -Name \"BackupManager\",\"python\" -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Process -Name BackupManager -ErrorAction SilentlyContinue)",
+      "PowerShell($base = Join-Path $env:APPDATA 'BackupManager'; Write-Output \"=== LOGS ===\"; Get-ChildItem \\(Join-Path $base 'logs'\\) -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 20 Name, Length, LastWriteTime | Format-Table -AutoSize | Out-String; Write-Output \"=== PROFILES ===\"; Get-ChildItem \\(Join-Path $base 'profiles'\\) -ErrorAction SilentlyContinue | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize | Out-String)",
+      "PowerShell(& .\\\\.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/test_scheduler_inflight_recovery.py -v 2>&1)",
+      "PowerShell($out = \"C:\\\\Users\\\\loica\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\F--Documents-loicata-BackupManager-Backup-Manager-v3\\\\16e07f18-e0fc-4e2b-9859-fb8a6a404a11\\\\tasks\\\\b7p0uyx3p.output\"; Get-Content $out -Tail 15 | Out-String; Write-Output \"=== exe check ===\"; $exe = \"dist\\\\BackupManager\\\\BackupManager.exe\"; if \\(Test-Path $exe\\) { Get-Item $exe | Select-Object FullName, @{N='MB';E={[math]::Round\\($_.Length/1MB,1\\)}}, LastWriteTime | Format-List | Out-String } else { Write-Output \"EXE NOT FOUND at $exe\" })",
+      "PowerShell($d = Join-Path $env:APPDATA 'BackupManager'; Get-ChildItem $d -Recurse -File | Sort-Object LastWriteTime -Descending | Select-Object -First 60 FullName, Length, LastWriteTime | Format-Table -AutoSize | Out-String -Width 250)",
+      "PowerShell($log = Join-Path $env:APPDATA 'BackupManager\\\\logs\\\\backup_manager.log'; $log1 = Join-Path $env:APPDATA 'BackupManager\\\\logs\\\\backup_manager.log.1'; foreach \\($f in @\\($log, $log1\\)\\) { $c = Get-Content $f; $w = \\($c | Select-String -Pattern 'WARNING'\\).Count; $e = \\($c | Select-String -Pattern 'ERROR'\\).Count; $t = \\($c | Select-String -Pattern 'Traceback'\\).Count; Write-Output \"$f : lines=$\\($c.Count\\) WARNING=$w ERROR=$e Traceback=$t\" })",
+      "PowerShell($log = Join-Path $env:APPDATA 'BackupManager\\\\logs\\\\backup_manager.log'; $log1 = Join-Path $env:APPDATA 'BackupManager\\\\logs\\\\backup_manager.log.1'; Write-Output '=== current log [ERROR] ==='; Get-Content $log | Select-String -CaseSensitive -Pattern '\\\\[ERROR\\\\]' | Select-Object -First 10 | Out-String -Width 250; Write-Output '=== rotated log [ERROR] grouped ==='; Get-Content $log1 | Select-String -CaseSensitive -Pattern '\\\\[ERROR\\\\]' | ForEach-Object { \\($_.Line -replace '^\\\\S+ \\\\S+ ',''\\) -replace '\\\\d+','N' } | Group-Object | Sort-Object Count -Descending | Select-Object Count, Name | Format-Table -AutoSize -Wrap | Out-String -Width 230)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/guard_destructive.sh"
+          }
+        ]
+      }
     ]
   }
 }

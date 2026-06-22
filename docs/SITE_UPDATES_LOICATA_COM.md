@@ -67,7 +67,7 @@ Backup Manager is the only free, open-source Windows backup application with nat
 
 External drives (with hardware-serial detection), network shares, SFTP servers, and any S3-compatible storage (Wasabi, Backblaze B2, Scaleway, OVH, Cloudflare R2…). AES-256-GCM streaming encryption, up to two independent mirror copies, GFS retention, scheduling, and email reports.
 
-**Open source (GPL v3) — 1,429 automated tests, 85% coverage.**
+**Open source (GPL v3) — 2,781 automated tests, 87% coverage.**
 [Source code on GitHub](https://github.com/loicata/backup-manager)
 ```
 

@@ -49,7 +49,7 @@ Chaque concurrent échoue sur au moins un de ces critères :
 **Les 3 piliers du message :**
 1. **Immutable by design** — S3 Object Lock Compliance mode, the same WORM technology banks use. Not behavioral detection: physical impossibility of deletion.
 2. **Zero expertise required** — the 11-step wizard creates and locks the AWS bucket for you. Competitors require you to be a cloud engineer.
-3. **Free and open-source** — no subscription, no account, no telemetry. GPL v3, 1,429 tests, 85% coverage.
+3. **Free and open-source** — no subscription, no account, no telemetry. GPL v3, 2,781 tests, 87% coverage.
 
 **Phrase de comparaison à réutiliser partout :**
 > *Veeam's free edition can't back up to the cloud. Duplicati, restic and Kopia can't do Object Lock. Acronis charges a subscription. Backup Manager does immutable, ransomware-proof backups for free.*
